@@ -31,10 +31,21 @@ export interface Detection {
   confidence: number;
   bbox: { x: number; y: number; width: number; height: number };
   timestamp: number;
-  anatomicalLocation: string;
   frame_b64?: string;
   llmInsight?: string;
   status?: DetectionStatus;
+}
+
+export type SessionSource = "upload" | "live" | "library";
+
+/** A single analysis session — one video / live stream run. */
+export interface Session {
+  id: string;
+  name: string;
+  source: SessionSource;
+  startedAt: number;
+  detections: Detection[];
+  videoId?: string;
 }
 
 export type PipelineState =
@@ -50,7 +61,11 @@ interface AnalysisContextType {
   pipelineState: PipelineState;
   videoId: string | null;
 
-  // ── legacy UI compat props ──
+  // ── session state ──
+  sessions: Session[];
+  currentSessionId: string | null;
+
+  // ── legacy UI compat props (alias to current session detections) ──
   isPlaying: boolean;
   currentDetection: Detection | null;
   isListeningVoice: boolean;
@@ -61,8 +76,8 @@ interface AnalysisContextType {
   uploadOnly: (file: File, onProgress?: (pct: number) => void) => Promise<void>;
   uploadAndConnect: (file: File, onProgress?: (pct: number) => void) => Promise<void>;
   connectLive: (source: string) => Promise<void>;
-  prepareFromLibrary: (libraryId: string) => Promise<string>;
-  selectFromLibrary: (libraryId: string) => Promise<void>;
+  prepareFromLibrary: (libraryId: string, name?: string) => Promise<string>;
+  selectFromLibrary: (libraryId: string, name?: string) => Promise<void>;
   startMockAnalysis: () => void;
   /** Reset WS + pipeline state to IDLE while keeping videoId — allows re-running analysis on the same video. */
   resetPipeline: () => void;
@@ -76,6 +91,10 @@ interface AnalysisContextType {
   addDetection: (d: Detection) => void;
   removeDetection: (timestamp: number) => void;
   resetAnalysis: () => void;
+  /** Delete an entire session by id (from report history). */
+  removeSession: (sessionId: string) => void;
+  /** Clear all stored sessions. */
+  clearSessions: () => void;
 }
 
 const AnalysisContext = createContext<AnalysisContextType | undefined>(undefined);
@@ -84,6 +103,9 @@ const AnalysisContext = createContext<AnalysisContextType | undefined>(undefined
 
 const FRAME_W = 1920;
 const FRAME_H = 1080;
+
+const STORAGE_KEY = "gastroeye:sessions:v1";
+const MAX_SESSIONS = 10;
 
 function toDetection(d: DetectionData): Detection {
   const [x1, y1, x2, y2] = d.lesion.bbox;
@@ -97,9 +119,39 @@ function toDetection(d: DetectionData): Detection {
       height: ((y2 - y1) / FRAME_H) * 100,
     },
     timestamp: d.timestamp_ms / 1000,
-    anatomicalLocation: d.location,
     frame_b64: d.frame_b64,
   };
+}
+
+function genSessionId(): string {
+  return `s-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function loadSessions(): Session[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as Session[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Persist sessions; on quota error, drop oldest entries until it fits. */
+function saveSessions(sessions: Session[]): void {
+  if (typeof window === "undefined") return;
+  let payload = sessions.slice(0, MAX_SESSIONS);
+  while (payload.length > 0) {
+    try {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+      return;
+    } catch {
+      payload = payload.slice(0, -1);
+    }
+  }
+  try { window.localStorage.removeItem(STORAGE_KEY); } catch { /* ignore */ }
 }
 
 // ── Provider ──────────────────────────────────────────────────────────────────
@@ -111,7 +163,9 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
   const [currentDetection, setCurrentDetection] = useState<Detection | null>(null);
   const [isListeningVoice, setIsListeningVoice] = useState(false);
   const [llmInsight, setLlmInsight] = useState("");
-  const [detections, setDetections] = useState<Detection[]>([]);
+
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
 
   const wsRef = useRef<EndoscopyWsClient | null>(null);
   const llmInsightRef = useRef("");
@@ -121,12 +175,58 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
   const detectionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const llmTypingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // Hydrate from localStorage on mount.
+  useEffect(() => {
+    setSessions(loadSessions());
+  }, []);
+
+  // Persist sessions on every change.
+  useEffect(() => {
+    saveSessions(sessions);
+  }, [sessions]);
+
   const clearMockTimers = useCallback(() => {
     if (detectionTimerRef.current) { clearTimeout(detectionTimerRef.current); detectionTimerRef.current = null; }
     if (llmTypingTimerRef.current) { clearInterval(llmTypingTimerRef.current); llmTypingTimerRef.current = null; }
   }, []);
 
   const isPlaying = pipelineState === "PLAYING";
+
+  // Derived: current session detections (legacy alias for workspace/home pages).
+  const detections = useMemo<Detection[]>(() => {
+    if (!currentSessionId) return [];
+    return sessions.find((s) => s.id === currentSessionId)?.detections ?? [];
+  }, [sessions, currentSessionId]);
+
+  // ── Session helpers ──
+
+  const startNewSession = useCallback(
+    (opts: { name: string; source: SessionSource; videoId?: string }): string => {
+      const id = genSessionId();
+      const newSession: Session = {
+        id,
+        name: opts.name,
+        source: opts.source,
+        startedAt: Date.now(),
+        detections: [],
+        videoId: opts.videoId,
+      };
+      setSessions((prev) => [newSession, ...prev].slice(0, MAX_SESSIONS));
+      setCurrentSessionId(id);
+      return id;
+    },
+    [],
+  );
+
+  const updateCurrentSession = useCallback(
+    (updater: (s: Session) => Session) => {
+      setSessions((prev) => {
+        if (!currentSessionId) return prev;
+        return prev.map((s) => (s.id === currentSessionId ? updater(s) : s));
+      });
+    },
+    [currentSessionId],
+  );
 
   // ── WebSocket event handler ───────────────────────────────────────────────
 
@@ -148,7 +248,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       case "DETECTION_FOUND": {
         const det = toDetection(evt.data);
         setCurrentDetection(det);
-        setDetections((prev) => [det, ...prev]);
+        updateCurrentSession((sess) => ({ ...sess, detections: [det, ...sess.detections] }));
         break;
       }
       case "LLM_CHUNK":
@@ -160,30 +260,35 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
         setIsListeningVoice(false);
         setPipelineState("PAUSED_WAITING_INPUT");
         const insight = llmInsightRef.current;
-        setDetections(prev => prev.map((d, i) => i === 0 ? { ...d, llmInsight: insight || d.llmInsight, status: "analyzed" } : d));
+        updateCurrentSession((sess) => ({
+          ...sess,
+          detections: sess.detections.map((d, i) =>
+            i === 0 ? { ...d, llmInsight: insight || d.llmInsight, status: "analyzed" } : d,
+          ),
+        }));
         break;
       }
       case "VIDEO_FINISHED": {
         setPipelineState("EOS_SUMMARY");
         setIsConnected(false);
-        // Null out the client ref so stale ignoreDetection/confirmDetection calls
-        // don't override EOS_SUMMARY with PLAYING via the wsRef.current check.
         wsRef.current?.disconnect();
         wsRef.current = null;
         break;
       }
       case "ERROR":
-        console.error("[WS] server error:", evt.data.message);
         if (evt.data.message?.includes("Session not found")) {
+          console.warn("[WS] session expired (likely backend restart) — resetting state");
           wsRef.current?.disconnect();
           wsRef.current = null;
           setIsConnected(false);
           setPipelineState("IDLE");
           setVideoId(null);
+        } else {
+          console.error("[WS] server error:", evt.data.message);
         }
         break;
     }
-  }, []);
+  }, [updateCurrentSession]);
 
   // ── WebSocket connect ─────────────────────────────────────────────────────
 
@@ -206,7 +311,8 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
   ) => {
     const { video_id } = await uploadVideo(file, onProgress);
     setVideoId(video_id);
-  }, []);
+    startNewSession({ name: file.name, source: "upload", videoId: video_id });
+  }, [startNewSession]);
 
   const uploadAndConnect = useCallback(async (
     file: File,
@@ -214,28 +320,30 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
   ) => {
     const { video_id } = await uploadVideo(file, onProgress);
     setVideoId(video_id);
+    startNewSession({ name: file.name, source: "upload", videoId: video_id });
     connectWs(video_id);
-  }, [connectWs]);
+  }, [connectWs, startNewSession]);
 
   const connectLive = useCallback(async (source: string) => {
     const { video_id } = await connectLiveStream(source);
     setVideoId(video_id);
+    startNewSession({ name: source, source: "live", videoId: video_id });
     connectWs(video_id);
-  }, [connectWs]);
+  }, [connectWs, startNewSession]);
 
-  /** Registers the library video with the backend and stores video_id — no WS connection.
-   *  Returns the video_id so the caller can build a preview URL. */
-  const prepareFromLibrary = useCallback(async (libraryId: string): Promise<string> => {
+  const prepareFromLibrary = useCallback(async (libraryId: string, name?: string): Promise<string> => {
     const { video_id } = await selectLibraryVideo(libraryId);
     setVideoId(video_id);
+    startNewSession({ name: name ?? libraryId, source: "library", videoId: video_id });
     return video_id;
-  }, []);
+  }, [startNewSession]);
 
-  const selectFromLibrary = useCallback(async (libraryId: string) => {
+  const selectFromLibrary = useCallback(async (libraryId: string, name?: string) => {
     const { video_id } = await selectLibraryVideo(libraryId);
     setVideoId(video_id);
+    startNewSession({ name: name ?? libraryId, source: "library", videoId: video_id });
     connectWs(video_id);
-  }, [connectWs]);
+  }, [connectWs, startNewSession]);
 
   const startMockAnalysis = useCallback(() => {
     if (videoId) {
@@ -248,51 +356,56 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
     setIsListeningVoice(false);
     llmInsightRef.current = ""; setLlmInsight("");
 
+    if (!currentSessionId) {
+      startNewSession({ name: "Phiên mô phỏng", source: "upload" });
+    }
+
     detectionTimerRef.current = setTimeout(() => {
       const mock: Detection = {
         label: "Viêm loét",
         confidence: 0.92,
         bbox: { x: 29, y: 34, width: 23, height: 19 },
         timestamp: 25.7,
-        anatomicalLocation: "Dạ dày",
       };
       setPipelineState("PAUSED_WAITING_INPUT");
       setCurrentDetection(mock);
-      setDetections((prev) => [mock, ...prev]);
+      updateCurrentSession((sess) => ({ ...sess, detections: [mock, ...sess.detections] }));
     }, 5000);
-  }, [videoId, connectWs, clearMockTimers]);
+  }, [videoId, connectWs, clearMockTimers, currentSessionId, startNewSession, updateCurrentSession]);
 
   const ignoreDetection = useCallback(() => {
     if (wsRef.current) {
       wsRef.current.send({ action: "ACTION_IGNORE" });
-      setDetections(prev => prev.map((d, i) => i === 0 ? { ...d, status: "ignored" } : d));
+      updateCurrentSession((sess) => ({
+        ...sess,
+        detections: sess.detections.map((d, i) => (i === 0 ? { ...d, status: "ignored" } : d)),
+      }));
       setPipelineState("PLAYING");
       setCurrentDetection(null);
       llmInsightRef.current = ""; setLlmInsight("");
       setIsListeningVoice(false);
     } else {
-      // Pure mock mode (no real session). Never call startMockAnalysis when a videoId
-      // exists — that would reconnect to the backend and restart from frame 0.
-      setDetections(prev => prev.map((d, i) => i === 0 ? { ...d, status: "ignored" } : d));
+      updateCurrentSession((sess) => ({
+        ...sess,
+        detections: sess.detections.map((d, i) => (i === 0 ? { ...d, status: "ignored" } : d)),
+      }));
       setCurrentDetection(null);
       llmInsightRef.current = ""; setLlmInsight("");
       setIsListeningVoice(false);
       if (!videoId) startMockAnalysis();
     }
-  }, [startMockAnalysis, videoId]);
+  }, [startMockAnalysis, videoId, updateCurrentSession]);
 
   const explainMore = useCallback(() => {
     if (wsRef.current) {
-      if (explainInFlightRef.current) return; // block duplicate before server acks
+      if (explainInFlightRef.current) return;
       explainInFlightRef.current = true;
-      // Optimistic state update — voice pipelineStateRef check blocks any next call
       setPipelineState("PROCESSING_LLM");
       setIsListeningVoice(true);
       llmInsightRef.current = ""; setLlmInsight("");
       wsRef.current.send({ action: "ACTION_EXPLAIN" });
       return;
     }
-    // mock fallback
     clearMockTimers();
     setIsListeningVoice(true);
     llmInsightRef.current = ""; setLlmInsight("");
@@ -328,13 +441,16 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const confirmDetection = useCallback(() => {
-    if (!wsRef.current) return; // no-op if session is gone (e.g. already EOS)
+    if (!wsRef.current) return;
     wsRef.current.send({ action: "ACTION_CONFIRM" });
-    setDetections(prev => prev.map((d, i) => i === 0 ? { ...d, status: "confirmed" } : d));
+    updateCurrentSession((sess) => ({
+      ...sess,
+      detections: sess.detections.map((d, i) => (i === 0 ? { ...d, status: "confirmed" } : d)),
+    }));
     setPipelineState("PLAYING");
     setCurrentDetection(null);
     llmInsightRef.current = ""; setLlmInsight("");
-  }, []);
+  }, [updateCurrentSession]);
 
   const resumePlayback = useCallback(() => {
     wsRef.current?.send({ action: "ACTION_RESUME" });
@@ -351,12 +467,15 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
   }, [clearMockTimers]);
 
   const addDetection = useCallback((d: Detection) => {
-    setDetections((prev) => [d, ...prev]);
-  }, []);
+    updateCurrentSession((sess) => ({ ...sess, detections: [d, ...sess.detections] }));
+  }, [updateCurrentSession]);
 
   const removeDetection = useCallback((timestamp: number) => {
-    setDetections((prev) => prev.filter((d) => d.timestamp !== timestamp));
-  }, []);
+    updateCurrentSession((sess) => ({
+      ...sess,
+      detections: sess.detections.filter((d) => d.timestamp !== timestamp),
+    }));
+  }, [updateCurrentSession]);
 
   const resetPipeline = useCallback(() => {
     clearMockTimers();
@@ -368,13 +487,24 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
     setCurrentDetection(null);
     setIsListeningVoice(false);
     llmInsightRef.current = ""; setLlmInsight("");
-    setDetections([]);
+    // Sessions persist in history; we just unbind the "current" pointer.
+    setCurrentSessionId(null);
   }, [clearMockTimers]);
 
   const resetAnalysis = useCallback(() => {
     resetPipeline();
     setVideoId(null);
   }, [resetPipeline]);
+
+  const removeSession = useCallback((sessionId: string) => {
+    setSessions((prev) => prev.filter((s) => s.id !== sessionId));
+    setCurrentSessionId((cur) => (cur === sessionId ? null : cur));
+  }, []);
+
+  const clearSessions = useCallback(() => {
+    setSessions([]);
+    setCurrentSessionId(null);
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -388,6 +518,8 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       isConnected,
       pipelineState,
       videoId,
+      sessions,
+      currentSessionId,
       isPlaying,
       currentDetection,
       isListeningVoice,
@@ -409,13 +541,16 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       addDetection,
       removeDetection,
       resetAnalysis,
+      removeSession,
+      clearSessions,
     }),
     [
-      isConnected, pipelineState, videoId, isPlaying,
+      isConnected, pipelineState, videoId, sessions, currentSessionId, isPlaying,
       currentDetection, isListeningVoice, llmInsight, detections,
       uploadOnly, uploadAndConnect, connectLive, prepareFromLibrary, selectFromLibrary,
       startMockAnalysis, resetPipeline, ignoreDetection,
-      explainMore, followUpChat, confirmDetection, resumePlayback, setIsPlaying, addDetection, removeDetection, resetAnalysis,
+      explainMore, followUpChat, confirmDetection, resumePlayback, setIsPlaying,
+      addDetection, removeDetection, resetAnalysis, removeSession, clearSessions,
     ],
   );
 

@@ -110,8 +110,9 @@ export interface VideoSourceModalProps {
   /** Called when a session-only upload finishes — parent creates objectURL and calls uploadAndConnect */
   onUploadAndConnect: (file: File, onProgress: (pct: number) => void) => Promise<void>;
   /** Called when a library video is selected. localFile is provided when the user just uploaded
-   *  with "Lưu vào thư viện" checked — allows the workspace to show a local preview. */
-  onLibrarySelect: (libraryId: string, localFile?: File) => void;
+   *  with "Lưu vào thư viện" checked — allows the workspace to show a local preview.
+   *  filename is the library video's original filename (used as session name in history). */
+  onLibrarySelect: (libraryId: string, localFile?: File, filename?: string) => void;
 }
 
 export function VideoSourceModal({ open, onClose, onUploadAndConnect, onLibrarySelect }: VideoSourceModalProps) {
@@ -138,7 +139,7 @@ export function VideoSourceModal({ open, onClose, onUploadAndConnect, onLibraryS
         if (result.duplicate) {
           setDuplicateBanner(`"${result.filename}" đã có trong thư viện — phiên phân tích bắt đầu.`);
         }
-        onLibrarySelect(result.library_id, file);
+        onLibrarySelect(result.library_id, file, result.filename);
         onClose();
       } else {
         await onUploadAndConnect(file, setUploadProgress);
@@ -152,8 +153,8 @@ export function VideoSourceModal({ open, onClose, onUploadAndConnect, onLibraryS
     }
   }, [saveToLibrary, onUploadAndConnect, onLibrarySelect, onClose]);
 
-  const handleLibrarySelectInternal = useCallback((libraryId: string) => {
-    onLibrarySelect(libraryId);
+  const handleLibrarySelectInternal = useCallback((libraryId: string, filename: string) => {
+    onLibrarySelect(libraryId, undefined, filename);
     onClose();
   }, [onLibrarySelect, onClose]);
 

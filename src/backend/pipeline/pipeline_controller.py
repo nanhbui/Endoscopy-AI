@@ -42,11 +42,27 @@ else:
 
 CONFIDENCE_THRESHOLD = float(_os.environ.get("ENDOSCOPY_CONF", "0.5"))
 
+# Per-class confidence thresholds (Vietnamese cleaned labels). Cancer classes use a
+# higher bar (0.9) to suppress false-positive cancers; inflammation/ulcer classes
+# use a relaxed bar (0.65) since they are common findings. Inspired by GastroEye.
+CLASS_CONF_THRESHOLDS = {
+    "Viêm thực quản":      float(_os.environ.get("CONF_VIEM_TQ",   "0.60")),
+    "Viêm dạ dày HP":      float(_os.environ.get("CONF_VIEM_DD",   "0.60")),
+    # Cancer thresholds lowered from 0.90 → 0.75: 0.90 was filtering ~80% of true
+    # positives at the cost of catching every false positive. 0.75 still reserves
+    # a higher bar than inflammation but lets clinically actionable detections
+    # through. Doctor confirms/rejects in UI.
+    "Ung thư thực quản":   float(_os.environ.get("CONF_UT_TQ",     "0.75")),
+    "Ung thư dạ dày":      float(_os.environ.get("CONF_UT_DD",     "0.75")),
+    "Loét hoành tá tràng": float(_os.environ.get("CONF_LOET_HTT",  "0.60")),
+}
+
 # Maximum bbox area as fraction of viewport. Only used to drop EGREGIOUS whole-frame
 # detections (essentially "this whole image matches the disease"). Default 0.95 keeps
 # almost every model output — even relatively wide bboxes are useful information for
 # the doctor. Tighten via env var ENDOSCOPY_MAX_BBOX_RATIO if too noisy.
 MAX_BBOX_AREA_RATIO = float(_os.environ.get("ENDOSCOPY_MAX_BBOX_RATIO", "0.95"))
+
 
 # ── StrongSORT Re-ID weights ─────────────────────────────────────────────────
 _DEFAULT_REID = _REPO_ROOT / "sample_code/endocv_2024/osnet_x0_25_endocv_30.pt"
@@ -64,9 +80,12 @@ VIEWPORT_W = int(_os.environ.get("ENDOSCOPY_VIEWPORT_W", str(VIEWPORT_W)))
 # recordings without dropping legitimate early detections.
 SKIP_INITIAL_FRAMES = int(_os.environ.get("ENDOSCOPY_SKIP_FRAMES", "90"))
 
-# Process every Nth frame — 1 matches sample_code behaviour (best accuracy)
-# Set FRAME_STEP=3 in .env on CPU-only servers to avoid multi-hour waits
-FRAME_STEP = int(_os.environ.get("FRAME_STEP", "1"))
+# Process every Nth frame. Default 2 → halves YOLO compute, lets backend keep up
+# with 30 fps realtime playback (~50 ms inference fits in 66 ms budget).
+# - FRAME_STEP=1 best accuracy but only viable on fast GPU
+# - FRAME_STEP=2 default (recommended for realtime sync)
+# - FRAME_STEP=3 CPU-only / underpowered GPU
+FRAME_STEP = int(_os.environ.get("FRAME_STEP", "2"))
 
 
 # ── Pipeline States ──────────────────────────────────────────────────────────
@@ -81,7 +100,7 @@ class PipelineState(str, Enum):
 
 # ── Event builders ────────────────────────────────────────────────────────────
 
-def _detection_event(frame_index: int, timestamp_ms: int, location: str,
+def _detection_event(frame_index: int, timestamp_ms: int,
                      label: str, confidence: float, bbox: list[float],
                      frame_b64: Optional[str] = None) -> dict:
     return {
@@ -89,7 +108,6 @@ def _detection_event(frame_index: int, timestamp_ms: int, location: str,
         "data": {
             "frame_index": frame_index,
             "timestamp_ms": timestamp_ms,
-            "location": location,
             "lesion": {"label": label, "confidence": confidence, "bbox": bbox},
             "frame_b64": frame_b64,
         },
@@ -107,6 +125,7 @@ def _state_event(state: PipelineState) -> dict:
 def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                      result_q: "_mp.Queue[dict]", cmd_q: "_mp.Queue[str]",
                      reid_weights_str: str = "",
+                     class_conf_thresholds: dict = None,
                      gstshark_enabled: bool = False,
                      gstshark_plugin_path: str = "",
                      gstshark_log_dir: str = "/tmp/gst-shark",
@@ -138,6 +157,15 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
         return _ASCII_TO_DIACRITIC.get(s, s.replace("_", " "))
 
     # ── GstShark env injection (must happen before gi/Gst import) ────────────
+    # Defensive: when shark disabled, explicitly UNSET tracer env vars that may
+    # have leaked in from the parent shell (e.g. user previously ran with shark
+    # enabled and didn't restart their terminal). Otherwise GStreamer auto-loads
+    # the shark plugin and floods stdout with proctime/interlatency traces.
+    if not gstshark_enabled:
+        for _ev in ("GST_TRACERS", "GST_DEBUG", "GST_PLUGIN_PATH",
+                    "SHARK_FRAMERATE_LOGDIR", "SHARK_PROCTIME_LOGDIR",
+                    "SHARK_INTERLATENCY_LOGDIR"):
+            _os.environ.pop(_ev, None)
     if gstshark_enabled and gstshark_plugin_path:
         import pathlib
         log_dir = pathlib.Path(gstshark_log_dir)
@@ -170,14 +198,27 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
         model.fuse()  # fuse Conv+BN layers → faster inference
         model_names = model.names or {}
 
-        # Override numeric-prefixed class names with clean Vietnamese labels
+        # Override numeric-prefixed class names with clean Vietnamese labels.
+        # Safety: only apply when model has ≥ as many classes as labels.txt entries
+        # AND the model's class names follow the expected "{N}_..." prefix format.
+        # Prevents silent mis-mapping when a different model (e.g. specialized 3-class
+        # daday.pt) is loaded against the 5-class labels.txt — that would relabel
+        # "HP gastritis" as "Esophagitis" and other catastrophic mismatches.
         _labels_txt = _os.path.join(_os.path.dirname(model_path_str), "labels.txt")
         if _os.path.exists(_labels_txt):
             try:
                 with open(_labels_txt, encoding="utf-8") as _lf:
                     _label_lines = [l.strip() for l in _lf if l.strip()]
-                model_names = {i: _label_lines[i] for i in range(len(_label_lines)) if i in model_names}
-                print(f"[Worker] Labels from labels.txt: {model_names}", flush=True)
+                # Verify count compatibility — refuse if model has FEWER classes than
+                # labels.txt (silently truncating would map wrong indices).
+                if len(model_names) < len(_label_lines):
+                    print(f"[Worker] Labels MISMATCH: model has {len(model_names)} classes "
+                          f"({list(model_names.values())}) but labels.txt has "
+                          f"{len(_label_lines)} entries → keeping ORIGINAL model names "
+                          f"(rely on _clean_label diacritic map)", flush=True)
+                else:
+                    model_names = {i: _label_lines[i] for i in range(len(_label_lines)) if i in model_names}
+                    print(f"[Worker] Labels from labels.txt applied: {model_names}", flush=True)
             except Exception as _le:
                 print(f"[Worker] Labels load failed: {_le}", flush=True)
 
@@ -259,8 +300,15 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
     # No format caps on appsink — BGR caps cause back-propagation into decodebin and fail.
     # Format conversion to BGR is done in Python after pulling the sample.
     _SCALE = "videoscale ! video/x-raw,width=640 ! videoconvert"
-    # No drop=true: back-pressure ensures GStreamer doesn't race past the current frame.
-    _SINK_TAIL = "appsink name=sink sync=false max-buffers=4"
+    # sync=true paces appsink to wall-clock realtime (1 s wall = 1 s video).
+    # drop=true: when Python YOLO inference is slower than realtime, the appsink
+    #   discards the OLDEST queued buffer instead of letting Python accumulate
+    #   a backlog. Combined with sync=true (which prevents the decoder from
+    #   racing ahead — fixes the earlier "48 frames then EOS" bug), Python
+    #   always pulls a buffer close to current playback position. Lag bounded
+    #   to ~max-buffers × frame-time (≈66 ms @ 30 fps).
+    # max-buffers=2: tight latency budget.
+    _SINK_TAIL = "appsink name=sink sync=true max-buffers=2 drop=true"
 
     _src = video_path_str
     is_live = _src.startswith(("rtsp://", "rtp://", "rtmp://")) or _src.startswith("/dev/video")
@@ -367,14 +415,6 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
             for ig in _ignored
         )
 
-    def _infer_location(bbox: list, shape: tuple) -> str:
-        cy = (bbox[1] + bbox[3]) / 2 / shape[0]
-        if cy < 0.33:
-            return "Thân vị"
-        elif cy < 0.66:
-            return "Hang vị"
-        return "Môn vị"
-
     # ── Viewport detection ─────────────────────────────────────────────────
     # Cache: (x, y, w, h) of bright scope view; None until detected.
     _viewport_cache: list = [None]
@@ -449,16 +489,19 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
         return True
 
     def _crop_b64(frame: np.ndarray, bbox: list) -> Optional[str]:
+        """Build the detection thumbnail (frame_b64) — viewport crop with a
+           yellow reference rectangle drawn directly on the image (in the same
+           coordinate space as the crop). The frontend overlays its own styled
+           orange rectangle on top using viewport-relative coords from the
+           detection event so the two align."""
         try:
-            # Crop to scope viewport for the thumbnail; translate full-frame bbox
-            # coordinates into viewport-relative coords before drawing the rectangle.
             _vx, _vy, _vw, _vh = _detect_viewport(frame)
             out = frame[_vy:_vy+_vh, _vx:_vx+_vw].copy()
             x1, y1, x2, y2 = map(int, bbox)
             x1, y1 = x1 - _vx, y1 - _vy
             x2, y2 = x2 - _vx, y2 - _vy
             cv2.rectangle(out, (x1, y1), (x2, y2), (0, 255, 255), 3)
-            # Scale to max 800px wide to keep payload reasonable
+            # Scale to max 800 px wide to keep payload reasonable
             scale = min(1.0, 800 / max(out.shape[1], out.shape[0]))
             if scale < 1.0:
                 out = cv2.resize(out, (int(out.shape[1] * scale), int(out.shape[0] * scale)))
@@ -475,9 +518,23 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
     paused = False
     should_stop = False
 
+    # Realtime sync diagnostics: every 1 s of ACTIVE wall-time (excludes pauses),
+    # log how far behind/ahead the backend's video-time is. Pause durations are
+    # subtracted so the lag reflects RUNTIME drift, not cumulative think-time.
+    _start_wall: Optional[float] = None
+    _last_log_wall = 0.0
+    _pause_started_at: Optional[float] = None
+    _total_pause_secs = 0.0
+    # Last PTS (in ns) where pipeline was frozen for user review — used to
+    # SEEK back to this position on resume so the small in-flight buffer leak
+    # during PLAYING→PAUSED transition (~1 s) doesn't accumulate over multiple
+    # detections and drift backend ahead of frontend.
+    _last_detection_pts_ns: Optional[int] = None
+
     try:
         while True:
             # Drain command queue
+            _was_paused = paused
             while True:
                 try:
                     cmd = cmd_q.get_nowait()
@@ -495,6 +552,40 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                         data = _json.loads(parts[2])
                         _ignored.append({"fi": fi, "bbox": data["bbox"]})
                     paused = False
+
+            # Pause/resume the GStreamer pipeline alongside Python so the video
+            # clock doesn't keep ticking while the user is reviewing a detection.
+            # Without this, GStreamer pumps frames continuously through the pause
+            # (drop=true keeps the latest 2) and on resume Python pulls a buffer
+            # whose PTS jumped 20-30 s ahead — backend ends up far ahead of the
+            # frontend's <video> element which actually paused at the detection.
+            if _was_paused != paused:
+                if paused:
+                    gst_pipeline.set_state(Gst.State.PAUSED)
+                    _pause_started_at = time.monotonic()
+                else:
+                    # Seek back to the exact detection PTS before resuming so any
+                    # buffer that leaked through during the PLAYING→PAUSED state
+                    # transition is discarded. This keeps backend video-time
+                    # PERFECTLY aligned with the frontend's <video> element which
+                    # paused at the detection timestamp.
+                    if _last_detection_pts_ns is not None:
+                        try:
+                            # ACCURATE (not KEY_UNIT) for frame-precise seek —
+                            # KEY_UNIT snaps to nearest I-frame which can be ±1 s
+                            # away from detection PTS, drift accumulates per pause.
+                            gst_pipeline.seek_simple(
+                                Gst.Format.TIME,
+                                Gst.SeekFlags.FLUSH | Gst.SeekFlags.ACCURATE,
+                                _last_detection_pts_ns,
+                            )
+                        except Exception as _se:
+                            print(f"[Worker] Resume seek failed: {_se}", flush=True)
+                        _last_detection_pts_ns = None
+                    gst_pipeline.set_state(Gst.State.PLAYING)
+                    if _pause_started_at is not None:
+                        _total_pause_secs += time.monotonic() - _pause_started_at
+                        _pause_started_at = None
 
             if should_stop:
                 break  # graceful — let finally + EOS event run
@@ -551,6 +642,23 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
             timestamp_ms = int(pts / 1_000_000) if pts != Gst.CLOCK_TIME_NONE else int(frame_index * 1000 / 30)
             if frame_index == SKIP_INITIAL_FRAMES:
                 print(f"[Worker] Frame shape: {frame.shape} (h×w×c)", flush=True)
+
+            # Realtime sync log: every 1 s of active wall-time (excluding pauses)
+            # print video-time vs active-wall-time. This is the true RUNTIME drift —
+            # how well Python keeps up with realtime when actually processing.
+            _now_wall = time.monotonic()
+            if _start_wall is None:
+                _start_wall = _now_wall
+                _last_log_wall = _now_wall
+            elif _now_wall - _last_log_wall >= 1.0:
+                _wall_active = (_now_wall - _start_wall) - _total_pause_secs
+                _video_elapsed = timestamp_ms / 1000.0
+                _lag = _video_elapsed - _wall_active
+                _arrow = "→ahead " if _lag > 0.5 else ("←behind" if _lag < -0.5 else "≈sync")
+                print(f"[Sync] active_wall={_wall_active:6.2f}s  video={_video_elapsed:6.2f}s  "
+                      f"lag={_lag:+.2f}s  {_arrow}  (frame {frame_index}, paused_total={_total_pause_secs:.1f}s)",
+                      flush=True)
+                _last_log_wall = _now_wall
             if model is not None and frame_index % FRAME_STEP == 0 and _is_diagnostic_frame(frame, frame_index):
                 try:
                     # Run inference on FULL frame (matches sample-code behaviour
@@ -562,6 +670,10 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                     _vx, _vy, _vfw, _vfh = _detect_viewport(frame)
                     _fh, _fw = frame.shape[:2]
 
+                    # YOLO inference FIRST. Region classification is run LAZILY only
+                    # when YOLO has detection candidates — saves ~50 ms / frame on the
+                    # majority of frames (model finds nothing) and lets the pipeline
+                    # keep up with realtime playback on CPU/mid-tier GPU.
                     results = model(frame, conf=conf, verbose=False)
 
                     # ── Build raw detections array for tracker [x1,y1,x2,y2,conf,cls] ──
@@ -616,6 +728,13 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                         if _is_ignored(frame_index, [_x1, _y1, _x2, _y2]):
                             continue
 
+                        # Per-class confidence threshold (cancer 0.9, others 0.65)
+                        _cls_thresh = (class_conf_thresholds or {}).get(label)
+                        if _cls_thresh is not None and det_conf < _cls_thresh:
+                            print(f"[Worker] Below class threshold: {label} conf={det_conf:.2f} "
+                                  f"< {_cls_thresh:.2f}", flush=True)
+                            continue
+
                         # Suppress whole-frame detections (frame-level classification,
                         # e.g. diffuse HP gastritis). Compute area ratio against the
                         # SCOPE VIEWPORT, not the full frame — otherwise videos with an
@@ -629,6 +748,17 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                                   f"frame-level diagnosis, not a localized lesion", flush=True)
                             continue
 
+                        # Bbox padding: YOLO outputs tight boxes around the most
+                        # confident region but real lesions usually extend beyond.
+                        # Pad 25 % each side (capped to viewport bounds) so the
+                        # rectangle visually surrounds the affected mucosa, not just
+                        # the centre point.
+                        _pad_x = _bw_seg * 0.25
+                        _pad_y = _bh_seg * 0.25
+                        _x1 = max(float(_vx),         _x1 - _pad_x)
+                        _y1 = max(float(_vy),         _y1 - _pad_y)
+                        _x2 = min(float(_vx + _vfw),  _x2 + _pad_x)
+                        _y2 = min(float(_vy + _vfh),  _y2 + _pad_y)
                         xyxy = [_x1, _y1, _x2, _y2]
 
                         # bbox is already in full-frame coords; normalize to 1920×1080
@@ -648,18 +778,28 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                             continue
 
                         print(f"[Worker] Detection track_id={track_id} {label} conf={det_conf:.2f} bbox={[round(v,1) for v in xyxy]}", flush=True)
-                        location = _infer_location(xyxy, frame.shape)
-                        # _crop_b64 handles full-frame bbox internally (translates to
-                        # viewport coords for the thumbnail).
+                        # _crop_b64 returns the viewport-cropped thumbnail with a
+                        # yellow reference rectangle drawn on it (in viewport coords).
                         thumbnail_b64 = _crop_b64(frame, xyxy)
+                        # bbox_thumb_pct: bbox in VIEWPORT-relative percentages so the
+                        # frontend's styled overlay aligns with the yellow reference
+                        # rectangle on the cropped thumbnail. (lesion.bbox stays in
+                        # 1920×1080 virtual full-frame coords for the live video
+                        # overlay in workspace, which displays the full frame.)
+                        bbox_thumb_pct = {
+                            "x":     (max(_vx, xyxy[0]) - _vx) / _vfw * 100,
+                            "y":     (max(_vy, xyxy[1]) - _vy) / _vfh * 100,
+                            "width":  (min(_vx + _vfw, xyxy[2]) - max(_vx, xyxy[0])) / _vfw * 100,
+                            "height": (min(_vy + _vfh, xyxy[3]) - max(_vy, xyxy[1])) / _vfh * 100,
+                        }
                         det_data = {
                             "frame_index": frame_index,
                             "timestamp_ms": timestamp_ms,
-                            "location": location,
                             "lesion": {
                                 "label": label,
                                 "confidence": round(det_conf, 4),
-                                "bbox": xyxy_norm,  # normalized to 1920×1080
+                                "bbox": xyxy_norm,            # normalized to 1920×1080 (full frame)
+                                "bbox_thumb": bbox_thumb_pct, # viewport-relative %, for thumbnail overlay
                             },
                             "frame_b64": thumbnail_b64,
                         }
@@ -667,6 +807,13 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                         confirmed.append(det_data)
                         result_q.put({"event": "DETECTION_FOUND", "data": det_data})
                         paused = True
+                        # Freeze GStreamer immediately so the video clock stops
+                        # ticking forward while the user reviews the detection.
+                        gst_pipeline.set_state(Gst.State.PAUSED)
+                        _pause_started_at = time.monotonic()
+                        # Remember exact detection PTS — seek back to here on
+                        # resume to nullify any in-flight buffer drift.
+                        _last_detection_pts_ns = pts if pts != Gst.CLOCK_TIME_NONE else None
                         break  # one detection per frame (already the best by conf)
                 except Exception as exc:
                     print(f"[Worker] YOLO/tracker error frame {frame_index}: {exc}", flush=True)
@@ -737,12 +884,16 @@ class PipelineController:
 
         self._result_q = _mp_ctx.Queue()
         self._cmd_q = _mp_ctx.Queue()
+        # Re-read GstShark flag at spawn time so toggling .env + uvicorn auto-reload
+        # picks up the new value without requiring a full process restart.
+        _shark_now = _os.environ.get("ENABLE_GSTSHARK_PROFILING", "false").lower() == "true"
         self._proc = _mp_ctx.Process(
             target=_pipeline_worker,
             args=(str(video_path), str(self._model_path), CONFIDENCE_THRESHOLD,
                   self._result_q, self._cmd_q,
                   str(REID_WEIGHTS),
-                  _GSTSHARK_ENABLED, _GSTSHARK_PLUGIN_PATH,
+                  CLASS_CONF_THRESHOLDS,
+                  _shark_now, _GSTSHARK_PLUGIN_PATH,
                   _GSTSHARK_LOG_DIR, _GSTSHARK_TRACERS),
             daemon=True,
         )

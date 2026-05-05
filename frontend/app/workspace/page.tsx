@@ -60,12 +60,77 @@ const VideoContainer = styled(Box)(() => ({
   backgroundColor: '#0D1117',
 }));
 
+// ── Bbox styling — modelled after GastroEye `detection_bounding_box` ─────────
+//
+// Style props match the C++ Qt reference (sample_code/gastroeye/.../configs.yaml):
+//   shape: RoundedRect, rounded_rect_radius_ratio: 0.05
+//   line_width: 3, fill_alpha: 30/255 (≈12 %), boxed_description: true
+//
+// Color is severity-aware so doctors can scan for cancers at a glance:
+//   - Cancer (Ung thư …)  → red  #C44E52   (Seaborn deep[3])
+//   - Inflammation (Viêm) → orange #DD8452 (Seaborn deep[1])
+//   - Ulcer (Loét)        → green #55A868 (Seaborn deep[2])
+
+function bboxColorFor(label: string): string {
+  if (/ung thư|ung thu/i.test(label)) return '#C44E52';
+  if (/loét|loet/i.test(label))       return '#55A868';
+  return '#DD8452';  // viêm + default
+}
+
+function rgba(hex: string, alpha: number): string {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
 const BboxOverlay = styled(MotionBox)(() => ({
   position: 'absolute',
-  border: '2px solid #F59E0B',
-  backgroundColor: 'rgba(245,158,11,0.1)',
-  borderRadius: '4px',
+  borderStyle: 'solid',
+  borderWidth: '3px',
+  // border-color and bg set inline per detection (severity-based palette)
+  // 5 % rounded corners + 12 % fill alpha follow GastroEye defaults
+  borderRadius: 'min(8px, 0.5vw)',
+  pointerEvents: 'none',
 }));
+
+interface DetectionLabelChipProps {
+  label: string;
+  confidence: number;
+  timestamp: string;
+  color: string;     // class color (hex)
+  flipBelow: boolean; // place below bbox if too close to top
+}
+
+function DetectionLabelChip({ label, confidence, timestamp, color, flipBelow }: DetectionLabelChipProps) {
+  // Solid colored background with white text — matches GastroEye `boxed_description: true`
+  return (
+    <Box sx={{
+      position: 'absolute',
+      [flipBelow ? 'top' : 'bottom']: flipBelow ? 'calc(100% + 4px)' : 'calc(100% + 4px)',
+      left: 0,
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 0.85,
+      px: 1.25, py: 0.5,
+      borderRadius: '8px',
+      backgroundColor: color,
+      color: '#fff',
+      whiteSpace: 'nowrap',
+      boxShadow: '0 2px 8px rgba(0,0,0,0.35)',
+      fontSize: '0.74rem',
+      fontWeight: 700,
+      letterSpacing: '0.01em',
+    }}>
+      <Zap size={11} />
+      <span>{label}</span>
+      <Box sx={{ width: 1, height: 11, backgroundColor: 'rgba(255,255,255,0.45)' }} />
+      <span style={{ fontWeight: 600, opacity: 0.9 }}>{(confidence * 100).toFixed(0)}%</span>
+      <Box sx={{ width: 1, height: 11, backgroundColor: 'rgba(255,255,255,0.45)' }} />
+      <span style={{ fontWeight: 500, fontFamily: 'monospace', opacity: 0.85 }}>{timestamp}</span>
+    </Box>
+  );
+}
 
 // ── Status dot with pulse animation ─────────────────────────────────────────
 
@@ -391,7 +456,6 @@ function SessionReportModal({ detections, onClose, onRestart, onGoReport, isNavi
                 </Box>
 
                 <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1 }}>
-                  <Chip icon={<MapPin size={11} />} label={det.anatomicalLocation} size="small" sx={{ backgroundColor: 'rgba(0,96,100,0.08)', color: '#006064', fontWeight: 600, fontSize: '0.76rem', borderRadius: '7px', height: 26, '& .MuiChip-icon': { color: '#006064' } }} />
                   <Chip icon={<Clock size={11} />} label={fmtTimestamp(det.timestamp)} size="small" sx={{ backgroundColor: 'rgba(0,0,0,0.04)', color: 'text.secondary', fontSize: '0.76rem', fontFamily: 'monospace', borderRadius: '7px', height: 26, '& .MuiChip-icon': { color: 'text.disabled' } }} />
                   <Chip label={`${(det.confidence * 100).toFixed(0)}% tin cậy`} size="small" sx={{ backgroundColor: 'rgba(0,0,0,0.04)', color: 'text.secondary', fontWeight: 600, fontSize: '0.76rem', borderRadius: '7px', height: 26 }} />
                 </Box>
@@ -588,11 +652,7 @@ export default function Workspace() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [videoId]);
 
-  // Video plays independently — backend processes faster than realtime (sync=false).
   // Pause/resume the local video preview in sync with pipeline state.
-  // When a detection is found, seek the video to the detection timestamp so the
-  // doctor sees the exact frame the AI flagged (backend runs async and may be
-  // ahead or behind real-time, so we can't rely on the browser's current position).
   useEffect(() => {
     if (!videoRef.current || !videoUrl) return;
     if (pipelineState === 'PAUSED_WAITING_INPUT' || pipelineState === 'PROCESSING_LLM' || pipelineState === 'EOS_SUMMARY') {
@@ -601,6 +661,20 @@ export default function Workspace() {
       videoRef.current.play().catch(() => {});
     }
   }, [pipelineState, videoUrl]);
+
+  // SEEK video to detection timestamp on every new detection. This eliminates
+  // any backend↔frontend drift accumulated over multiple pause-resume cycles —
+  // user always sees the EXACT frame the AI flagged (matches the bbox & label),
+  // not the frame the browser happened to be playing when the WS event arrived.
+  useEffect(() => {
+    if (!videoRef.current || !videoUrl || !currentDetection) return;
+    if (pipelineState !== 'PAUSED_WAITING_INPUT') return;
+    const targetTime = currentDetection.timestamp;
+    // Only seek if drift > 100ms — avoids constant micro-seeks for in-sync events.
+    if (Math.abs(videoRef.current.currentTime - targetTime) > 0.1) {
+      videoRef.current.currentTime = targetTime;
+    }
+  }, [currentDetection, pipelineState, videoUrl]);
 
   // Refs so onIntent callback always reads current state without stale closure
   const pipelineStateRef = useRef(pipelineState);
@@ -667,9 +741,9 @@ export default function Workspace() {
     resetAnalysis();
   }, [stopListening, resetAnalysis]);
 
-  const handleLibrarySelectFromModal = useCallback(async (libraryId: string, localFile?: File) => {
+  const handleLibrarySelectFromModal = useCallback(async (libraryId: string, localFile?: File, filename?: string) => {
     try {
-      const vid = await prepareFromLibrary(libraryId);
+      const vid = await prepareFromLibrary(libraryId, filename ?? localFile?.name);
       if (localFile) {
         const localUrl = URL.createObjectURL(localFile);
         setVideoFile(localFile);
@@ -904,31 +978,47 @@ export default function Workspace() {
                     {pipelineState === 'PAUSED_WAITING_INPUT' && currentDetection && (
                       <DetectionBar detection={currentDetection} llmInsight={llmInsight} voiceSupported={voiceSupported} isVoiceListening={isVoiceListening} onExplain={explainMore} onIgnore={ignoreDetection} onConfirm={confirmDetection} />
                     )}
-                    {currentDetection && (
-                      <BboxOverlay
-                        initial={{ opacity: 0, scale: 0.94 }}
-                        animate={{ opacity: 1, scale: 1 }}
-                        transition={{ duration: 0.2 }}
-                        sx={{ zIndex: 2, left: `${currentDetection.bbox.x}%`, top: `${currentDetection.bbox.y}%`, width: `${currentDetection.bbox.width}%`, height: `${currentDetection.bbox.height}%` }}
-                      >
-                        <Box sx={{ position: 'absolute', top: currentDetection.bbox.y < 6 ? 4 : -36, left: 0, display: 'flex', alignItems: 'center', gap: 0.75, px: 1.25, py: 0.5, borderRadius: '8px', backdropFilter: 'blur(12px)', backgroundColor: 'rgba(0,0,0,0.55)', border: '1px solid rgba(245,158,11,0.4)', whiteSpace: 'nowrap' }}>
-                          <Zap size={11} color="#F59E0B" />
-                          <Typography sx={{ fontSize: '0.72rem', fontWeight: 700, color: '#FCD34D' }}>{currentDetection.label}</Typography>
-                          <Box sx={{ width: '1px', height: 12, backgroundColor: 'rgba(255,255,255,0.2)' }} />
-                          <Typography sx={{ fontSize: '0.72rem', fontWeight: 600, color: 'rgba(255,255,255,0.7)' }}>{(currentDetection.confidence * 100).toFixed(0)}%</Typography>
-                          <Box sx={{ width: '1px', height: 12, backgroundColor: 'rgba(255,255,255,0.2)' }} />
-                          <Typography sx={{ fontSize: '0.72rem', color: 'rgba(255,255,255,0.5)', fontFamily: 'monospace' }}>{fmtTimestamp(currentDetection.timestamp)}</Typography>
-                        </Box>
-                      </BboxOverlay>
-                    )}
+                    {currentDetection && (() => {
+                      const _c = bboxColorFor(currentDetection.label);
+                      const _flip = currentDetection.bbox.y < 6;
+                      return (
+                        <BboxOverlay
+                          initial={{ opacity: 0, scale: 0.94 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          transition={{ duration: 0.2 }}
+                          sx={{
+                            zIndex: 2,
+                            left: `${currentDetection.bbox.x}%`,
+                            top: `${currentDetection.bbox.y}%`,
+                            width: `${currentDetection.bbox.width}%`,
+                            height: `${currentDetection.bbox.height}%`,
+                            borderColor: _c,
+                            backgroundColor: rgba(_c, 0.12),
+                          }}
+                        >
+                          <DetectionLabelChip
+                            label={currentDetection.label}
+                            confidence={currentDetection.confidence}
+                            timestamp={fmtTimestamp(currentDetection.timestamp)}
+                            color={_c}
+                            flipBelow={_flip}
+                          />
+                        </BboxOverlay>
+                      );
+                    })()}
                   </VideoContainer>
                 ) : videoUrl ? (
-                  /* Real video player with detection overlay */
+                  // Real video player with detection overlay — controls disabled so the user
+                  // cannot pause/seek midway. Backend pipeline is authoritative: video plays
+                  // only when pipelineState=PLAYING and pauses on AI detection. User-driven
+                  // pause would desync frontend video time from backend detection timeline.
                   <VideoContainer>
                     <video
                       ref={videoRef}
                       src={videoUrl}
-                      controls
+                      controlsList="nodownload nofullscreen noremoteplayback"
+                      disablePictureInPicture
+                      onContextMenu={(e) => e.preventDefault()}
                       onError={() => setVideoUnsupported(true)}
                       onCanPlay={() => setVideoUnsupported(false)}
                       style={{
@@ -939,6 +1029,7 @@ export default function Workspace() {
                         objectFit: 'contain',
                         zIndex: 1,
                         opacity: videoUnsupported ? 0 : 1,
+                        pointerEvents: 'none',  // block click-to-pause + scrub
                       }}
                     />
                     {videoUnsupported && (
@@ -962,47 +1053,34 @@ export default function Workspace() {
                     )}
 
                     {/* AI bbox overlay on top of video */}
-                    {currentDetection && (
-                      <BboxOverlay
-                        initial={{ opacity: 0, scale: 0.94 }}
-                        animate={{ opacity: 1, scale: 1 }}
-                        transition={{ duration: 0.2 }}
-                        sx={{
-                          zIndex: 2,
-                          left: `${currentDetection.bbox.x}%`,
-                          top: `${currentDetection.bbox.y}%`,
-                          width: `${currentDetection.bbox.width}%`,
-                          height: `${currentDetection.bbox.height}%`,
-                        }}
-                      >
-                        <Box
+                    {currentDetection && (() => {
+                      const _c = bboxColorFor(currentDetection.label);
+                      const _flip = currentDetection.bbox.y < 6;
+                      return (
+                        <BboxOverlay
+                          initial={{ opacity: 0, scale: 0.94 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          transition={{ duration: 0.2 }}
                           sx={{
-                            position: 'absolute',
-                            top: currentDetection.bbox.y < 6 ? 4 : -36,
-                            left: 0,
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: 0.75,
-                            px: 1.25,
-                            py: 0.5,
-                            borderRadius: '8px',
-                            backdropFilter: 'blur(12px)',
-                            backgroundColor: 'rgba(0,0,0,0.55)',
-                            border: '1px solid rgba(245,158,11,0.4)',
-                            whiteSpace: 'nowrap',
+                            zIndex: 2,
+                            left: `${currentDetection.bbox.x}%`,
+                            top: `${currentDetection.bbox.y}%`,
+                            width: `${currentDetection.bbox.width}%`,
+                            height: `${currentDetection.bbox.height}%`,
+                            borderColor: _c,
+                            backgroundColor: rgba(_c, 0.12),
                           }}
                         >
-                          <Zap size={11} color="#F59E0B" />
-                          <Typography sx={{ fontSize: '0.72rem', fontWeight: 700, color: '#FCD34D' }}>
-                            {currentDetection.label}
-                          </Typography>
-                          <Box sx={{ width: '1px', height: 12, backgroundColor: 'rgba(255,255,255,0.2)' }} />
-                          <Typography sx={{ fontSize: '0.72rem', fontWeight: 600, color: 'rgba(255,255,255,0.7)' }}>
-                            {(currentDetection.confidence * 100).toFixed(0)}%
-                          </Typography>
-                        </Box>
-                      </BboxOverlay>
-                    )}
+                          <DetectionLabelChip
+                            label={currentDetection.label}
+                            confidence={currentDetection.confidence}
+                            timestamp={fmtTimestamp(currentDetection.timestamp)}
+                            color={_c}
+                            flipBelow={_flip}
+                          />
+                        </BboxOverlay>
+                      );
+                    })()}
                   </VideoContainer>
                 ) : (
                   <VideoPickerTriggerZone onClick={() => setIsSourceModalOpen(true)} />
@@ -1153,6 +1231,125 @@ export default function Workspace() {
                   </Box>
                 )}
               </Box>
+
+              {/* ── AI Detection Notification ─────────────────────────────────
+                  Pops up below the control panel when the pipeline pauses on a
+                  detection. Mirrors the on-video DetectionBar but gives a calm
+                  side-panel surface so the doctor can read details without the
+                  bbox overlay obstruction. */}
+              {currentDetection && (pipelineState === 'PAUSED_WAITING_INPUT' || pipelineState === 'PROCESSING_LLM') && (
+                <MotionBox
+                  initial={{ opacity: 0, y: -8, scale: 0.98 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  transition={{ duration: 0.25, ease: 'easeOut' }}
+                  sx={{
+                    backgroundColor: '#FFFBEB',
+                    borderRadius: '16px',
+                    border: '1px solid rgba(245,158,11,0.4)',
+                    boxShadow: '0 4px 16px rgba(245,158,11,0.18)',
+                    overflow: 'hidden',
+                    position: 'relative',
+                    '&::before': {
+                      content: '""',
+                      position: 'absolute',
+                      top: 0, left: 0, right: 0,
+                      height: 3,
+                      background: 'linear-gradient(90deg, #F59E0B, #EF4444, #F59E0B)',
+                      backgroundSize: '200% 100%',
+                      animation: 'shimmer 2s linear infinite',
+                      '@keyframes shimmer': {
+                        '0%':   { backgroundPosition: '0% 0%' },
+                        '100%': { backgroundPosition: '200% 0%' },
+                      },
+                    },
+                  }}
+                >
+                  {/* Header */}
+                  <Box sx={{ px: 2.5, py: 1.75, display: 'flex', alignItems: 'center', gap: 1.5 }}>
+                    <Box sx={{
+                      width: 38, height: 38, borderRadius: '10px',
+                      backgroundColor: 'rgba(245,158,11,0.15)',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      color: '#D97706', flexShrink: 0,
+                      animation: 'pulseRing 1.6s ease-in-out infinite',
+                      '@keyframes pulseRing': {
+                        '0%, 100%': { boxShadow: '0 0 0 0 rgba(245,158,11,0.45)' },
+                        '50%':      { boxShadow: '0 0 0 8px rgba(245,158,11,0)' },
+                      },
+                    }}>
+                      <AlertTriangle size={20} />
+                    </Box>
+                    <Box sx={{ flex: 1, minWidth: 0 }}>
+                      <Typography variant="caption" sx={{ fontWeight: 700, color: '#92400E', letterSpacing: '0.04em', textTransform: 'uppercase', fontSize: '0.68rem', display: 'block' }}>
+                        AI phát hiện bất thường
+                      </Typography>
+                      <Typography sx={{ fontSize: '0.95rem', fontWeight: 700, color: '#7C2D12', mt: 0.2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {currentDetection.label}
+                      </Typography>
+                    </Box>
+                  </Box>
+
+                  {/* Meta info row */}
+                  <Box sx={{ px: 2.5, pb: 1.5, display: 'flex', alignItems: 'center', gap: 1.5, flexWrap: 'wrap' }}>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, color: '#92400E' }}>
+                      <Zap size={12} />
+                      <Typography sx={{ fontSize: '0.78rem', fontWeight: 700 }}>
+                        {(currentDetection.confidence * 100).toFixed(0)}%
+                      </Typography>
+                    </Box>
+                    <Box sx={{ width: 1, height: 12, backgroundColor: 'rgba(146,64,14,0.25)' }} />
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, color: '#92400E' }}>
+                      <Clock size={12} />
+                      <Typography sx={{ fontSize: '0.78rem', fontWeight: 600, fontFamily: 'monospace' }}>
+                        {fmtTimestamp(currentDetection.timestamp)}
+                      </Typography>
+                    </Box>
+                  </Box>
+
+                  {/* Action buttons */}
+                  <Box sx={{ px: 2.5, pb: 2, display: 'flex', gap: 1 }}>
+                    {llmInsight ? (
+                      <>
+                        <MuiButton
+                          variant="contained" fullWidth size="small" onClick={confirmDetection}
+                          sx={{ borderRadius: '8px', backgroundColor: '#16A34A', color: '#fff', fontWeight: 700, fontSize: '0.78rem', py: 0.85, boxShadow: '0 3px 10px rgba(22,163,74,0.3)', '&:hover': { backgroundColor: '#15803D' } }}
+                        >
+                          Xác nhận
+                        </MuiButton>
+                        <MuiButton
+                          variant="outlined" fullWidth size="small" onClick={ignoreDetection}
+                          sx={{ borderRadius: '8px', borderColor: 'rgba(146,64,14,0.3)', color: '#92400E', fontWeight: 700, fontSize: '0.78rem', py: 0.85, '&:hover': { backgroundColor: 'rgba(245,158,11,0.08)', borderColor: '#D97706' } }}
+                        >
+                          Bỏ qua
+                        </MuiButton>
+                      </>
+                    ) : pipelineState === 'PROCESSING_LLM' ? (
+                      <Box sx={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1, py: 0.85, color: '#0277BD' }}>
+                        <CircularProgress size={14} thickness={5} sx={{ color: '#0277BD' }} />
+                        <Typography sx={{ fontSize: '0.78rem', fontWeight: 600 }}>
+                          LLM đang phân tích…
+                        </Typography>
+                      </Box>
+                    ) : (
+                      <>
+                        <MuiButton
+                          variant="contained" fullWidth size="small" onClick={explainMore}
+                          startIcon={<Sparkles size={14} />}
+                          sx={{ borderRadius: '8px', backgroundColor: '#D97706', color: '#fff', fontWeight: 700, fontSize: '0.78rem', py: 0.85, boxShadow: '0 3px 10px rgba(217,119,6,0.3)', '&:hover': { backgroundColor: '#B45309' } }}
+                        >
+                          Giải thích
+                        </MuiButton>
+                        <MuiButton
+                          variant="outlined" fullWidth size="small" onClick={ignoreDetection}
+                          sx={{ borderRadius: '8px', borderColor: 'rgba(146,64,14,0.3)', color: '#92400E', fontWeight: 700, fontSize: '0.78rem', py: 0.85, '&:hover': { backgroundColor: 'rgba(245,158,11,0.08)', borderColor: '#D97706' } }}
+                        >
+                          Bỏ qua
+                        </MuiButton>
+                      </>
+                    )}
+                  </Box>
+                </MotionBox>
+              )}
 
               {/* LLM Smart Log */}
               <Box

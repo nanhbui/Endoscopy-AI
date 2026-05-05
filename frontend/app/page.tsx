@@ -234,8 +234,8 @@ export default function Home() {
           </Box>
           <Box sx={{ backgroundColor: 'background.paper', borderRadius: '16px', border: '1px solid #E2EAE8', boxShadow: '0 2px 12px rgba(13,27,42,0.06)', overflow: 'hidden' }}>
             {/* Table header */}
-            <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1.5fr 2fr 1fr', px: 3, py: 1.5, backgroundColor: '#F8FAFB', borderBottom: '1px solid #E2EAE8' }}>
-              {['Thời điểm', 'Vị trí giải phẫu', 'Chẩn đoán AI', 'Độ tin cậy'].map((h) => (
+            <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 2fr 1fr', px: 3, py: 1.5, backgroundColor: '#F8FAFB', borderBottom: '1px solid #E2EAE8' }}>
+              {['Thời điểm', 'Chẩn đoán AI', 'Độ tin cậy'].map((h) => (
                 <Typography key={h} variant="caption" sx={{ fontWeight: 700, color: 'text.secondary', letterSpacing: '0.04em', textTransform: 'uppercase' }}>{h}</Typography>
               ))}
             </Box>
@@ -249,9 +249,8 @@ export default function Home() {
             ) : (
               <>
                 {detections.map((det, idx) => (
-                  <Box key={`row-${idx}`} sx={{ display: 'grid', gridTemplateColumns: '1fr 1.5fr 2fr 1fr', px: 3, py: 1.75, alignItems: 'center', borderBottom: idx < detections.length - 1 ? '1px solid #F0F4F3' : 'none', '&:hover': { backgroundColor: '#F8FAFB' } }}>
+                  <Box key={`row-${idx}`} sx={{ display: 'grid', gridTemplateColumns: '1fr 2fr 1fr', px: 3, py: 1.75, alignItems: 'center', borderBottom: idx < detections.length - 1 ? '1px solid #F0F4F3' : 'none', '&:hover': { backgroundColor: '#F8FAFB' } }}>
                     <Typography variant="body2" sx={{ fontFamily: 'monospace', color: 'text.secondary', fontWeight: 500 }}>{det.timestamp.toFixed(1)}s</Typography>
-                    <Typography variant="body2" color="textSecondary">{det.anatomicalLocation}</Typography>
                     <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                       <ScanSearch size={14} color="#006064" />
                       <Typography variant="body2" sx={{ fontWeight: 600, color: 'text.primary' }}>{det.label}</Typography>

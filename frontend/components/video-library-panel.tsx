@@ -41,7 +41,7 @@ function formatDate(iso: string): string {
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 interface VideoLibraryPanelProps {
-  onSelect: (libraryId: string) => void;
+  onSelect: (libraryId: string, filename: string) => void;
   showUploadButton?: boolean;
   sx?: BoxProps['sx'];
 }
@@ -280,7 +280,7 @@ export function VideoLibraryPanel({ onSelect, showUploadButton = true, sx }: Vid
                 ) : (
                   <Box sx={{ display: 'flex', gap: 0.75, flexShrink: 0 }}>
                     <MuiButton size="small" variant="contained"
-                      onClick={() => onSelect(video.library_id)}
+                      onClick={() => onSelect(video.library_id, video.filename)}
                       sx={{ borderRadius: '7px', backgroundColor: '#006064', fontWeight: 700, fontSize: '0.72rem', py: 0.4, px: 1.25, whiteSpace: 'nowrap', '&:hover': { backgroundColor: '#004D52' } }}>
                       Chọn
                     </MuiButton>

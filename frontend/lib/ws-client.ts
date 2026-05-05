@@ -13,8 +13,15 @@ export const WS_BASE  = API_BASE.replace(/^http/, "ws");
 export interface DetectionData {
   frame_index: number;
   timestamp_ms: number;
-  location: string;
-  lesion: { label: string; confidence: number; bbox: [number, number, number, number] };
+  lesion: {
+    label: string;
+    confidence: number;
+    bbox: [number, number, number, number];
+    /** bbox in VIEWPORT-relative percentages (0-100), aligned with the yellow
+     *  reference rectangle that backend draws on frame_b64. Used for the styled
+     *  overlay on the cropped thumbnail. */
+    bbox_thumb?: { x: number; y: number; width: number; height: number };
+  };
   frame_b64?: string;
 }
 
