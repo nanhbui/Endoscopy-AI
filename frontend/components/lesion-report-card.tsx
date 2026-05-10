@@ -18,9 +18,8 @@
  */
 
 import { useState } from 'react';
-import { ChevronDown, ChevronRight } from 'lucide-react';
+import { ChevronDown, ChevronRight, Check } from 'lucide-react';
 import Box from '@mui/material/Box';
-import Chip from '@mui/material/Chip';
 import LinearProgress from '@mui/material/LinearProgress';
 import Typography from '@mui/material/Typography';
 import type { LesionReport } from '@/lib/ws-client';
@@ -94,36 +93,53 @@ export function LesionReportCard({ report }: LesionReportCardProps) {
   const sev = SEVERITY_STYLE[report.conclusion.severity];
 
   return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.25 }}>
-      {/* ── Header strip: severity + confidence ──────────────────────────── */}
-      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
-        <Chip
-          label={`${sev.emoji} ${report.conclusion.severity.toUpperCase()}`}
-          size="small"
+    <Box sx={{
+      display: 'flex', flexDirection: 'column', gap: 1.25,
+      borderRadius: '12px', border: '1px solid #E2EAE8',
+      backgroundColor: '#FFFFFF', overflow: 'hidden',
+      boxShadow: '0 1px 4px rgba(13,27,42,0.04)',
+    }}>
+      {/* ── Hero: severity stripe + primary_dx + AI confidence ───────────── */}
+      <Box sx={{
+        position: 'relative',
+        px: 2, py: 1.75,
+        backgroundColor: sev.bg,
+        borderBottom: `1px solid ${sev.color}22`,
+      }}>
+        {/* left accent stripe — instantly readable severity */}
+        <Box sx={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 4, backgroundColor: sev.color }} />
+
+        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 0.5 }}>
+          <Typography sx={{
+            fontSize: '0.65rem', fontWeight: 700, letterSpacing: '0.08em',
+            textTransform: 'uppercase', color: sev.color,
+          }}>
+            {sev.emoji} Mức độ {report.conclusion.severity}
+          </Typography>
+          <Typography sx={{ fontSize: '0.68rem', fontWeight: 600, color: 'text.secondary' }}>
+            AI {report.conclusion.ai_confidence}%
+          </Typography>
+        </Box>
+
+        <Typography sx={{
+          fontSize: '1rem', fontWeight: 700, color: 'text.primary',
+          lineHeight: 1.35, mb: 0.75,
+        }}>
+          {report.conclusion.primary_dx}
+        </Typography>
+
+        <LinearProgress
+          variant="determinate"
+          value={report.conclusion.ai_confidence}
           sx={{
-            fontWeight: 700, fontSize: '0.72rem', height: 22,
-            color: sev.color, backgroundColor: sev.bg, border: `1px solid ${sev.color}33`,
+            height: 3, borderRadius: 2, backgroundColor: 'rgba(0,96,100,0.12)',
+            '& .MuiLinearProgress-bar': { backgroundColor: sev.color, borderRadius: 2 },
           }}
         />
-        <Box sx={{ flex: 1, minWidth: 120 }}>
-          <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 0.25 }}>
-            <Typography sx={{ fontSize: '0.68rem', fontWeight: 600, color: 'text.secondary' }}>
-              AI confidence
-            </Typography>
-            <Typography sx={{ fontSize: '0.68rem', fontWeight: 700, color: '#006064' }}>
-              {report.conclusion.ai_confidence}%
-            </Typography>
-          </Box>
-          <LinearProgress
-            variant="determinate"
-            value={report.conclusion.ai_confidence}
-            sx={{
-              height: 4, borderRadius: 2, backgroundColor: 'rgba(0,96,100,0.1)',
-              '& .MuiLinearProgress-bar': { backgroundColor: '#006064', borderRadius: 2 },
-            }}
-          />
-        </Box>
       </Box>
+
+      {/* Body wraps the 3 sections — padding outside the hero */}
+      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, px: 1.5, pb: 1.5 }}>
 
       {/* ── Section 1: Kỹ thuật ──────────────────────────────────────────── */}
       <Section title="Kỹ thuật" icon="🔬" defaultOpen={false}>
@@ -147,19 +163,9 @@ export function LesionReportCard({ report }: LesionReportCardProps) {
         </Box>
       </Section>
 
-      {/* ── Section 3: Kết luận ──────────────────────────────────────────── */}
-      <Section title="Kết luận" icon="🩺">
+      {/* ── Section 3: Kết luận (primary_dx moved to hero) ───────────────── */}
+      <Section title="Chẩn đoán phân biệt & khuyến nghị" icon="🩺">
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.25 }}>
-          {/* Primary diagnosis */}
-          <Box>
-            <Typography sx={{ fontSize: '0.7rem', fontWeight: 600, color: 'text.secondary', mb: 0.25 }}>
-              Chẩn đoán chính
-            </Typography>
-            <Typography sx={{ fontSize: '0.85rem', fontWeight: 700, color: 'text.primary', lineHeight: 1.4 }}>
-              {report.conclusion.primary_dx}
-            </Typography>
-          </Box>
-
           {/* Differential diagnoses with probability bars */}
           <Box>
             <Typography sx={{ fontSize: '0.7rem', fontWeight: 600, color: 'text.secondary', mb: 0.5 }}>
@@ -189,15 +195,26 @@ export function LesionReportCard({ report }: LesionReportCardProps) {
             </Box>
           </Box>
 
-          {/* Recommendations */}
+          {/* Recommendations — list with check icons for scannability */}
           <Box>
-            <Typography sx={{ fontSize: '0.7rem', fontWeight: 600, color: 'text.secondary', mb: 0.5 }}>
+            <Typography sx={{ fontSize: '0.7rem', fontWeight: 600, color: 'text.secondary', mb: 0.6 }}>
               Khuyến nghị
             </Typography>
-            <Box component="ul" sx={{ m: 0, pl: 2.5, display: 'flex', flexDirection: 'column', gap: 0.4 }}>
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
               {report.conclusion.recommendations.map((r, i) => (
-                <Box component="li" key={i} sx={{ fontSize: '0.78rem', color: 'text.primary', lineHeight: 1.5 }}>
-                  {r}
+                <Box key={i} sx={{ display: 'flex', alignItems: 'flex-start', gap: 0.75 }}>
+                  <Box sx={{
+                    flexShrink: 0, mt: 0.25,
+                    width: 16, height: 16, borderRadius: '50%',
+                    backgroundColor: 'rgba(0,96,100,0.1)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    color: '#006064',
+                  }}>
+                    <Check size={10} strokeWidth={3} />
+                  </Box>
+                  <Typography sx={{ fontSize: '0.78rem', color: 'text.primary', lineHeight: 1.5, flex: 1 }}>
+                    {r}
+                  </Typography>
                 </Box>
               ))}
             </Box>
@@ -205,8 +222,12 @@ export function LesionReportCard({ report }: LesionReportCardProps) {
         </Box>
       </Section>
 
+      </Box>{/* /body wrap */}
+
       {/* ── Disclaimer footer (decision 4C — banner+footer) ──────────────── */}
-      <DisclaimerFooter />
+      <Box sx={{ px: 1.5, pb: 1 }}>
+        <DisclaimerFooter />
+      </Box>
     </Box>
   );
 }

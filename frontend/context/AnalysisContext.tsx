@@ -327,6 +327,13 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
         const md = lesionReportToMarkdown(report);
         llmInsightRef.current = md;
         setLlmInsight(md);
+        // Also patch the in-view detection so the workspace's center panels
+        // (which read currentDetection, not the session list) re-render with
+        // the new structured report — without this they fall through to the
+        // markdown branch and the Card never appears.
+        setCurrentDetection((prev) =>
+          prev ? { ...prev, lesionReport: report, llmInsight: md, status: "analyzed" } : prev,
+        );
         updateCurrentSession((sess) => ({
           ...sess,
           detections: sess.detections.map((d, i) =>
