@@ -186,7 +186,7 @@ Total: 2386 insertions, 14 deletions trong commit Phase A đầu tiên (`1fdc56c
 | A4 LesionReportCard | 8h | ✅ done | Hero header polish lần 2 sau feedback "design xấu" |
 | A5 Disclaimer | 3h | ✅ done | Banner + Footer 2 component |
 | A6 Replace ReactMarkdown | 3h | ✅ done | Card primary, markdown legacy fallback |
-| A7 Test 15-20 ca + tune | 4h | 🔄 in progress | Đã có 8 ca, prompt tune lần 1 — cần thêm ~10 ca verify |
+| A7 Test 15-20 ca + tune | 4h | ✅ done | 20 ca tổng, prompt tune + backend post-process (consistency + dedup) — xem phụ lục A7 |
 
 ---
 
@@ -225,3 +225,50 @@ Total: 2386 insertions, 14 deletions trong commit Phase A đầu tiên (`1fdc56c
    pattern lỗi đã được fix chưa.
 2. Nếu severity vẫn under-rate, thử few-shot prompt.
 3. Hoàn tất A7 → đóng Phase A → kick Phase B.
+
+---
+
+## Phụ lục A7 — Verification kết quả (cuối ngày 11/05)
+
+### Dataset
+20 reports thật từ 5 sessions:
+- Pre-tune (commit `1fdc56c`): 8 reports / 3 sessions
+- Post-tune (commit `39c6dc2`): 9 reports / 2 sessions
+- Post-fix (commit chưa push trong báo cáo này): 3 reports / 1 session
+
+### Metric comparison
+
+| Metric | Pre-tune | Post-tune | Post-fix |
+|---|---|---|---|
+| Bilingual primary_dx | 12% | 66% | 66% |
+| Bilingual differential[].dx | 9% | 66% | 66% |
+| method ok (not detector) | 0% | **100%** | **100%** |
+| timestamp VN format | 75% | **100%** | **100%** |
+| recommendations no leak | 64% | 94% | **100%** ¹ |
+| primary ↔ diff[0] consistency | 12% | 33% | **100%** ² |
+| double-bilingual wrap | — | có | **0%** ³ |
+| severity distribution | thấp:5 t.bình:3 | t.bình:6 thấp:3 | thấp:2 t.bình:1 |
+
+¹ Sau khi loại 2 false-negative của verify script ("Khu vực cần…", "Phản hồi…" — đều
+   là valid action chỉ vì verbs set của script không cover hết).
+² Sau khi thêm backend post-process: sort differential by probability desc + force
+   `primary_dx = differential[0].dx`. Code 7B follow prompt rule không nổi (33%),
+   pragmatic fix ở layer backend đảm bảo 100%.
+³ Sau khi thêm regex dedup `_dedup_bilingual(text)`: strip pattern `(VN)(EN)(VN)`
+   thừa khi model lười.
+
+### Bilingual không đạt 100% — tại sao chấp nhận
+
+Qwen2.5-VL 7B chỉ follow bilingual rule ~66% trên primary_dx + differential. Đây là
+giới hạn của model 7B với rule format ngôn ngữ. Hướng cải thiện nếu cần Phase C:
+- Switch sang Qwen2.5-VL 32B (cần upgrade VRAM)
+- Hoặc backend post-process: maintain bilingual dictionary để auto-append EN khi
+  primary_dx thiếu — tốn maintenance, có rủi ro sai term
+- Hoặc few-shot prompt với 3-5 cặp ảnh+output ground-truth
+
+Quyết định: chấp nhận 66% cho thesis demo, document hạn chế trong báo cáo cuối.
+
+### A7 — verdict
+
+**PASS**. 5/6 metric ở 100%, 1/6 (bilingual) ở 66% là giới hạn 7B. Phase A đủ điều
+kiện đóng và merge PR #21.

@@ -808,6 +808,32 @@ async def _stream_lesion_report(websocket: WebSocket, detection: dict,
             await _send({"event": "ERROR", "data": {"message": f"Báo cáo AI lỗi định dạng — {je}"}})
             return
 
+        # Phase A post-process: enforce primary_dx ↔ differential[0] consistency.
+        # The 7B model doesn't reliably follow this rule from prompt alone
+        # (~33% compliance on real runs), so we sort differentials by
+        # probability descending and overwrite primary_dx with the top entry.
+        # This guarantees primary_dx == differential[0].dx and the differential
+        # list is properly ranked — both required by the schema's clinical logic.
+        #
+        # Also strip double-bilingual wraps ("X (X-en) (X)") — model sometimes
+        # appends a redundant VN parenthetical after a valid VN (EN) pair. We
+        # keep only the FIRST parenthesized group following the head term.
+        import re as _re
+        def _dedup_bilingual(text: str) -> str:
+            # Match: "<head> (<first paren>) (<second paren>)" → "<head> (<first paren>)"
+            return _re.sub(r"(\([^)]+\))\s*\([^)]+\)\s*$", r"\1", text).strip()
+
+        conclusion = report.get("conclusion", {})
+        diff = conclusion.get("differential", [])
+        if diff:
+            for d in diff:
+                d["dx"] = _dedup_bilingual(d.get("dx", ""))
+            diff.sort(key=lambda d: d.get("probability_pct", 0), reverse=True)
+            conclusion["differential"] = diff
+            conclusion["primary_dx"] = diff[0]["dx"]
+        elif "primary_dx" in conclusion:
+            conclusion["primary_dx"] = _dedup_bilingual(conclusion["primary_dx"])
+
         latency = time.monotonic() - t0
         logger.info("Lesion report generated: model={} latency={:.2f}s severity={}",
                     _llm_model_name("vision"), latency,
