@@ -43,15 +43,43 @@ export interface LesionReport {
   };
 }
 
+// Session summary (Phase B) — emitted once when VIDEO_FINISHED fires.
+// Mirrors SESSION_SUMMARY_SCHEMA in src/backend/api/summary_prompts.py.
+export interface SessionSummary {
+  overview: {
+    total_findings: number;
+    duration_seconds: number;
+    confirmed_count: number;
+    ignored_count: number;
+  };
+  priority_findings: {
+    frame_index: number;
+    severity: "thấp" | "trung bình" | "cao";
+    primary_dx: string;
+    rationale: string;
+  }[];
+  patterns: string[];
+  checklist: {
+    category: "sinh_thiet" | "test" | "dieu_tri" | "tai_kham";
+    action: string;
+  }[];
+  overall_risk: "thấp" | "trung bình" | "cao";
+}
+
 export type ServerEvent =
-  | { event: "DETECTION_FOUND";    data: DetectionData }
-  | { event: "STATE_CHANGE";       data: { state: string } }
-  | { event: "LLM_CHUNK";          data: { chunk: string } }
-  | { event: "LLM_DONE";           data: Record<string, never> }
-  | { event: "LESION_REPORT_DONE"; data: { frame_index: number; report: LesionReport } }
-  | { event: "RECHECK_EMPTY";      data: { conf: number; error?: string } }
-  | { event: "VIDEO_FINISHED";     data: { detections: DetectionData[] } }
-  | { event: "ERROR";              data: { message: string } };
+  | { event: "DETECTION_FOUND";       data: DetectionData }
+  | { event: "STATE_CHANGE";          data: { state: string } }
+  | { event: "LLM_CHUNK";             data: { chunk: string } }
+  | { event: "LLM_DONE";              data: Record<string, never> }
+  | { event: "LESION_REPORT_DONE";    data: { frame_index: number; report: LesionReport } }
+  | { event: "RECHECK_EMPTY";         data: { conf: number; error?: string } }
+  | { event: "VIDEO_FINISHED";        data: { detections: DetectionData[] } }
+  // Phase B — session summary + Q&A chatbot events:
+  | { event: "SESSION_SUMMARY_DONE";  data: { summary: SessionSummary | null; reason?: string } }
+  | { event: "SESSION_QA_USER_SAVED"; data: { text: string } }
+  | { event: "SESSION_QA_CHUNK";      data: { chunk: string } }
+  | { event: "SESSION_QA_DONE";       data: Record<string, never> }
+  | { event: "ERROR";                 data: { message: string } };
 
 // ── Outbound action types (client → server) ───────────────────────────────────
 
@@ -68,7 +96,9 @@ export type ClientAction =
   //     New finding arrives as a fresh DETECTION_FOUND, or RECHECK_EMPTY if none.
   //   (Quick-confirm reuses ACTION_CONFIRM — we just expose the button pre-LLM.)
   | { action: "ACTION_REPORT_FALSE_POSITIVE" }
-  | { action: "ACTION_RECHECK"; payload?: { conf?: number } };
+  | { action: "ACTION_RECHECK"; payload?: { conf?: number } }
+  // Phase B — session-level Q&A (distinct from per-detection ACTION_FOLLOW_UP).
+  | { action: "ACTION_SESSION_QA"; payload: { text: string } };
 
 // ── Video library types ───────────────────────────────────────────────────────
 

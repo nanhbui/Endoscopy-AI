@@ -38,6 +38,7 @@ import { useVoiceControl } from '@/hooks/use-voice-control';
 import { VideoSourceModal } from '@/components/video-source-modal';
 import { LesionReportCard } from '@/components/lesion-report-card';
 import { DisclaimerBanner } from '@/components/disclaimer';
+import { SessionSummaryPanel } from '@/components/session-summary-panel';
 
 import TextField from '@mui/material/TextField';
 import ToggleButton from '@mui/material/ToggleButton';
@@ -643,6 +644,8 @@ export default function Workspace() {
     isListeningVoice,
     llmInsight,
     detections,
+    sessions,
+    currentSessionId,
     startMockAnalysis,
     resetPipeline,
     ignoreDetection,
@@ -652,12 +655,16 @@ export default function Workspace() {
     quickConfirm,
     reportFalsePositive,
     recheck,
+    sendSessionQA,
     uploadOnly,
     prepareFromLibrary,
     connectLive,
     selectFromLibrary,
     resetAnalysis,
   } = useAnalysis();
+
+  // Phase B — pull the active session's Phase B state (summary + chat).
+  const currentSession = sessions.find((s) => s.id === currentSessionId);
 
   // Source mode
   const [sourceMode, setSourceMode] = useState<'video' | 'live'>('video');
@@ -918,26 +925,58 @@ export default function Workspace() {
 
         {/* ── Session Report Modal (replaces the small EOS dialog) ── */}
         {pipelineState === 'EOS_SUMMARY' && (
-          <SessionReportModal
-            detections={detections}
+          <MuiDialog
+            open
+            maxWidth="md"
+            fullWidth
             onClose={() => {
               stopListening();
               setTranscriptLog([]);
               if (videoRef.current) { videoRef.current.pause(); videoRef.current.currentTime = 0; }
               resetPipeline();
             }}
-            onRestart={() => {
-              stopListening();
-              setTranscriptLog([]);
-              if (videoRef.current) { videoRef.current.pause(); videoRef.current.currentTime = 0; }
-              resetPipeline();
-            }}
-            onGoReport={() => {
-              setIsNavigating(true);
-              router.push('/report');
-            }}
-            isNavigating={isNavigating}
-          />
+            slotProps={{ paper: { sx: { borderRadius: '20px', overflow: 'hidden', height: '85vh' } } }}
+          >
+            <MuiDialogContent sx={{ p: 0, display: 'flex', flexDirection: 'column', height: '100%' }}>
+              <Box sx={{ flex: 1, minHeight: 0 }}>
+                <SessionSummaryPanel
+                  summary={currentSession?.summary}
+                  qaMessages={currentSession?.qaMessages ?? []}
+                  qaStreaming={currentSession?.qaStreaming ?? false}
+                  onSendQA={sendSessionQA}
+                  onClose={() => {
+                    stopListening();
+                    setTranscriptLog([]);
+                    if (videoRef.current) { videoRef.current.pause(); videoRef.current.currentTime = 0; }
+                    resetPipeline();
+                  }}
+                />
+              </Box>
+              {/* Action footer — keeps the original navigation affordances. */}
+              <Box sx={{ display: 'flex', gap: 1, p: 2, borderTop: '1px solid #E2EAE8', backgroundColor: '#F8FAFB' }}>
+                <MuiButton
+                  variant="outlined" fullWidth
+                  onClick={() => {
+                    stopListening();
+                    setTranscriptLog([]);
+                    if (videoRef.current) { videoRef.current.pause(); videoRef.current.currentTime = 0; }
+                    resetPipeline();
+                  }}
+                  sx={{ borderRadius: '10px', textTransform: 'none', fontWeight: 700 }}
+                >
+                  Phân tích lại
+                </MuiButton>
+                <MuiButton
+                  variant="contained" fullWidth
+                  disabled={isNavigating}
+                  onClick={() => { setIsNavigating(true); router.push('/report'); }}
+                  sx={{ borderRadius: '10px', textTransform: 'none', fontWeight: 700, backgroundColor: '#006064', '&:hover': { backgroundColor: '#004D40' } }}
+                >
+                  {isNavigating ? 'Đang chuyển…' : 'Xem báo cáo đầy đủ'}
+                </MuiButton>
+              </Box>
+            </MuiDialogContent>
+          </MuiDialog>
         )}
 
         <Grid container spacing={3}>

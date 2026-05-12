@@ -19,7 +19,16 @@ import {
   type DetectionData,
   type ServerEvent,
   type LesionReport,
+  type SessionSummary,
 } from "@/lib/ws-client";
+
+// Phase B — Q&A chat message shape (mirrors qa_messages SQLite rows).
+export interface QaMessage {
+  role: "user" | "assistant";
+  content: string;
+  /** Local timestamp ms. Used for ordering during streaming. */
+  ts: number;
+}
 
 // Phase A bridge: render structured lesion report as markdown until the
 // dedicated <LesionReportCard> component (task A4) lands. Keeps the existing
@@ -93,6 +102,12 @@ export interface Session {
   startedAt: number;
   detections: Detection[];
   videoId?: string;
+  /** Phase B — populated when SESSION_SUMMARY_DONE arrives. */
+  summary?: SessionSummary;
+  /** Phase B — Q&A chat history (live ↔ persisted server-side). */
+  qaMessages?: QaMessage[];
+  /** Phase B — true while the LLM is streaming a Q&A response. */
+  qaStreaming?: boolean;
 }
 
 export type PipelineState =
@@ -140,6 +155,10 @@ interface AnalysisContextType {
   reportFalsePositive: () => void;
   /** Phase D — re-run YOLO on paused frame at lower conf (default 0.4). */
   recheck: (conf?: number) => void;
+  /** Phase B — send a chat question for the current session. Appends user
+   *  turn locally for instant feedback; server's reply streams in via
+   *  SESSION_QA_CHUNK events. */
+  sendSessionQA: (text: string) => void;
   setIsPlaying: (v: boolean) => void;
   addDetection: (d: Detection) => void;
   removeDetection: (timestamp: number) => void;
@@ -362,10 +381,50 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
         break;
       }
       case "VIDEO_FINISHED": {
+        // Keep WS alive — Phase B fires SESSION_SUMMARY_DONE and later
+        // SESSION_QA_* events on the same socket. WS is disconnected only
+        // when user explicitly resets (resetPipeline / removeSession).
         setPipelineState("EOS_SUMMARY");
-        setIsConnected(false);
-        wsRef.current?.disconnect();
-        wsRef.current = null;
+        break;
+      }
+      case "SESSION_SUMMARY_DONE": {
+        // Save into the current session so the SessionSummaryPanel can render.
+        const summary = evt.data.summary ?? undefined;
+        updateCurrentSession((sess) => ({ ...sess, summary }));
+        break;
+      }
+      case "SESSION_QA_USER_SAVED": {
+        // Optional ack — useful for UI to clear the input the moment the
+        // backend confirms it persisted the user turn. Currently a no-op.
+        break;
+      }
+      case "SESSION_QA_CHUNK": {
+        // Token-stream append. Maintain a "live" assistant message at the
+        // tail of qaMessages — if none exists yet, create one; otherwise
+        // append the chunk to its content.
+        const chunk = evt.data.chunk;
+        updateCurrentSession((sess) => {
+          const list = sess.qaMessages ?? [];
+          const last = list[list.length - 1];
+          if (last && last.role === "assistant" && sess.qaStreaming) {
+            return {
+              ...sess,
+              qaMessages: [
+                ...list.slice(0, -1),
+                { ...last, content: last.content + chunk },
+              ],
+            };
+          }
+          return {
+            ...sess,
+            qaStreaming: true,
+            qaMessages: [...list, { role: "assistant", content: chunk, ts: Date.now() }],
+          };
+        });
+        break;
+      }
+      case "SESSION_QA_DONE": {
+        updateCurrentSession((sess) => ({ ...sess, qaStreaming: false }));
         break;
       }
       case "ERROR":
@@ -589,6 +648,23 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
     wsRef.current.send({ action: "ACTION_RECHECK", payload: { conf } });
   }, []);
 
+  // Phase B — chatbot send. Appends user turn to local state immediately so
+  // the UI doesn't feel laggy waiting for SESSION_QA_USER_SAVED ack. Reply
+  // streams in via SESSION_QA_CHUNK case which manages assistant turn.
+  const sendSessionQA = useCallback((text: string) => {
+    const t = text.trim();
+    if (!t || !wsRef.current) return;
+    updateCurrentSession((sess) => ({
+      ...sess,
+      qaStreaming: true,
+      qaMessages: [
+        ...(sess.qaMessages ?? []),
+        { role: "user", content: t, ts: Date.now() },
+      ],
+    }));
+    wsRef.current.send({ action: "ACTION_SESSION_QA", payload: { text: t } });
+  }, [updateCurrentSession]);
+
   const setIsPlaying = useCallback((v: boolean) => {
     if (!v) {
       clearMockTimers();
@@ -671,6 +747,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       quickConfirm,
       reportFalsePositive,
       recheck,
+      sendSessionQA,
       setIsPlaying,
       addDetection,
       removeDetection,
@@ -685,7 +762,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       startMockAnalysis, resetPipeline, ignoreDetection,
       explainMore, followUpChat, confirmDetection, resumePlayback,
       quickConfirm, reportFalsePositive, recheck,
-      setIsPlaying,
+      sendSessionQA, setIsPlaying,
       addDetection, removeDetection, resetAnalysis, removeSession, clearSessions,
     ],
   );
