@@ -449,18 +449,59 @@ export function SessionSummaryPanel({
       {/* Body */}
       <Box sx={{ flex: 1, overflowY: 'auto', px: 2, py: 2 }}>
         {!summary ? (
-          // Loading state — summary chưa generate xong (~10s sau VIDEO_FINISHED)
-          <Box sx={{
-            height: '100%', display: 'flex', flexDirection: 'column',
-            alignItems: 'center', justifyContent: 'center', gap: 1.5, color: 'text.secondary', py: 6,
-          }}>
-            <CircularProgress size={28} sx={{ color: '#006064' }} />
-            <Typography sx={{ fontSize: '0.85rem', fontWeight: 600 }}>
-              AI đang tổng hợp phiên…
-            </Typography>
-            <Typography sx={{ fontSize: '0.72rem', textAlign: 'center', maxWidth: 280 }}>
-              Đang gộp các phát hiện thành báo cáo tổng thể. Thường mất 10–15 giây.
-            </Typography>
+          // Phase C2 — skeleton instead of single spinner. Three placeholder
+          // rows match OverviewTab's badge + counts grid + top findings so
+          // the transition to real content feels seamless.
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5, color: '#006064' }}>
+              <CircularProgress size={14} thickness={5} sx={{ color: '#006064' }} />
+              <Typography sx={{ fontSize: '0.78rem', fontWeight: 600 }}>
+                AI đang tổng hợp phiên… (10–15s)
+              </Typography>
+            </Box>
+            {/* Hero placeholder — overall risk badge + 4 counts grid */}
+            <Box sx={{ p: 2, borderRadius: '12px', border: '1px solid #E2EAE8', backgroundColor: '#F8FAFB' }}>
+              <Box sx={{
+                width: '50%', height: 11, borderRadius: '4px', mb: 1.5,
+                background: 'linear-gradient(90deg, #E2EAE8 0%, #F0F4F3 50%, #E2EAE8 100%)',
+                backgroundSize: '200% 100%',
+                animation: 'sumSkele 1.4s ease-in-out infinite',
+              }} />
+              <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 1.25 }}>
+                {[0, 1, 2, 3].map((i) => (
+                  <Box key={i}>
+                    <Box sx={{ width: '60%', height: 8, mb: 0.5, borderRadius: '3px',
+                      background: 'linear-gradient(90deg, #E2EAE8 0%, #F0F4F3 50%, #E2EAE8 100%)',
+                      backgroundSize: '200% 100%', animation: 'sumSkele 1.4s ease-in-out infinite' }} />
+                    <Box sx={{ width: '80%', height: 16, borderRadius: '4px',
+                      background: 'linear-gradient(90deg, #E2EAE8 0%, #F0F4F3 50%, #E2EAE8 100%)',
+                      backgroundSize: '200% 100%', animation: 'sumSkele 1.4s ease-in-out infinite' }} />
+                  </Box>
+                ))}
+              </Box>
+            </Box>
+            {/* 3 priority finding rows */}
+            {[0, 1, 2].map((i) => (
+              <Box key={i} sx={{ p: 1.25, borderRadius: '8px', backgroundColor: '#F8FAFB', border: '1px solid #E2EAE8',
+                display: 'flex', gap: 1, alignItems: 'flex-start' }}>
+                <Box sx={{ width: 50, height: 18, borderRadius: '4px',
+                  background: 'linear-gradient(90deg, #E2EAE8 0%, #F0F4F3 50%, #E2EAE8 100%)',
+                  backgroundSize: '200% 100%', animation: 'sumSkele 1.4s ease-in-out infinite' }} />
+                <Box sx={{ flex: 1 }}>
+                  <Box sx={{ width: '70%', height: 12, mb: 0.5, borderRadius: '3px',
+                    background: 'linear-gradient(90deg, #E2EAE8 0%, #F0F4F3 50%, #E2EAE8 100%)',
+                    backgroundSize: '200% 100%', animation: 'sumSkele 1.4s ease-in-out infinite' }} />
+                  <Box sx={{ width: '50%', height: 8, borderRadius: '3px',
+                    background: 'linear-gradient(90deg, #E2EAE8 0%, #F0F4F3 50%, #E2EAE8 100%)',
+                    backgroundSize: '200% 100%', animation: 'sumSkele 1.4s ease-in-out infinite' }} />
+                </Box>
+              </Box>
+            ))}
+            {/* Shared keyframes for the shimmer animation. */}
+            <Box sx={{ '@keyframes sumSkele': {
+              '0%': { backgroundPosition: '200% 0' },
+              '100%': { backgroundPosition: '-200% 0' },
+            } }} />
           </Box>
         ) : tab === 'overview' ? (
           <OverviewTab summary={summary} />

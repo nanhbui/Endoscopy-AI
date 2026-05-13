@@ -80,7 +80,14 @@ export type ServerEvent =
   | { event: "SESSION_QA_CHUNK";      data: { chunk: string } }
   | { event: "SESSION_QA_DONE";       data: Record<string, never> }
   | { event: "SESSION_QA_REPLAY";     data: { messages: { role: "user" | "assistant"; content: string; ts: number }[] } }
-  | { event: "ERROR";                 data: { message: string } };
+  // Phase C1 — ERROR now carries machine-readable `code` + which feature
+  // surface it came from. Frontend picks UI based on code/context.
+  | { event: "ERROR";                 data: {
+      message: string;
+      code?: string;       // LLM_TIMEOUT | LLM_UNAVAILABLE | LLM_CRASHED | LLM_BAD_JSON | LLM_ERROR
+      context?: string;    // lesion_report | session_summary | session_qa
+      frame_index?: number;
+    } };
 
 // ── Outbound action types (client → server) ───────────────────────────────────
 

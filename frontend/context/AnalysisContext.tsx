@@ -160,6 +160,9 @@ interface AnalysisContextType {
    *  HTTP fallback when WS closed (e.g. browsing /report page). Optional
    *  `sessionId` targets a specific session — default is currentSessionId. */
   sendSessionQA: (text: string, sessionId?: string) => void;
+  /** Phase C1 — latest LLM/system error for UI surfacing. Cleared via dismissError(). */
+  lastError: { message: string; code?: string; context?: string } | null;
+  dismissError: () => void;
   setIsPlaying: (v: boolean) => void;
   addDetection: (d: Detection) => void;
   removeDetection: (timestamp: number) => void;
@@ -236,6 +239,12 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
   const [currentDetection, setCurrentDetection] = useState<Detection | null>(null);
   const [isListeningVoice, setIsListeningVoice] = useState(false);
   const [llmInsight, setLlmInsight] = useState("");
+
+  // Phase C1 — latest LLM error surface (banner/toast). Cleared by
+  // dismissError() or by a successful subsequent LLM event.
+  const [lastError, setLastError] = useState<
+    { message: string; code?: string; context?: string } | null
+  >(null);
 
   const [sessions, setSessions] = useState<Session[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
@@ -439,18 +448,53 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
         }));
         break;
       }
-      case "ERROR":
-        if (evt.data.message?.includes("Session not found")) {
+      case "ERROR": {
+        const { message, code, context } = evt.data;
+
+        if (message?.includes("Session not found")) {
           console.warn("[WS] session expired (likely backend restart) — resetting state");
           wsRef.current?.disconnect();
           wsRef.current = null;
           setIsConnected(false);
           setPipelineState("IDLE");
           setVideoId(null);
-        } else {
-          console.error("[WS] server error:", evt.data.message);
+          break;
         }
+
+        // Phase C1 — route LLM errors to a visible surface based on context.
+        console.error("[WS] LLM error", { code, context, message });
+
+        if (context === "session_qa") {
+          // Show inline error bubble in chat + unblock the input.
+          updateCurrentSession((sess) => ({
+            ...sess,
+            qaStreaming: false,
+            qaMessages: [
+              ...(sess.qaMessages ?? []),
+              { role: "assistant", content: `⚠️ ${message}`, ts: Date.now() },
+            ],
+          }));
+          break;
+        }
+
+        if (context === "lesion_report") {
+          // Free the LLM panel state so user can retry / explain again.
+          explainInFlightRef.current = false;
+          setIsListeningVoice(false);
+          setPipelineState("PAUSED_WAITING_INPUT");
+          // Surface as a one-line markdown error in the legacy insight panel.
+          llmInsightRef.current = `⚠️ **${message}**\n\nNhấn "Giải thích thêm" để thử lại.`;
+          setLlmInsight(llmInsightRef.current);
+          break;
+        }
+
+        // session_summary or unknown context — set lastError so workspace
+        // can render a banner. We don't have a dedicated state for that yet,
+        // so for now toast via console + the FE summary panel's loading
+        // state will just stay; user can refresh or retry session.
+        setLastError({ message, code, context });
         break;
+      }
     }
   }, [updateCurrentSession]);
 
@@ -805,6 +849,8 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       reportFalsePositive,
       recheck,
       sendSessionQA,
+      lastError,
+      dismissError: () => setLastError(null),
       setIsPlaying,
       addDetection,
       removeDetection,
@@ -819,7 +865,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       startMockAnalysis, resetPipeline, ignoreDetection,
       explainMore, followUpChat, confirmDetection, resumePlayback,
       quickConfirm, reportFalsePositive, recheck,
-      sendSessionQA, setIsPlaying,
+      sendSessionQA, lastError, setIsPlaying,
       addDetection, removeDetection, resetAnalysis, removeSession, clearSessions,
     ],
   );

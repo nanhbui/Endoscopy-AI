@@ -92,6 +92,32 @@ LLM_MODEL_FOLLOWUP = os.getenv("OPENAI_MODEL_FOLLOWUP", "gpt-4o-mini")
 LLM_BACKEND     = os.getenv("LLM_BACKEND", "openai").lower()
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL", "qwen2.5vl:7b")
+
+# Phase C1 — hard timeout for any LLM completion call. Prevents the UI from
+# hanging indefinitely when Ollama is stuck / OOM / context overflow. 90s
+# covers Phase B summary (~15s typical, 30s worst-case) with headroom.
+LLM_CALL_TIMEOUT_SEC = float(os.getenv("LLM_CALL_TIMEOUT_SEC", "90"))
+
+
+def _classify_llm_error(exc: Exception) -> tuple[str, str]:
+    """Map an LLM exception → (error_code, friendly Vietnamese message).
+    Frontend reads `error_code` to decide which UI affordance to show
+    (retry button vs hard fail). Friendly message is doctor-readable."""
+    name = type(exc).__name__
+    msg = str(exc)
+    if isinstance(exc, asyncio.TimeoutError) or "timeout" in msg.lower():
+        return ("LLM_TIMEOUT",
+                f"AI mất quá {LLM_CALL_TIMEOUT_SEC:.0f}s để trả lời — vui lòng thử lại.")
+    if "Connection" in name or "connect" in msg.lower() or "refused" in msg.lower():
+        return ("LLM_UNAVAILABLE",
+                "Không kết nối được tới Ollama. Kiểm tra service trên server và thử lại.")
+    if "model runner has unexpectedly stopped" in msg or "GGML" in msg:
+        return ("LLM_CRASHED",
+                "Model AI bị crash giữa chừng (có thể do context quá dài). Đang khôi phục — thử lại sau ít giây.")
+    if isinstance(exc, json.JSONDecodeError):
+        return ("LLM_BAD_JSON",
+                "Kết quả AI không đúng định dạng JSON — vui lòng thử lại.")
+    return ("LLM_ERROR", f"AI lỗi: {msg[:120]}")
 LLM_SYSTEM_PROMPT = """
 Bạn là trợ lý nội soi tiêu hóa chuyên nghiệp, hỗ trợ bác sĩ Việt Nam trong ca nội soi dạ dày.
 Nhiệm vụ của bạn là phân tích phát hiện tổn thương từ hình ảnh nội soi và đưa ra nhận định lâm sàng.
@@ -533,20 +559,23 @@ async def post_session_qa(video_id: str, request: Request):
 
     t0 = time.monotonic()
     try:
-        # num_ctx 6144 matches the streaming WS path — fits prompt + reply
-        # within VRAM headroom on the 16GB GPU.
-        completion = await client.chat.completions.create(
-            model=_llm_model_name("vision"),
-            messages=messages,
-            max_tokens=1000,
-            extra_body={"options": {"num_ctx": 6144}},
+        completion = await asyncio.wait_for(
+            client.chat.completions.create(
+                model=_llm_model_name("vision"),
+                messages=messages,
+                max_tokens=1000,
+                extra_body={"options": {"num_ctx": 6144}},
+            ),
+            timeout=LLM_CALL_TIMEOUT_SEC,
         )
         reply = completion.choices[0].message.content or ""
         logger.info("Session Q&A (HTTP): latency={:.2f}s chars={}",
                     time.monotonic() - t0, len(reply))
     except Exception as exc:
-        logger.error("Session Q&A HTTP error: {}", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+        code, friendly = _classify_llm_error(exc)
+        logger.error("Session Q&A HTTP error [{}]: {}", code, exc)
+        raise HTTPException(status_code=503 if code == "LLM_UNAVAILABLE" else 500,
+                            detail={"code": code, "message": friendly})
 
     append_qa_message(video_id, "assistant", reply, int(time.time() * 1000))
     return {"reply": reply, "history": get_qa_history(video_id)}
@@ -990,18 +1019,26 @@ async def _stream_lesion_report(websocket: WebSocket, detection: dict,
     t0 = time.monotonic()
     try:
         # No streaming for JSON schema — must wait for full response then parse.
-        completion = await client.chat.completions.create(
-            model=_llm_model_name("vision"),
-            messages=messages,
-            response_format=response_format,
-            max_tokens=1500,
+        # Hard timeout via asyncio.wait_for so we never hang the UI forever.
+        completion = await asyncio.wait_for(
+            client.chat.completions.create(
+                model=_llm_model_name("vision"),
+                messages=messages,
+                response_format=response_format,
+                max_tokens=1500,
+            ),
+            timeout=LLM_CALL_TIMEOUT_SEC,
         )
         raw_json = completion.choices[0].message.content or "{}"
         try:
             report = json.loads(raw_json)
         except json.JSONDecodeError as je:
+            code, friendly = _classify_llm_error(je)
             logger.error("Lesion report JSON parse failed: {} — raw: {}", je, raw_json[:200])
-            await _send({"event": "ERROR", "data": {"message": f"Báo cáo AI lỗi định dạng — {je}"}})
+            await _send({"event": "ERROR",
+                         "data": {"code": code, "message": friendly,
+                                  "context": "lesion_report",
+                                  "frame_index": frame_index}})
             return
 
         # Phase A post-process: enforce primary_dx ↔ differential[0] consistency.
@@ -1061,8 +1098,12 @@ async def _stream_lesion_report(websocket: WebSocket, detection: dict,
                      "data": {"frame_index": frame_index, "report": report}})
 
     except Exception as exc:
-        logger.error("Lesion report stream error: {}", exc)
-        await _send({"event": "ERROR", "data": {"message": f"LLM error: {exc}"}})
+        code, friendly = _classify_llm_error(exc)
+        logger.error("Lesion report stream error [{}]: {}", code, exc)
+        await _send({"event": "ERROR",
+                     "data": {"code": code, "message": friendly,
+                              "context": "lesion_report",
+                              "frame_index": frame_index}})
     finally:
         sess["llm_streaming"] = False
 
@@ -1232,19 +1273,25 @@ async def _stream_session_summary(websocket: WebSocket, sess: dict,
 
     t0 = time.monotonic()
     try:
-        completion = await client.chat.completions.create(
-            model=_llm_model_name("vision"),  # same model, text-only call
-            messages=messages,
-            response_format=response_format,
-            max_tokens=2000,
+        completion = await asyncio.wait_for(
+            client.chat.completions.create(
+                model=_llm_model_name("vision"),  # same model, text-only call
+                messages=messages,
+                response_format=response_format,
+                max_tokens=2000,
+                extra_body={"options": {"num_ctx": 6144}},
+            ),
+            timeout=LLM_CALL_TIMEOUT_SEC,
         )
         raw_json = completion.choices[0].message.content or "{}"
         try:
             summary = json.loads(raw_json)
         except json.JSONDecodeError as je:
+            code, friendly = _classify_llm_error(je)
             logger.error("Session summary JSON parse failed: {}", je)
             await _send({"event": "ERROR",
-                         "data": {"message": f"Tổng hợp phiên lỗi format — {je}"}})
+                         "data": {"code": code, "message": friendly,
+                                  "context": "session_summary"}})
             return
 
         latency = time.monotonic() - t0
@@ -1258,9 +1305,11 @@ async def _stream_session_summary(websocket: WebSocket, sess: dict,
                      "data": {"summary": summary}})
 
     except Exception as exc:
-        logger.error("Session summary stream error: {}", exc)
+        code, friendly = _classify_llm_error(exc)
+        logger.error("Session summary stream error [{}]: {}", code, exc)
         await _send({"event": "ERROR",
-                     "data": {"message": f"Tổng hợp phiên lỗi: {exc}"}})
+                     "data": {"code": code, "message": friendly,
+                              "context": "session_summary"}})
 
 
 async def _stream_session_qa(websocket: WebSocket, user_text: str,
@@ -1330,12 +1379,17 @@ async def _stream_session_qa(websocket: WebSocket, user_text: str,
         await _send({"event": "SESSION_QA_DONE", "data": {}})
 
     except Exception as exc:
-        logger.error("Session Q&A error: {}", exc)
-        # Even on error, persist whatever we got so the conversation isn't half-lost.
+        code, friendly = _classify_llm_error(exc)
+        logger.error("Session Q&A error [{}]: {}", code, exc)
+        # Persist whatever we got so the conversation isn't half-lost.
         if full_response:
             append_qa_message(video_id, "assistant", full_response, int(time.time() * 1000))
         await _send({"event": "ERROR",
-                     "data": {"message": f"Chat lỗi: {exc}"}})
+                     "data": {"code": code, "message": friendly,
+                              "context": "session_qa"}})
+        # Send SESSION_QA_DONE to clear the FE streaming flag — without it
+        # the user is stuck on "AI đang suy nghĩ" forever.
+        await _send({"event": "SESSION_QA_DONE", "data": {}})
 
 
 def _mock_session_summary(reports: list[dict], confirmed: int, ignored: int) -> dict:
