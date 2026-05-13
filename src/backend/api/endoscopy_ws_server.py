@@ -501,6 +501,72 @@ async def get_detections(video_id: str):
     return {"video_id": video_id, "detections": detections}
 
 
+# Phase B — Q&A over HTTP (no WS). Used by /report page where the live WS
+# socket has long been closed. Non-streaming because keeping a fetch open
+# for streaming buys little when the user is reading a past session — they
+# can wait 2-3s for the full reply.
+@app.post("/session/{video_id}/qa")
+async def post_session_qa(video_id: str, request: Request):
+    body = await request.json()
+    user_text = (body.get("text") or "").strip()
+    if not user_text:
+        raise HTTPException(status_code=400, detail="text required")
+
+    # Persist user turn first so the question survives a mid-flight crash.
+    now_ms = int(time.time() * 1000)
+    append_qa_message(video_id, "user", user_text, now_ms)
+
+    client = _get_llm_client()
+    if client is None:
+        fallback = "AI hiện không sẵn sàng. Vui lòng thử lại."
+        append_qa_message(video_id, "assistant", fallback, int(time.time() * 1000))
+        return {"reply": fallback, "history": get_qa_history(video_id)}
+
+    summary_row = get_session_summary(video_id)
+    summary = summary_row["summary"] if summary_row else None
+    reports = get_lesion_reports_for_session(video_id)
+    history = get_qa_history(video_id)
+    # Drop the just-persisted user turn — build_session_qa_messages appends
+    # it as the current turn inside.
+    history = history[:-1] if history else []
+    messages = build_session_qa_messages(summary, reports, history, user_text)
+
+    t0 = time.monotonic()
+    try:
+        # num_ctx 6144 matches the streaming WS path — fits prompt + reply
+        # within VRAM headroom on the 16GB GPU.
+        completion = await client.chat.completions.create(
+            model=_llm_model_name("vision"),
+            messages=messages,
+            max_tokens=1000,
+            extra_body={"options": {"num_ctx": 6144}},
+        )
+        reply = completion.choices[0].message.content or ""
+        logger.info("Session Q&A (HTTP): latency={:.2f}s chars={}",
+                    time.monotonic() - t0, len(reply))
+    except Exception as exc:
+        logger.error("Session Q&A HTTP error: {}", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    append_qa_message(video_id, "assistant", reply, int(time.time() * 1000))
+    return {"reply": reply, "history": get_qa_history(video_id)}
+
+
+@app.get("/session/{video_id}/qa")
+async def get_session_qa(video_id: str):
+    """Load existing Q&A history for a session (used when opening /report)."""
+    return {"history": get_qa_history(video_id)}
+
+
+@app.get("/session/{video_id}/summary")
+async def get_session_summary_endpoint(video_id: str):
+    """Load existing session summary (used when opening /report)."""
+    saved = get_session_summary(video_id)
+    if not saved:
+        return {"summary": None}
+    return {"summary": saved["summary"], "generated_at": saved["generated_at"]}
+
+
 @app.get("/session/{video_id}/video")
 async def stream_session_video(video_id: str):
     """Stream the session's video file for browser preview (supports Range requests).
@@ -554,6 +620,37 @@ async def ws_analysis(websocket: WebSocket, video_id: str):
     # when _relay_events and _stream_llm/_stream_follow_up both write at the same time.
     _ws_lock = asyncio.Lock()
 
+    # Phase B reconnect recovery — if this session already has a saved summary
+    # (i.e. user reloaded the page after EOS), replay it so the FE leaves the
+    # "Đang tổng hợp..." loading state. Same for QA history so the chat persists
+    # across reloads. We send before starting _relay_events so these arrive
+    # before any new pipeline events.
+    try:
+        existing_summary = get_session_summary(video_id)
+        if existing_summary:
+            await websocket.send_json({
+                "event": "SESSION_SUMMARY_DONE",
+                "data": {"summary": existing_summary["summary"]},
+            })
+            logger.info("Replayed existing summary for {} on reconnect", video_id)
+        existing_qa = get_qa_history(video_id)
+        if existing_qa:
+            # Single replay event with the full ordered list — avoids the
+            # duplicate-user-turn problem we'd hit if we replayed via the
+            # live SESSION_QA_* events.
+            await websocket.send_json({
+                "event": "SESSION_QA_REPLAY",
+                "data": {
+                    "messages": [
+                        {"role": m["role"], "content": m["content"], "ts": m["created_at"]}
+                        for m in existing_qa
+                    ],
+                },
+            })
+            logger.info("Replayed {} QA messages for {} on reconnect", len(existing_qa), video_id)
+    except Exception as exc:
+        logger.warning("Phase B replay skipped: {}", exc)
+
     # Two concurrent tasks: relay pipeline events → FE, and FE actions → pipeline
     async def _relay_events():
         """Forward detection / state events from pipeline queue to FE."""
@@ -600,8 +697,12 @@ async def ws_analysis(websocket: WebSocket, video_id: str):
             except Exception:
                 break
 
-            if evt["event"] == "VIDEO_FINISHED":
-                break
+            # NOTE: do NOT break on VIDEO_FINISHED. Phase B fires the background
+            # _stream_session_summary task after VIDEO_FINISHED, and it needs the
+            # WS to stay open to deliver SESSION_SUMMARY_DONE (and later
+            # SESSION_QA_* events). The relay loop will simply idle on
+            # ctrl.events.get() timeouts after the pipeline subprocess exits;
+            # natural exit happens when ws disconnect → send_json fails → break.
 
     async def _handle_actions():
         """Receive user actions from FE and dispatch to pipeline controller."""
@@ -1206,11 +1307,16 @@ async def _stream_session_qa(websocket: WebSocket, user_text: str,
     t0 = time.monotonic()
     try:
         # Streaming chunks — FE renders token-by-token for a chatbot feel.
+        # extra_body.options.num_ctx bumps Ollama context window from default
+        # 4096 → 6144 so the rich per-finding context fits. Cap at 6144 to
+        # keep KV-cache footprint in the 2GB headroom the 16GB GPU has after
+        # loading the 14GB qwen2.5vl model.
         stream = await client.chat.completions.create(
             model=_llm_model_name("vision"),
             messages=messages,
             stream=True,
             max_tokens=1000,
+            extra_body={"options": {"num_ctx": 6144}},
         )
         async for ev in stream:
             delta = ev.choices[0].delta.content if ev.choices else None
