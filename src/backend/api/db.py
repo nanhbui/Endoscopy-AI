@@ -61,6 +61,35 @@ CREATE TABLE IF NOT EXISTS false_positives (
 
 _FP_LABEL_INDEX_DDL = "CREATE INDEX IF NOT EXISTS idx_fp_label ON false_positives(label)"
 
+# Phase B — session summary table. One row per session (UPSERT on re-summary
+# from EOS re-trigger). Stores the full SESSION_SUMMARY_SCHEMA JSON so the
+# frontend's summary panel can render without re-querying the LLM.
+_SESSION_SUMMARIES_DDL = """
+CREATE TABLE IF NOT EXISTS session_summaries (
+    session_id    TEXT PRIMARY KEY,
+    summary_json  TEXT NOT NULL,
+    generated_at  INTEGER NOT NULL,   -- unix epoch ms
+    model         TEXT
+)
+"""
+
+# Phase B — Q&A chat history per session. (session_id, sequence) ordered by
+# sequence to replay the conversation. Role enum: user | assistant.
+# No deletion API at this layer — kept append-only so we can later analyze
+# what doctors actually ask.
+_QA_MESSAGES_DDL = """
+CREATE TABLE IF NOT EXISTS qa_messages (
+    session_id    TEXT NOT NULL,
+    sequence      INTEGER NOT NULL,
+    role          TEXT NOT NULL,       -- user | assistant
+    content       TEXT NOT NULL,
+    created_at    INTEGER NOT NULL,   -- unix epoch ms
+    PRIMARY KEY (session_id, sequence)
+)
+"""
+
+_QA_SESSION_INDEX_DDL = "CREATE INDEX IF NOT EXISTS idx_qa_session ON qa_messages(session_id)"
+
 
 def _connect() -> sqlite3.Connection:
     """Open a fresh connection. Caller must close. Each call sets pragmas
@@ -73,13 +102,16 @@ def _connect() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    """Create all Phase A + Phase D tables if missing. Safe to call repeatedly."""
+    """Create all Phase A + Phase B + Phase D tables if missing. Safe to call repeatedly."""
     try:
         with _connect() as conn:
             conn.execute(_LESION_REPORTS_DDL)
             conn.execute(_INDEX_DDL)
             conn.execute(_FALSE_POSITIVES_DDL)
             conn.execute(_FP_LABEL_INDEX_DDL)
+            conn.execute(_SESSION_SUMMARIES_DDL)
+            conn.execute(_QA_MESSAGES_DDL)
+            conn.execute(_QA_SESSION_INDEX_DDL)
         logger.info("SQLite DB ready at {}", _DB_PATH)
     except sqlite3.Error as e:
         logger.error("init_db failed: {}", e)
@@ -219,3 +251,91 @@ def matches_false_positive(label: str, bbox: list[float],
         if fp["label"] == label and _iou(fp["bbox"], bbox) >= iou_threshold:
             return True
     return False
+
+
+# ── Session summaries (Phase B) ──────────────────────────────────────────────
+
+def save_session_summary(session_id: str, summary: dict, model: str,
+                         generated_at_ms: int) -> bool:
+    """Persist a session summary. UPSERT — if user re-triggers summary
+    generation, latest one wins (we don't keep history of summaries)."""
+    try:
+        with _connect() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO session_summaries
+                   (session_id, summary_json, generated_at, model)
+                   VALUES (?, ?, ?, ?)""",
+                (session_id, json.dumps(summary, ensure_ascii=False),
+                 generated_at_ms, model),
+            )
+        return True
+    except sqlite3.Error as e:
+        logger.error("save_session_summary failed: {}", e)
+        return False
+
+
+def get_session_summary(session_id: str) -> Optional[dict]:
+    """Return the parsed summary dict, or None if no summary saved."""
+    try:
+        with _connect() as conn:
+            row = conn.execute(
+                "SELECT summary_json, generated_at, model FROM session_summaries WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "summary": json.loads(row[0]),
+            "generated_at": row[1],
+            "model": row[2],
+        }
+    except sqlite3.Error as e:
+        logger.error("get_session_summary failed: {}", e)
+        return None
+
+
+# ── Q&A messages (Phase B) ───────────────────────────────────────────────────
+
+def append_qa_message(session_id: str, role: str, content: str,
+                      created_at_ms: int) -> int:
+    """Append a chat message. Returns the new sequence number, or -1 on error.
+    Auto-increments sequence per session — no client-side counter needed."""
+    if role not in ("user", "assistant"):
+        logger.error("append_qa_message: invalid role {}", role)
+        return -1
+    try:
+        with _connect() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM qa_messages WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            next_seq = row[0] if row else 1
+            conn.execute(
+                """INSERT INTO qa_messages
+                   (session_id, sequence, role, content, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (session_id, next_seq, role, content, created_at_ms),
+            )
+        return next_seq
+    except sqlite3.Error as e:
+        logger.error("append_qa_message failed: {}", e)
+        return -1
+
+
+def get_qa_history(session_id: str) -> list[dict]:
+    """Fetch full chat history for a session, ordered by sequence."""
+    try:
+        with _connect() as conn:
+            rows = conn.execute(
+                """SELECT sequence, role, content, created_at
+                   FROM qa_messages WHERE session_id = ?
+                   ORDER BY sequence ASC""",
+                (session_id,),
+            ).fetchall()
+        return [
+            {"sequence": r[0], "role": r[1], "content": r[2], "created_at": r[3]}
+            for r in rows
+        ]
+    except sqlite3.Error as e:
+        logger.error("get_qa_history failed: {}", e)
+        return []

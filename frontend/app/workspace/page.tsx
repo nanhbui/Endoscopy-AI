@@ -38,6 +38,7 @@ import { useVoiceControl } from '@/hooks/use-voice-control';
 import { VideoSourceModal } from '@/components/video-source-modal';
 import { LesionReportCard } from '@/components/lesion-report-card';
 import { DisclaimerBanner } from '@/components/disclaimer';
+import { SessionSummaryPanel } from '@/components/session-summary-panel';
 
 import TextField from '@mui/material/TextField';
 import ToggleButton from '@mui/material/ToggleButton';
@@ -256,6 +257,25 @@ function VideoPickerTriggerZone({ onClick }: { onClick: () => void }) {
 }
 
 // ── Library video ready panel ────────────────────────────────────────────────
+
+// Phase C2 — single skeleton bar with shimmer. Reused for lesion report
+// loading state so the doctor sees structured placeholders, not a blank
+// spinner. Width/height tune the row to match what's coming.
+function SkeletonBar({ width, height = 10 }: { width: string | number; height?: number }) {
+  return (
+    <Box sx={{
+      width, height,
+      borderRadius: '4px',
+      background: 'linear-gradient(90deg, #E2EAE8 0%, #F0F4F3 50%, #E2EAE8 100%)',
+      backgroundSize: '200% 100%',
+      animation: 'skeletonShimmer 1.4s ease-in-out infinite',
+      '@keyframes skeletonShimmer': {
+        '0%':   { backgroundPosition: '200% 0' },
+        '100%': { backgroundPosition: '-200% 0' },
+      },
+    }} />
+  );
+}
 
 function LibraryReadyPanel({ onReselect }: { onReselect: () => void }) {
   return (
@@ -643,6 +663,8 @@ export default function Workspace() {
     isListeningVoice,
     llmInsight,
     detections,
+    sessions,
+    currentSessionId,
     startMockAnalysis,
     resetPipeline,
     ignoreDetection,
@@ -652,12 +674,18 @@ export default function Workspace() {
     quickConfirm,
     reportFalsePositive,
     recheck,
+    sendSessionQA,
+    lastError,
+    dismissError,
     uploadOnly,
     prepareFromLibrary,
     connectLive,
     selectFromLibrary,
     resetAnalysis,
   } = useAnalysis();
+
+  // Phase B — pull the active session's Phase B state (summary + chat).
+  const currentSession = sessions.find((s) => s.id === currentSessionId);
 
   // Source mode
   const [sourceMode, setSourceMode] = useState<'video' | 'live'>('video');
@@ -938,6 +966,31 @@ export default function Workspace() {
             }}
             isNavigating={isNavigating}
           />
+        )}
+
+        {/* Phase C1 — LLM error banner. Only renders when there's an active
+            error (timeout / crash / unavailable / bad JSON). Doctor clicks ×
+            to dismiss. Auto-clears when a fresh LLM event arrives. */}
+        {lastError && (
+          <Box sx={{
+            mb: 2, px: 2, py: 1.25, borderRadius: '12px',
+            backgroundColor: 'rgba(220,38,38,0.08)',
+            border: '1px solid rgba(220,38,38,0.3)',
+            display: 'flex', alignItems: 'flex-start', gap: 1,
+          }}>
+            <AlertTriangle size={16} color="#DC2626" style={{ flexShrink: 0, marginTop: 2 }} />
+            <Box sx={{ flex: 1, minWidth: 0 }}>
+              <Typography sx={{ fontSize: '0.78rem', fontWeight: 700, color: '#991B1B', mb: 0.25 }}>
+                Lỗi AI {lastError.code ? `(${lastError.code})` : ''}
+              </Typography>
+              <Typography sx={{ fontSize: '0.78rem', color: '#7F1D1D', lineHeight: 1.5 }}>
+                {lastError.message}
+              </Typography>
+            </Box>
+            <IconButton size="small" onClick={dismissError} sx={{ color: '#991B1B' }}>
+              <X size={14} />
+            </IconButton>
+          </Box>
         )}
 
         <Grid container spacing={3}>
@@ -1495,11 +1548,36 @@ export default function Workspace() {
 
                 <Box sx={{ p: 2.5, flex: 1, overflowY: 'auto' }}>
                   {isListeningVoice && !llmInsight ? (
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-                      <CircularProgress size={16} thickness={5} sx={{ color: '#0277BD' }} />
-                      <Typography variant="caption" sx={{ color: '#0277BD', fontWeight: 500 }}>
-                        Đang tải phân tích từ LLM...
-                      </Typography>
+                    // Phase C2 — skeleton instead of a single spinner. Gives
+                    // the doctor a sense of what's coming and feels less like
+                    // the page is frozen during the ~5s LLM call.
+                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.25 }}>
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                        <CircularProgress size={14} thickness={5} sx={{ color: '#0277BD' }} />
+                        <Typography variant="caption" sx={{ color: '#0277BD', fontWeight: 600 }}>
+                          AI đang phân tích tổn thương…
+                        </Typography>
+                      </Box>
+                      {/* Hero placeholder — severity stripe + title row */}
+                      <Box sx={{ borderRadius: '10px', border: '1px solid #E2EAE8', overflow: 'hidden' }}>
+                        <Box sx={{ height: 8, backgroundColor: 'rgba(0,96,100,0.15)' }} />
+                        <Box sx={{ p: 1.5, display: 'flex', flexDirection: 'column', gap: 0.75 }}>
+                          <SkeletonBar width="35%" height={10} />
+                          <SkeletonBar width="75%" height={14} />
+                          <SkeletonBar width="100%" height={4} />
+                        </Box>
+                      </Box>
+                      {/* 3 section placeholders matching LesionReportCard layout */}
+                      {[0, 1, 2].map((i) => (
+                        <Box key={i} sx={{ borderRadius: '8px', border: '1px solid #E2EAE8', p: 1 }}>
+                          <SkeletonBar width="40%" height={10} />
+                          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.4, mt: 0.75 }}>
+                            <SkeletonBar width="90%" height={8} />
+                            <SkeletonBar width="80%" height={8} />
+                            <SkeletonBar width="60%" height={8} />
+                          </Box>
+                        </Box>
+                      ))}
                     </Box>
                   ) : currentDetection?.lesionReport ? (
                     <MotionBox initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.4 }}>

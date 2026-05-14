@@ -12,6 +12,7 @@ import {
 } from "react";
 
 import {
+  API_BASE,
   EndoscopyWsClient,
   uploadVideo,
   connectLiveStream,
@@ -19,7 +20,16 @@ import {
   type DetectionData,
   type ServerEvent,
   type LesionReport,
+  type SessionSummary,
 } from "@/lib/ws-client";
+
+// Phase B — Q&A chat message shape (mirrors qa_messages SQLite rows).
+export interface QaMessage {
+  role: "user" | "assistant";
+  content: string;
+  /** Local timestamp ms. Used for ordering during streaming. */
+  ts: number;
+}
 
 // Phase A bridge: render structured lesion report as markdown until the
 // dedicated <LesionReportCard> component (task A4) lands. Keeps the existing
@@ -93,6 +103,12 @@ export interface Session {
   startedAt: number;
   detections: Detection[];
   videoId?: string;
+  /** Phase B — populated when SESSION_SUMMARY_DONE arrives. */
+  summary?: SessionSummary;
+  /** Phase B — Q&A chat history (live ↔ persisted server-side). */
+  qaMessages?: QaMessage[];
+  /** Phase B — true while the LLM is streaming a Q&A response. */
+  qaStreaming?: boolean;
 }
 
 export type PipelineState =
@@ -140,6 +156,13 @@ interface AnalysisContextType {
   reportFalsePositive: () => void;
   /** Phase D — re-run YOLO on paused frame at lower conf (default 0.4). */
   recheck: (conf?: number) => void;
+  /** Phase B — send a chat question. Uses WS streaming when available,
+   *  HTTP fallback when WS closed (e.g. browsing /report page). Optional
+   *  `sessionId` targets a specific session — default is currentSessionId. */
+  sendSessionQA: (text: string, sessionId?: string) => void;
+  /** Phase C1 — latest LLM/system error for UI surfacing. Cleared via dismissError(). */
+  lastError: { message: string; code?: string; context?: string } | null;
+  dismissError: () => void;
   setIsPlaying: (v: boolean) => void;
   addDetection: (d: Detection) => void;
   removeDetection: (timestamp: number) => void;
@@ -216,6 +239,12 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
   const [currentDetection, setCurrentDetection] = useState<Detection | null>(null);
   const [isListeningVoice, setIsListeningVoice] = useState(false);
   const [llmInsight, setLlmInsight] = useState("");
+
+  // Phase C1 — latest LLM error surface (banner/toast). Cleared by
+  // dismissError() or by a successful subsequent LLM event.
+  const [lastError, setLastError] = useState<
+    { message: string; code?: string; context?: string } | null
+  >(null);
 
   const [sessions, setSessions] = useState<Session[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
@@ -362,24 +391,110 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
         break;
       }
       case "VIDEO_FINISHED": {
+        // Keep WS alive — Phase B fires SESSION_SUMMARY_DONE and later
+        // SESSION_QA_* events on the same socket. WS is disconnected only
+        // when user explicitly resets (resetPipeline / removeSession).
         setPipelineState("EOS_SUMMARY");
-        setIsConnected(false);
-        wsRef.current?.disconnect();
-        wsRef.current = null;
         break;
       }
-      case "ERROR":
-        if (evt.data.message?.includes("Session not found")) {
+      case "SESSION_SUMMARY_DONE": {
+        // Save into the current session so the SessionSummaryPanel can render.
+        const summary = evt.data.summary ?? undefined;
+        updateCurrentSession((sess) => ({ ...sess, summary }));
+        break;
+      }
+      case "SESSION_QA_USER_SAVED": {
+        // Optional ack — useful for UI to clear the input the moment the
+        // backend confirms it persisted the user turn. Currently a no-op.
+        break;
+      }
+      case "SESSION_QA_CHUNK": {
+        // Token-stream append. Maintain a "live" assistant message at the
+        // tail of qaMessages — if none exists yet, create one; otherwise
+        // append the chunk to its content.
+        const chunk = evt.data.chunk;
+        updateCurrentSession((sess) => {
+          const list = sess.qaMessages ?? [];
+          const last = list[list.length - 1];
+          if (last && last.role === "assistant" && sess.qaStreaming) {
+            return {
+              ...sess,
+              qaMessages: [
+                ...list.slice(0, -1),
+                { ...last, content: last.content + chunk },
+              ],
+            };
+          }
+          return {
+            ...sess,
+            qaStreaming: true,
+            qaMessages: [...list, { role: "assistant", content: chunk, ts: Date.now() }],
+          };
+        });
+        break;
+      }
+      case "SESSION_QA_DONE": {
+        updateCurrentSession((sess) => ({ ...sess, qaStreaming: false }));
+        break;
+      }
+      case "SESSION_QA_REPLAY": {
+        // Reconnect recovery — server sends full saved chat history once.
+        updateCurrentSession((sess) => ({
+          ...sess,
+          qaMessages: evt.data.messages.map((m) => ({
+            role: m.role, content: m.content, ts: m.ts,
+          })),
+          qaStreaming: false,
+        }));
+        break;
+      }
+      case "ERROR": {
+        const { message, code, context } = evt.data;
+
+        if (message?.includes("Session not found")) {
           console.warn("[WS] session expired (likely backend restart) — resetting state");
           wsRef.current?.disconnect();
           wsRef.current = null;
           setIsConnected(false);
           setPipelineState("IDLE");
           setVideoId(null);
-        } else {
-          console.error("[WS] server error:", evt.data.message);
+          break;
         }
+
+        // Phase C1 — route LLM errors to a visible surface based on context.
+        console.error("[WS] LLM error", { code, context, message });
+
+        if (context === "session_qa") {
+          // Show inline error bubble in chat + unblock the input.
+          updateCurrentSession((sess) => ({
+            ...sess,
+            qaStreaming: false,
+            qaMessages: [
+              ...(sess.qaMessages ?? []),
+              { role: "assistant", content: `⚠️ ${message}`, ts: Date.now() },
+            ],
+          }));
+          break;
+        }
+
+        if (context === "lesion_report") {
+          // Free the LLM panel state so user can retry / explain again.
+          explainInFlightRef.current = false;
+          setIsListeningVoice(false);
+          setPipelineState("PAUSED_WAITING_INPUT");
+          // Surface as a one-line markdown error in the legacy insight panel.
+          llmInsightRef.current = `⚠️ **${message}**\n\nNhấn "Giải thích thêm" để thử lại.`;
+          setLlmInsight(llmInsightRef.current);
+          break;
+        }
+
+        // session_summary or unknown context — set lastError so workspace
+        // can render a banner. We don't have a dedicated state for that yet,
+        // so for now toast via console + the FE summary panel's loading
+        // state will just stay; user can refresh or retry session.
+        setLastError({ message, code, context });
         break;
+      }
     }
   }, [updateCurrentSession]);
 
@@ -589,6 +704,68 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
     wsRef.current.send({ action: "ACTION_RECHECK", payload: { conf } });
   }, []);
 
+  // Phase B — chatbot send. Two paths:
+  //   - Live WS path (during/just-after session): action ACTION_SESSION_QA;
+  //     reply streams in via SESSION_QA_CHUNK case.
+  //   - HTTP path (from /report page where WS has long closed): POST to
+  //     /session/{videoId}/qa, wait for the full reply, append both turns
+  //     locally. Server still persists the conversation to qa_messages so
+  //     the next page open sees the same history.
+  const sendSessionQA = useCallback((text: string, sessionId?: string) => {
+    const t = text.trim();
+    if (!t) return;
+
+    // Resolve target session — explicit param wins, else currentSessionId.
+    // /report passes the session id explicitly since user may be browsing
+    // an older session whose id no longer matches currentSessionId.
+    const targetId = sessionId ?? currentSessionId;
+    if (!targetId) return;
+
+    // Helper: append a message to the target session (not necessarily current).
+    const appendToTarget = (msg: QaMessage, streaming = true) => {
+      setSessions((prev) =>
+        prev.map((s) =>
+          s.id === targetId
+            ? { ...s, qaStreaming: streaming, qaMessages: [...(s.qaMessages ?? []), msg] }
+            : s,
+        ),
+      );
+    };
+
+    // Optimistic local append.
+    appendToTarget({ role: "user", content: t, ts: Date.now() }, true);
+
+    // Prefer live WS for the currently-active session (streams tokens).
+    if (wsRef.current && targetId === currentSessionId) {
+      wsRef.current.send({ action: "ACTION_SESSION_QA", payload: { text: t } });
+      return;
+    }
+
+    // HTTP fallback — used at /report (no WS) or when chatting about a
+    // session that isn't currently active.
+    const sess = sessions.find((s) => s.id === targetId);
+    const vid = sess?.videoId;
+    if (!vid) {
+      appendToTarget({ role: "assistant", content: "Không thể kết nối phiên — thiếu video id.", ts: Date.now() }, false);
+      return;
+    }
+
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/session/${vid}/qa`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: t }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json() as { reply: string };
+        appendToTarget({ role: "assistant", content: data.reply, ts: Date.now() }, false);
+      } catch (err) {
+        appendToTarget({ role: "assistant", content: `Lỗi gọi AI: ${String(err)}`, ts: Date.now() }, false);
+      }
+    })();
+  }, [sessions, currentSessionId]);
+
   const setIsPlaying = useCallback((v: boolean) => {
     if (!v) {
       clearMockTimers();
@@ -671,6 +848,9 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       quickConfirm,
       reportFalsePositive,
       recheck,
+      sendSessionQA,
+      lastError,
+      dismissError: () => setLastError(null),
       setIsPlaying,
       addDetection,
       removeDetection,
@@ -685,7 +865,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       startMockAnalysis, resetPipeline, ignoreDetection,
       explainMore, followUpChat, confirmDetection, resumePlayback,
       quickConfirm, reportFalsePositive, recheck,
-      setIsPlaying,
+      sendSessionQA, lastError, setIsPlaying,
       addDetection, removeDetection, resetAnalysis, removeSession, clearSessions,
     ],
   );

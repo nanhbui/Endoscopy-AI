@@ -9,6 +9,7 @@ import {
   ScanSearch, Sparkles, Trash2, Video, X, Zap, Radio, FolderOpen, Upload, ChevronLeft,
 } from 'lucide-react';
 import { useAnalysis, type Detection, type DetectionStatus, type Session } from '@/context/AnalysisContext';
+import { SessionSummaryPanel } from '@/components/session-summary-panel';
 
 import {
   Dialog,
@@ -324,17 +325,23 @@ function SessionDetailModal({
   session,
   onClose,
   onSelectDetection,
+  onSendSessionQA,
   onDeleteSession,
 }: {
   session: Session;
   onClose: () => void;
   onSelectDetection: (d: Detection) => void;
+  onSendSessionQA: (text: string, sessionId?: string) => void;
   onDeleteSession: () => void;
 }) {
   const sourceCfg = SOURCE_CFG[session.source];
   const confirmed = session.detections.filter(d => d.status === 'confirmed' || d.status === 'analyzed').length;
   const ignored   = session.detections.filter(d => d.status === 'ignored').length;
   const total     = session.detections.length;
+
+  // Phase B — tab switch between detection grid and AI summary panel.
+  const [tab, setTab] = useState<'detections' | 'summary'>('detections');
+  const hasSummary = !!session.summary;
 
   return (
     <MuiDialog
@@ -383,8 +390,55 @@ function SessionDetailModal({
           </IconButton>
         </Box>
 
-        <Box sx={{ flex: 1, overflowY: 'auto', px: 3.5, py: 3, backgroundColor: 'background.default' }}>
-          {total === 0 ? (
+        {/* Phase B — tab toggle. Detection grid hoặc AI summary panel.
+            Chỉ show tab "Tổng hợp AI" khi summary đã có hoặc đang chờ generate. */}
+        <Box sx={{ px: 3.5, pt: 2, borderBottom: '1px solid #E2EAE8', backgroundColor: '#FAFCFB' }}>
+          <Box sx={{ display: 'flex', gap: 0.5 }}>
+            <MuiButton
+              size="small"
+              onClick={() => setTab('detections')}
+              sx={{
+                borderRadius: '8px 8px 0 0', fontSize: '0.78rem', fontWeight: 700, textTransform: 'none',
+                px: 2, py: 1, minWidth: 0,
+                color: tab === 'detections' ? '#006064' : 'text.secondary',
+                borderBottom: tab === 'detections' ? '2px solid #006064' : '2px solid transparent',
+                '&:hover': { backgroundColor: 'rgba(0,96,100,0.04)' },
+              }}
+            >
+              Tổn thương ({total})
+            </MuiButton>
+            <MuiButton
+              size="small"
+              onClick={() => setTab('summary')}
+              startIcon={<Sparkles size={13} />}
+              sx={{
+                borderRadius: '8px 8px 0 0', fontSize: '0.78rem', fontWeight: 700, textTransform: 'none',
+                px: 2, py: 1, minWidth: 0,
+                color: tab === 'summary' ? '#006064' : 'text.secondary',
+                borderBottom: tab === 'summary' ? '2px solid #006064' : '2px solid transparent',
+                '&:hover': { backgroundColor: 'rgba(0,96,100,0.04)' },
+              }}
+            >
+              Tổng hợp AI {hasSummary ? '' : '(chờ)'}
+            </MuiButton>
+          </Box>
+        </Box>
+
+        <Box sx={{ flex: 1, overflowY: 'auto', px: tab === 'summary' ? 0 : 3.5, py: tab === 'summary' ? 0 : 3, backgroundColor: 'background.default' }}>
+          {tab === 'summary' ? (
+            // AI summary + chat — full-height inline (not a nested dialog).
+            // Bind the session id explicitly so HTTP fallback addresses the
+            // right backend row even when user browses an older session.
+            <Box sx={{ height: '100%', p: 2 }}>
+              <SessionSummaryPanel
+                summary={session.summary}
+                qaMessages={session.qaMessages ?? []}
+                qaStreaming={session.qaStreaming ?? false}
+                onSendQA={(text) => onSendSessionQA(text, session.id)}
+                onClose={onClose}
+              />
+            </Box>
+          ) : total === 0 ? (
             <Box sx={{ textAlign: 'center', py: 6, color: 'text.disabled' }}>
               <ScanSearch size={40} color="#C8D8D6" />
               <Typography sx={{ mt: 1.5, fontSize: '0.9rem' }}>Phiên này không có tổn thương nào được phát hiện</Typography>
@@ -582,7 +636,7 @@ function SessionCard({ session, idx, onClick }: { session: Session; idx: number;
 // ── Page ──
 
 export default function ReportPage() {
-  const { sessions, removeSession, clearSessions } = useAnalysis();
+  const { sessions, removeSession, clearSessions, sendSessionQA } = useAnalysis();
   const [openSessionId, setOpenSessionId] = useState<string | null>(null);
   const [openDetection, setOpenDetection] = useState<Detection | null>(null);
 
@@ -683,6 +737,7 @@ export default function ReportPage() {
           session={openSession}
           onClose={() => setOpenSessionId(null)}
           onSelectDetection={(d) => setOpenDetection(d)}
+          onSendSessionQA={sendSessionQA}
           onDeleteSession={() => {
             if (window.confirm(`Xoá phiên "${openSession.name}"?`)) {
               removeSession(openSession.id);

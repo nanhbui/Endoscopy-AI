@@ -1,0 +1,1177 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Endoscopy AI — Architecture Defense</title>
+
+  <!-- Reveal.js core -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/theme/white.css" id="theme" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/monokai.css" />
+
+  <style>
+    :root {
+      --teal: #006064;
+      --teal-dark: #004D40;
+      --teal-light: #00897B;
+      --amber: #D97706;
+      --slate: #334155;
+      --bg-soft: #F8FAFB;
+    }
+    .reveal {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", sans-serif;
+      color: #1f2937;
+    }
+    .reveal h1, .reveal h2, .reveal h3, .reveal h4 {
+      color: var(--teal-dark);
+      font-weight: 700;
+      text-transform: none;
+      letter-spacing: -0.01em;
+    }
+    .reveal h1 { font-size: 2.4em; }
+    .reveal h2 { font-size: 1.6em; margin-bottom: 0.5em; }
+    .reveal h3 { font-size: 1.2em; }
+    .reveal section { text-align: left; }
+    .reveal .slide-title-center { text-align: center; }
+    .reveal .center { text-align: center; }
+    .reveal pre, .reveal code {
+      font-family: "JetBrains Mono", "Fira Code", Menlo, monospace;
+      font-size: 0.78em;
+    }
+    .reveal pre {
+      box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+      border-radius: 8px;
+    }
+    .reveal table {
+      font-size: 0.65em;
+      border-collapse: collapse;
+      width: 100%;
+    }
+    .reveal th {
+      background: var(--teal);
+      color: white;
+      padding: 0.4em 0.6em;
+      text-align: left;
+    }
+    .reveal td {
+      padding: 0.35em 0.6em;
+      border-bottom: 1px solid #E5E7EB;
+      vertical-align: top;
+    }
+    .reveal td.mono { font-family: "JetBrains Mono", monospace; font-size: 0.92em; color: var(--teal-dark); }
+    .reveal .badge {
+      display: inline-block;
+      padding: 2px 10px;
+      font-size: 0.7em;
+      border-radius: 12px;
+      font-weight: 600;
+      margin-right: 4px;
+    }
+    .reveal .badge-fe { background: rgba(2,119,189,0.12); color: #0277BD; }
+    .reveal .badge-be { background: rgba(0,96,100,0.12); color: var(--teal); }
+    .reveal .badge-py { background: rgba(217,119,6,0.12); color: var(--amber); }
+    .reveal .badge-ws { background: rgba(124,58,237,0.12); color: #7C3AED; }
+    .reveal .lead { font-size: 0.9em; color: var(--slate); }
+    .reveal .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1.2em;
+    }
+    .reveal .mermaid {
+      background: white;
+      border-radius: 8px;
+      padding: 0.6em;
+    }
+    .reveal .footnote {
+      font-size: 0.65em;
+      color: #6B7280;
+      margin-top: 0.6em;
+    }
+    .reveal .pill {
+      display: inline-block;
+      padding: 2px 8px;
+      background: rgba(0,96,100,0.08);
+      color: var(--teal);
+      border-radius: 6px;
+      font-size: 0.85em;
+      font-family: "JetBrains Mono", monospace;
+    }
+    .reveal ul { line-height: 1.5; }
+    .reveal ul li { margin-bottom: 0.3em; }
+    .reveal .kicker {
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 0.7em;
+      color: var(--teal);
+      font-weight: 700;
+    }
+    /* Hide footer on title slide */
+    .reveal section.title-slide { text-align: center; }
+    .reveal section.title-slide h1 { font-size: 2.6em; }
+    .reveal .subtitle { color: var(--slate); font-size: 1.2em; margin-top: 0.5em; }
+    .reveal .meta { color: #6B7280; font-size: 0.85em; margin-top: 1.5em; }
+
+    .reveal .file-ref {
+      color: var(--teal);
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.85em;
+    }
+
+    .reveal .callout {
+      padding: 0.8em 1em;
+      border-left: 4px solid var(--teal);
+      background: rgba(0,96,100,0.05);
+      border-radius: 0 8px 8px 0;
+      font-size: 0.9em;
+      margin: 0.6em 0;
+    }
+    .reveal .callout.warn {
+      border-color: var(--amber);
+      background: rgba(217,119,6,0.06);
+    }
+    .reveal .callout.danger {
+      border-color: #DC2626;
+      background: rgba(220,38,38,0.06);
+    }
+  </style>
+</head>
+<body>
+
+<div class="reveal">
+  <div class="slides">
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         SLIDE 1 — Title
+    ═══════════════════════════════════════════════════════════════════ -->
+    <section class="title-slide">
+      <h1>Smart Endoscopy AI Suite</h1>
+      <div class="subtitle">Real-time Lesion Detection · Voice-First UX · LLM Reasoning</div>
+      <div class="meta">
+        Architecture &amp; Design Decisions · Đồ án tốt nghiệp 2026<br/>
+        Stack: Next.js 15 · FastAPI · GStreamer · YOLOv8 · StrongSORT · GPT-4o
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         SLIDE 2 — Agenda
+    ═══════════════════════════════════════════════════════════════════ -->
+    <section>
+      <h2>Agenda</h2>
+      <ol>
+        <li><b>System Overview</b> — high-level data flow</li>
+        <li><b>Deployment</b> — local dev vs remote GPU</li>
+        <li><b>Frontend</b> — Next.js + AnalysisContext + WS client</li>
+        <li><b>Backend WS Server</b> — FastAPI session & relay</li>
+        <li><b>Pipeline Subprocess</b> — vì sao isolation</li>
+        <li><b>GStreamer + YOLO + StrongSORT</b> — chuỗi xử lý</li>
+        <li><b>Spatial-temporal Dedup</b> — design quan trọng</li>
+        <li><b>Pipeline State Machine</b> + <b>Sequence diagram</b></li>
+        <li><b>LLM Hybrid Flow</b> — vision + follow-up + cache</li>
+        <li><b>Voice Intent</b> — Web Speech API → keyword/LLM</li>
+        <li><b>WebSocket Protocol</b> — events &amp; actions</li>
+        <li><b>Bbox Coordinate Normalization</b></li>
+        <li><b>Failure Modes &amp; Safeguards</b></li>
+        <li><b>Spec 004 — Chatbot LLM Enhancement</b></li>
+      </ol>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         SLIDE 3 — System Overview
+    ═══════════════════════════════════════════════════════════════════ -->
+    <section>
+      <h2>System Overview</h2>
+      <div class="mermaid" style="height: 540px;">
+flowchart LR
+    subgraph Browser["🌐 Browser (Doctor's PC)"]
+        UI[Next.js 15 App<br/>App Router]
+        VR[&lt;video&gt; element<br/>blob: / stream URL]
+        WS[EndoscopyWsClient<br/>WebSocket]
+        SR[Web Speech API<br/>SpeechRecognition vi-VN]
+    end
+
+    subgraph Server["🖥️ Server (10.8.0.7)"]
+        FA[FastAPI<br/>endoscopy_ws_server.py]
+        SESS[(in-memory<br/>_sessions dict)]
+        LIB[(VideoLibrary<br/>data/library/)]
+        UPL[(uploads<br/>data/uploads/)]
+    end
+
+    subgraph Worker["⚙️ Subprocess (spawn)"]
+        GST[GStreamer<br/>filesrc/rtspsrc → decode]
+        YOLO[YOLOv8<br/>best_train6.pt]
+        TRACK[StrongSORT<br/>OSNet ReID]
+    end
+
+    subgraph External["☁️ External"]
+        GPT[OpenAI<br/>gpt-4o + gpt-4o-mini]
+    end
+
+    UI -- HTTP upload --> FA
+    UI <-- WebSocket --> FA
+    SR -.intent.-> UI
+    UI -- src --> VR
+
+    FA -- spawn --> Worker
+    FA <-- mp.Queue --> Worker
+    FA --> SESS
+    FA --> LIB
+    FA --> UPL
+
+    GST --> YOLO
+    YOLO --> TRACK
+
+    FA <-- HTTPS stream --> GPT
+
+    style Browser fill:#F0F4F3,stroke:#006064
+    style Server fill:#FFF7ED,stroke:#D97706
+    style Worker fill:#EEF2FF,stroke:#6366F1
+    style External fill:#F3F4F6,stroke:#6B7280
+      </div>
+      <div class="footnote">
+        FE và BE giao tiếp qua <span class="pill">WebSocket /ws/analysis/{video_id}</span>;
+        BE và worker subprocess giao tiếp qua <span class="pill">multiprocessing.Queue</span>;
+        BE gọi OpenAI streaming API.
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         SLIDE 4 — Deployment Topology
+    ═══════════════════════════════════════════════════════════════════ -->
+    <section>
+      <h2>Deployment Topology</h2>
+      <div class="mermaid" style="height: 480px;">
+flowchart TB
+    subgraph LocalDev["💻 Local Dev (Linux/macOS)"]
+        DEV1[Browser :3000]
+        DEV2[Next.js dev<br/>npm run dev]
+        DEV3[FastAPI dev<br/>uvicorn --reload :8001]
+        DEV4[Subprocess<br/>spawn]
+        DEV1 --> DEV2
+        DEV2 -. proxy .-> DEV3
+        DEV3 --> DEV4
+    end
+
+    subgraph Remote["🖧 Remote GPU Server (10.8.0.7)"]
+        VPN{VPN bee15<br/>nmcli + tun0}
+        REM1[uvicorn :8001<br/>~/DATN_ver0]
+        REM2[GPU<br/>nvh264dec / CUDA]
+        REM3[Subprocess<br/>YOLO + StrongSORT GPU]
+        REM1 --> REM3 --> REM2
+    end
+
+    subgraph Workflow["📦 Sync &amp; Run"]
+        W1[make sync<br/>rsync local → remote]
+        W2[make ssh → make be]
+        W3[make tunnel<br/>ssh -L 8001:localhost:8001]
+    end
+
+    LocalDev -- VPN --> VPN
+    VPN --> Remote
+    W1 --> Remote
+    W2 --> Remote
+    W3 --> Remote
+
+    style LocalDev fill:#F0FDF4,stroke:#22C55E
+    style Remote fill:#FEF3C7,stroke:#D97706
+    style Workflow fill:#EFF6FF,stroke:#3B82F6
+      </div>
+      <div class="grid-2" style="margin-top: 0.8em;">
+        <div>
+          <div class="kicker">Local mode</div>
+          <code>make dev</code> — BE+FE song song. CPU-only YOLO inference.
+        </div>
+        <div>
+          <div class="kicker">Remote mode</div>
+          <code>make sync &amp;&amp; make ssh</code> rồi <code>make be</code>. GPU-accelerated.
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         SLIDE 5 — Frontend Architecture
+    ═══════════════════════════════════════════════════════════════════ -->
+    <section>
+      <h2>Frontend Architecture <span class="badge badge-fe">Next.js 15 App Router</span></h2>
+      <div class="mermaid" style="height: 500px;">
+flowchart TB
+    subgraph Pages["📄 App Router pages"]
+        P1[app/page.tsx<br/>Landing]
+        P2[app/workspace/page.tsx<br/>Main analysis UI · 1254 LOC]
+        P3[app/report/page.tsx<br/>Session report]
+        P4[app/train/page.tsx<br/>Training UI]
+    end
+
+    subgraph State["🧠 State / Hooks"]
+        CTX[AnalysisContext<br/>React.createContext]
+        VC[useVoiceControl<br/>SpeechRecognition + AudioContext]
+    end
+
+    subgraph Lib["📚 Lib"]
+        WSC[ws-client.ts<br/>EndoscopyWsClient<br/>uploadVideo / connectLiveStream]
+    end
+
+    subgraph Comps["🧩 Components"]
+        VSM[VideoSourceModal<br/>upload + library]
+        VLP[VideoLibraryPanel]
+        DB[DetectionBar<br/>bottom overlay]
+        SRM[SessionReportModal]
+    end
+
+    P2 --> CTX
+    P2 --> VC
+    P2 --> VSM
+    P2 --> DB
+    P2 --> SRM
+    CTX --> WSC
+    WSC -- WS --> Backend((FastAPI))
+
+    style Pages fill:#FEF3C7
+    style State fill:#DBEAFE
+    style Lib fill:#E0E7FF
+    style Comps fill:#FCE7F3
+      </div>
+      <div class="footnote">
+        Workspace page là composition root: orchestrate context + voice hook + UI components.
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         SLIDE 6 — AnalysisContext State Machine
+    ═══════════════════════════════════════════════════════════════════ -->
+    <section>
+      <h2>AnalysisContext — State Machine</h2>
+      <div class="mermaid" style="height: 460px;">
+stateDiagram-v2
+    [*] --> IDLE
+    IDLE --> PLAYING: connectWs() / uploadAndConnect / connectLive
+    PLAYING --> PAUSED_WAITING_INPUT: DETECTION_FOUND
+    PAUSED_WAITING_INPUT --> PROCESSING_LLM: explainMore() / ACTION_EXPLAIN
+    PROCESSING_LLM --> PAUSED_WAITING_INPUT: LLM_DONE
+    PAUSED_WAITING_INPUT --> PLAYING: ignoreDetection / confirmDetection
+    PAUSED_WAITING_INPUT --> PROCESSING_LLM: followUpChat (UNKNOWN intent)
+    PLAYING --> EOS_SUMMARY: VIDEO_FINISHED
+    PAUSED_WAITING_INPUT --> EOS_SUMMARY: VIDEO_FINISHED (synthetic safety net)
+    EOS_SUMMARY --> IDLE: resetPipeline()
+      </div>
+      <table>
+        <tr><th>State</th><th>UI behaviour</th><th>Pipeline action</th></tr>
+        <tr><td class="mono">IDLE</td><td>Upload picker</td><td>—</td></tr>
+        <tr><td class="mono">PLAYING</td><td>Video plays · status badge "Đang phân tích"</td><td>Worker pulls frames, runs YOLO</td></tr>
+        <tr><td class="mono">PAUSED_WAITING_INPUT</td><td>Bbox overlay + DetectionBar · seek video to det.timestamp</td><td>Worker paused, awaits cmd</td></tr>
+        <tr><td class="mono">PROCESSING_LLM</td><td>LLM Smart Log streams chunks</td><td>BE relays OpenAI deltas</td></tr>
+        <tr><td class="mono">EOS_SUMMARY</td><td>SessionReportModal mở tự động</td><td>Worker exited</td></tr>
+      </table>
+      <div class="footnote">
+        Source: <span class="file-ref">frontend/context/AnalysisContext.tsx</span> · 11 actions exposed via <code>useAnalysis()</code>
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         SLIDE 7 — WebSocket Client
+    ═══════════════════════════════════════════════════════════════════ -->
+    <section>
+      <h2>WebSocket Client <span class="badge badge-fe">frontend/lib/ws-client.ts</span></h2>
+      <pre><code class="language-typescript">// 199 LOC — typed wrapper
+export class EndoscopyWsClient {
+  private ws: WebSocket | null;
+  onMessage: (evt: ServerEvent) =&gt; void;
+  onClose: () =&gt; void;
+
+  connect()           // ws://host:8001/ws/analysis/{videoId}
+  send(action)        // typed ClientAction union
+  disconnect()
+}
+
+// HTTP helpers
+uploadVideo(file, onProgress)         // POST /upload (octet-stream, XHR progress)
+connectLiveStream(source)             // POST /stream/connect
+listLibraryVideos / uploadToLibrary   // POST /library/upload (SHA-256 dedup)
+selectLibraryVideo / deleteLibraryVideo</code></pre>
+      <div class="grid-2">
+        <div>
+          <div class="kicker">ServerEvent (inbound)</div>
+          <code>DETECTION_FOUND</code> · <code>STATE_CHANGE</code> · <code>LLM_CHUNK</code> · <code>LLM_DONE</code> · <code>VIDEO_FINISHED</code> · <code>ERROR</code>
+        </div>
+        <div>
+          <div class="kicker">ClientAction (outbound)</div>
+          <code>ACTION_IGNORE</code> · <code>ACTION_EXPLAIN</code> · <code>ACTION_RESUME</code> · <code>ACTION_CONFIRM</code> · <code>ACTION_FOLLOW_UP {text}</code>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         SLIDE 8 — Voice Control Hook
+    ═══════════════════════════════════════════════════════════════════ -->
+    <section>
+      <h2>Voice Control — <span class="file-ref">use-voice-control.ts</span></h2>
+      <div class="mermaid" style="height: 380px;">
+flowchart LR
+    Mic[🎤 Microphone] --&gt; SR[SpeechRecognition<br/>lang=vi-VN<br/>continuous + interim]
+    Mic --&gt; AC[AudioContext<br/>AnalyserNode RMS]
+    AC --&gt; LM[Audio Level Meter UI]
+
+    SR -- onresult: interim --&gt; QM{quickMatch<br/>keyword pass &lt;1ms}
+    QM -- BO_QUA --&gt; AI1[ignoreDetection]
+    QM -- GIAI_THICH --&gt; AI2[explainMore]
+    QM -- XAC_NHAN --&gt; AI3[confirmDetection]
+    QM -- no match --&gt; CL[POST /voice/classify<br/>LLM intent fallback]
+    CL --&gt; AI4[followUpChat<br/>if UNKNOWN + llmInsight]
+
+    style QM fill:#FEF3C7
+    style CL fill:#DBEAFE
+      </div>
+      <table>
+        <tr><th>Intent</th><th>Vietnamese keywords (subset)</th><th>Action</th></tr>
+        <tr><td class="mono">BO_QUA</td><td>"bỏ qua", "không phải", "sai rồi", "skip"</td><td>ACTION_IGNORE</td></tr>
+        <tr><td class="mono">GIAI_THICH</td><td>"giải thích", "phân tích", "tại sao"</td><td>ACTION_EXPLAIN</td></tr>
+        <tr><td class="mono">XAC_NHAN</td><td>"xác nhận", "đúng rồi", "chính xác"</td><td>ACTION_CONFIRM</td></tr>
+        <tr><td class="mono">UNKNOWN</td><td>câu hỏi tự do (sau initial explain)</td><td>ACTION_FOLLOW_UP</td></tr>
+      </table>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         SLIDE 9 — Workspace Layout
+    ═══════════════════════════════════════════════════════════════════ -->
+    <section>
+      <h2>Workspace Layout — UI Composition</h2>
+      <div class="mermaid" style="height: 440px;">
+flowchart TB
+    subgraph TopBar["Top Bar"]
+        T1[NavBar — Dashboard / Workspace / Báo cáo / Train]
+    end
+
+    subgraph Grid["Grid 8/4 (lg)"]
+        subgraph Left["Left col xs:12 lg:8"]
+            L1[Video Panel<br/>VideoContainer 16:9<br/>+ BboxOverlay + DetectionBar]
+            L2[Voice Transcript<br/>Audio level meter]
+        end
+        subgraph Right["Right col xs:12 lg:4"]
+            R1[Control Panel<br/>Bắt đầu / Dừng hẳn]
+            R2[LLM Smart Log<br/>ReactMarkdown + remarkGfm]
+        end
+    end
+
+    Modal[VideoSourceModal<br/>Upload tab + Library tab]
+    SRM2[SessionReportModal<br/>EOS_SUMMARY trigger]
+
+    TopBar --&gt; Grid
+    Grid -. on click .-&gt; Modal
+    Grid -. on EOS .-&gt; SRM2
+
+    style Left fill:#F0F4F3
+    style Right fill:#FEF3C7
+      </div>
+      <div class="footnote">
+        Recent UI cleanup: removed duplicate "AI Detection Alert" card (right panel) — info now only in DetectionBar overlay + header status badge.
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         SLIDE 10 — Backend WS Server Architecture
+    ═══════════════════════════════════════════════════════════════════ -->
+    <section>
+      <h2>Backend — FastAPI WS Server <span class="badge badge-py">751 LOC</span></h2>
+      <div class="mermaid" style="height: 460px;">
+flowchart TB
+    subgraph REST["REST Endpoints"]
+        H1[GET /health]
+        H2[POST /upload<br/>application/octet-stream]
+        H3[POST /stream/connect<br/>RTSP / V4L2]
+        H4[GET /library &amp; POST /library/upload]
+        H5[POST /sessions/from-library/&#123;id&#125;]
+        H6[GET /session/&#123;id&#125;/video<br/>FileResponse + Range]
+        H7[GET /session/&#123;id&#125;/detections]
+        H8[GET /pipeline/metrics<br/>GstShark TSV parser]
+        H9[GET /pipeline/graph<br/>graphviz dot → SVG]
+    end
+
+    subgraph WS["WebSocket"]
+        WSE[/ws/analysis/&#123;video_id&#125;/]
+    end
+
+    subgraph Sessions["Session Registry (in-memory)"]
+        SDICT[_sessions: Dict&lt;video_id, dict&gt;<br/>controller · video_path · conv_history<br/>llm_cache · library_id]
+    end
+
+    subgraph Modules["Modules"]
+        VL[video_library.py<br/>SHA-256 prefix dedup]
+        VA[voice_api.py<br/>POST /voice/classify]
+        LG[logger.py — loguru]
+    end
+
+    REST --&gt; SDICT
+    WSE --&gt; SDICT
+    H4 --&gt; VL
+    WSE --&gt; VA
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         SLIDE 11 — Session Lifecycle
+    ═══════════════════════════════════════════════════════════════════ -->
+    <section>
+      <h2>Session Lifecycle — 3 Source Types</h2>
+      <div class="mermaid" style="height: 420px;">
+flowchart LR
+    subgraph Sources["3 ways to create a session"]
+        U1[Upload<br/>POST /upload]
+        U2[Live Stream<br/>POST /stream/connect]
+        U3[Library<br/>POST /sessions/from-library/id]
+    end
+
+    Sources -- video_id uuid4hex 12 --&gt; SESS
+
+    subgraph SESS["_sessions video_id"]
+        F1[controller: PipelineController]
+        F2[video_path: Path or URL]
+        F3[confirmed_detections list]
+        F4[library_id optional]
+        F5[conv_history list]
+        F6[llm_cache dict]
+        F7[llm_streaming bool]
+    end
+
+    SESS -- WS connect --&gt; CTRL[Create PipelineController<br/>ctrl.start video_path]
+    CTRL -- spawn --&gt; SUB((Worker))
+    SUB -- mp.Queue --&gt; CTRL --&gt; RELAY[_relay_events] --&gt; FE
+    FE -- ACTION_* --&gt; HANDLER[_handle_actions] --&gt; CTRL
+      </div>
+      <table>
+        <tr><th>Storage</th><th>Path</th><th>Lifetime</th></tr>
+        <tr><td>Upload (ephemeral)</td><td class="mono">data/uploads/&lt;id&gt;.mp4</td><td>Deleted on WS close</td></tr>
+        <tr><td>Library (persistent)</td><td class="mono">data/library/&lt;id&gt;.mp4</td><td>Until explicit DELETE</td></tr>
+        <tr><td>Live stream</td><td class="mono">rtsp:// or /dev/video*</td><td>Connection-bound</td></tr>
+      </table>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         SLIDE 12 — WS Concurrency Model
+    ═══════════════════════════════════════════════════════════════════ -->
+    <section>
+      <h2>WS Server Concurrency — Two Tasks + Lock</h2>
+      <div class="mermaid" style="height: 380px;">
+flowchart LR
+    WSC([WebSocket connection]) --&gt; ACC[await accept]
+    ACC --&gt; CTX[ctrl.start + asyncio.Lock]
+    CTX --&gt; T1[relay_task<br/>_relay_events]
+    CTX --&gt; T2[action_task<br/>_handle_actions]
+
+    T1 -- await ctrl.events.get --&gt; PIPE[(Pipeline events)]
+    T1 -- async with ws_lock --&gt; SEND1[ws.send_json]
+
+    T2 -- await ws.receive_text --&gt; CMD[/Action JSON/]
+    CMD -- ACTION_EXPLAIN --&gt; LLM1[ensure_future _stream_llm]
+    CMD -- ACTION_FOLLOW_UP --&gt; LLM2[ensure_future _stream_follow_up]
+    CMD -- IGNORE/CONFIRM/RESUME --&gt; CTRL[ctrl.send_action]
+
+    LLM1 -- async with ws_lock --&gt; SEND2[ws.send_json LLM_CHUNK]
+    LLM2 -- async with ws_lock --&gt; SEND2
+
+    T1 & T2 --&gt; WAIT{asyncio.wait<br/>FIRST_COMPLETED}
+    WAIT -- finally --&gt; STOP[ctrl.stop + cleanup upload]
+
+    style CTX fill:#FEF3C7
+    style WAIT fill:#DBEAFE
+      </div>
+      <div class="callout warn">
+        <b>Why <code>_ws_lock</code>?</b> Starlette WebSocket raises if 2 coroutines write concurrently.
+        <code>_relay_events</code> + <code>_stream_llm</code> can both fire <code>send_json</code> at the same time
+        (LLM streams while pipeline still emits state events). Lock serializes all writes.
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         SLIDE 13 — Pipeline Subprocess Rationale
+    ═══════════════════════════════════════════════════════════════════ -->
+    <section>
+      <h2>Pipeline = Subprocess (spawn). Tại sao?</h2>
+      <div class="grid-2">
+        <div>
+          <h3>3 conflicts ép buộc isolation</h3>
+          <ul>
+            <li><b>CUDA + fork = đứng máy</b> — PyTorch/Ultralytics khởi động CUDA context không thể fork an toàn</li>
+            <li><b>GLib threads ≠ uvloop</b> — GStreamer dùng GMainLoop riêng, conflict với asyncio loop của FastAPI</li>
+            <li><b>Blocking inference</b> — YOLO call ~50–200ms blocks event loop nếu chạy chung process</li>
+          </ul>
+          <div class="callout">
+            <code>_mp_ctx = mp.get_context("spawn")</code> — spawn (không fork) tạo Python interpreter mới hoàn toàn.
+          </div>
+        </div>
+        <div>
+          <h3>IPC contract</h3>
+          <ul>
+            <li><b>result_q</b> (worker → main) — events</li>
+            <li><b>cmd_q</b> (main → worker) — STOP / RESUME / IGNORE:&lt;fi&gt;:&lt;json&gt;</li>
+            <li><b>_bridge_loop</b> (daemon thread) — đẩy result_q → asyncio.Queue (events)</li>
+          </ul>
+          <pre><code class="language-python">self._proc = _mp_ctx.Process(
+    target=_pipeline_worker,
+    args=(video_path, model_path, conf,
+          result_q, cmd_q, reid_weights,
+          gstshark_*),
+    daemon=True,
+)</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         SLIDE 14 — GStreamer Pipeline
+    ═══════════════════════════════════════════════════════════════════ -->
+    <section>
+      <h2>GStreamer Pipeline — File / RTSP / V4L2</h2>
+      <div class="mermaid" style="height: 360px;">
+flowchart LR
+    subgraph File["File source (mp4 H.264)"]
+        FS[filesrc] --&gt; QD[qtdemux] --&gt; HP[h264parse] --&gt; AV[avdec_h264]
+        AV --&gt; VC1[videoconvert]
+    end
+
+    subgraph RTSP["RTSP source (live)"]
+        RS[rtspsrc<br/>latency=200] --&gt; RD[rtph264depay] --&gt; HP2[h264parse] --&gt; H2D{nvh264dec?}
+        H2D -- yes --&gt; NVD[NVIDIA NVDEC]
+        H2D -- no --&gt; AV2[avdec_h264]
+        NVD --&gt; SC[videoscale 640]
+        AV2 --&gt; SC
+    end
+
+    subgraph V4L2["V4L2 source (USB cam)"]
+        V4[v4l2src device=/dev/videoN] --&gt; SC2[videoscale 640]
+    end
+
+    subgraph Common["Common tail"]
+        Q[queue<br/>max-buffers=4<br/>NO leaky] --&gt; APP[appsink<br/>sync=false<br/>max-buffers=4]
+    end
+
+    VC1 --&gt; Q
+    SC --&gt; Q
+    SC2 --&gt; Q
+    APP --&gt; PY[Python<br/>buf.map → np.ndarray]
+      </div>
+      <div class="callout warn">
+        <b>NO <code>leaky</code> flag</b> — back-pressure ép GStreamer block thay vì drop frames khi Python pause (waiting user input). Tránh GStreamer race ahead tới EOS.
+      </div>
+      <div class="footnote">
+        Codec auto-detect via <code>ffprobe</code> (h264 / hevc / mpeg4). Format conversion (NV12/I420 → BGR) làm trong Python, KHÔNG ép caps lên appsink để tránh back-prop fail.
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         SLIDE 15 — YOLO + StrongSORT
+    ═══════════════════════════════════════════════════════════════════ -->
+    <section>
+      <h2>YOLO + StrongSORT — Inference Loop</h2>
+      <div class="mermaid" style="height: 340px;">
+flowchart LR
+    F[Frame BGR<br/>1920x1080] --&gt; DF{_is_diagnostic_frame?}
+    DF -- bright_frac &lt; 0.05<br/>or center_dark<br/>or std &lt; 12 --&gt; SKIP[Skip frame]
+    DF -- ok --&gt; VP[Auto-detect viewport<br/>contour scan]
+    VP --&gt; CROP[frame_inf<br/>= viewport crop]
+    CROP --&gt; YO[YOLO model fused<br/>FP16 if CUDA<br/>conf=0.55]
+    YO --&gt; FILT[Filter info-panel x &gt; viewport]
+    FILT --&gt; ND[np.array dets<br/>x1,y1,x2,y2,conf,cls]
+    ND --&gt; ST[StrongSort.update<br/>n_init=1<br/>max_age=300<br/>max_iou_dist=0.85<br/>max_cos_dist=0.4]
+    ST --&gt; OUT[tracks<br/>x1,y1,x2,y2,track_id,conf,cls]
+      </div>
+      <table>
+        <tr><th>Param</th><th>Value</th><th>Why</th></tr>
+        <tr><td class="mono">FRAME_STEP</td><td>1 (env override)</td><td>Match sample_code; FRAME_STEP=3 dropped many frames</td></tr>
+        <tr><td class="mono">CONFIDENCE</td><td>0.55</td><td>Lower → recall, higher → precision</td></tr>
+        <tr><td class="mono">SKIP_INITIAL_FRAMES</td><td>90 (~3s @ 30fps)</td><td>Skip scope insertion / title cards</td></tr>
+        <tr><td class="mono">VIEWPORT_W</td><td>1300 fallback / auto-detect</td><td>Loại info panel bên phải</td></tr>
+        <tr><td class="mono">max_iou_dist</td><td>0.85 (was 0.7)</td><td>Scope moves between frames; stricter dropped tracks</td></tr>
+        <tr><td class="mono">max_age</td><td>300 frames (~10s)</td><td>Scope tạm thời rời lesion rồi quay lại</td></tr>
+      </table>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         SLIDE 16 — Spatial-Temporal Dedup (key design decision)
+    ═══════════════════════════════════════════════════════════════════ -->
+    <section>
+      <h2>Design Decision: Spatial-Temporal Dedup</h2>
+      <div class="callout danger">
+        <b>Old approach (broken):</b> <code>_track_reported: set</code> — once track_id reported, suppressed forever.
+        Combined with <code>max_age=300</code>, the tracker re-associated returning lesions with old IDs → silently dropped detections in second half of the video.
+      </div>
+      <div class="grid-2">
+        <div>
+          <h3>New approach</h3>
+          <pre><code class="language-python">_DEDUP_WINDOW_MS = 10_000   # 10 s
+_DEDUP_IOU       = 0.25
+_reported_history: list[dict] = []
+
+def _is_recently_reported(ts_ms, bbox, label):
+    for r in _reported_history:
+        if (ts_ms - r["ts_ms"] &lt; _DEDUP_WINDOW_MS
+            and r["label"] == label
+            and _iou(r["bbox"], bbox) &gt;= _DEDUP_IOU):
+            return True
+    return False</code></pre>
+        </div>
+        <div>
+          <h3>Why it works</h3>
+          <ul>
+            <li><b>Same lesion within 10 s</b> → suppressed (avoid spam)</li>
+            <li><b>Different lesion same frame</b> → reported (different bbox)</li>
+            <li><b>Same lesion 30 s later</b> → reported again (doctor có thể muốn xem lại pass khác)</li>
+            <li><b>Tracker-agnostic</b> — không phụ thuộc track ID stability; works even if tracker disabled</li>
+          </ul>
+          <div class="callout">
+            <b>Trade-off:</b> O(N) lookup per detection. N = số detection trong session, thường &lt; 100 → negligible.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         SLIDE 17 — Pipeline State Machine (worker subprocess)
+    ═══════════════════════════════════════════════════════════════════ -->
+    <section>
+      <h2>Pipeline State Machine (worker side)</h2>
+      <div class="mermaid" style="height: 480px;">
+stateDiagram-v2
+    [*] --> Init: spawn
+    Init --> GstPlaying: Gst.State.PLAYING
+    Init --> Error: GStreamer unavailable
+
+    GstPlaying --> PullSample: try-pull-sample
+    PullSample --> RunYolo: sample ok &amp; frame % FRAME_STEP == 0
+    PullSample --> CheckBus: sample is None
+    PullSample --> NextFrame: skip filter / not multiple
+
+    RunYolo --> Track: dets exist
+    Track --> Dedup: tracks exist
+    Dedup --> Emit: not recently reported
+    Emit --> Paused: result_q.put DETECTION_FOUND
+
+    Paused --> DrainCmd: time.sleep 0.02
+    DrainCmd --> Paused: no cmd
+    DrainCmd --> PullSample: RESUME / IGNORE
+    DrainCmd --> Stop: STOP cmd should_stop=True
+
+    CheckBus --> EOS: bus.EOS
+    CheckBus --> Error: bus.ERROR
+    CheckBus --> PullSample: nothing
+
+    Stop --> EOS: graceful break
+    EOS --> Cleanup: gst_pipeline NULL
+    Error --> Cleanup
+    Cleanup --> EmitEOS: result_q.put _eos_event
+    EmitEOS --> [*]
+      </div>
+      <div class="footnote">
+        <b>Fix STOP race:</b> đã đổi từ <code>return</code> thành <code>should_stop=True; break</code> để <code>finally</code> + <code>_eos_event</code> luôn chạy.
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         SLIDE 18 — Detection Sequence (the big one)
+    ═══════════════════════════════════════════════════════════════════ -->
+    <section>
+      <h2>End-to-end Sequence — Detect → Explain → Resume</h2>
+      <div class="mermaid" style="height: 540px;">
+sequenceDiagram
+    autonumber
+    participant FE as Browser (FE)
+    participant Voice as SpeechRecognition
+    participant WS as FastAPI WS
+    participant Br as Bridge thread
+    participant W as Worker subprocess
+    participant GPT as OpenAI
+
+    FE-&gt;&gt;WS: POST /upload (binary)
+    WS--&gt;&gt;FE: {video_id}
+    FE-&gt;&gt;WS: WS connect /ws/analysis/{id}
+    WS-&gt;&gt;W: spawn + ctrl.start
+    W-&gt;&gt;W: GStreamer PLAYING + YOLO warm-up
+    W-&gt;&gt;W: loop: pull sample, YOLO, tracker
+
+    Note over W: Lesion detected, dedup pass
+    W-&gt;&gt;Br: result_q.put(DETECTION_FOUND + STATE_CHANGE PAUSED)
+    Br-&gt;&gt;WS: events.put_nowait
+    WS-&gt;&gt;FE: STATE_CHANGE PAUSED_WAITING_INPUT
+    WS-&gt;&gt;FE: DETECTION_FOUND (frame_b64, bbox 1920x1080)
+    FE-&gt;&gt;FE: setCurrentDetection + seek video to det.timestamp
+    FE-&gt;&gt;Voice: startListening (auto)
+
+    Voice--&gt;&gt;FE: onresult "giải thích thêm"
+    FE-&gt;&gt;FE: quickMatch → GIAI_THICH
+    FE-&gt;&gt;WS: ACTION_EXPLAIN
+    WS-&gt;&gt;GPT: chat.completions.create(gpt-4o, image+text, stream)
+    loop streaming
+        GPT--&gt;&gt;WS: delta
+        WS-&gt;&gt;FE: LLM_CHUNK (async with _ws_lock)
+    end
+    WS-&gt;&gt;FE: LLM_DONE + STATE_CHANGE PAUSED
+    WS-&gt;&gt;WS: cache[label:location] = full_response
+
+    Voice--&gt;&gt;FE: "sinh thiết ở đâu?" (UNKNOWN intent + llmInsight set)
+    FE-&gt;&gt;WS: ACTION_FOLLOW_UP {text}
+    WS-&gt;&gt;GPT: chat.completions.create(gpt-4o-mini, conv_history, stream)
+    GPT--&gt;&gt;WS: delta...
+    WS-&gt;&gt;FE: LLM_CHUNK + LLM_DONE
+
+    FE-&gt;&gt;WS: ACTION_CONFIRM
+    WS-&gt;&gt;W: cmd_q.put("RESUME")
+    W-&gt;&gt;W: paused=False, continue YOLO
+
+    Note over W: ... reaches EOS
+    W-&gt;&gt;Br: result_q.put(_eos_event)
+    Br-&gt;&gt;WS: events.put STATE_CHANGE EOS_SUMMARY + VIDEO_FINISHED
+    WS-&gt;&gt;FE: VIDEO_FINISHED
+    FE-&gt;&gt;FE: SessionReportModal opens
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         SLIDE 19 — LLM Hybrid Flow
+    ═══════════════════════════════════════════════════════════════════ -->
+    <section>
+      <h2>LLM Hybrid Flow — Vision + Follow-up + Cache</h2>
+      <div class="mermaid" style="height: 460px;">
+flowchart TB
+    A[ACTION_EXPLAIN received] --&gt; B{cache_key in<br/>sess.llm_cache?}
+    B -- HIT --&gt; CH[Stream cached words<br/>asyncio.sleep 0.02 each<br/>~5ms total wait]
+    B -- MISS --&gt; C{frame_b64 ok?}
+    C -- yes --&gt; D[Build user_content<br/>image_url detail=low + text]
+    C -- no --&gt; E[Text-only fallback<br/>label + confidence + location]
+    D --&gt; F[gpt-4o<br/>stream=True<br/>max_tokens=700]
+    E --&gt; F
+    F -- delta loop --&gt; G[Send LLM_CHUNK]
+    G --&gt; H[Send LLM_DONE]
+    H --&gt; I[sess.conv_history = initial + assistant<br/>sess.llm_cache cache_key = full]
+
+    J[ACTION_FOLLOW_UP] --&gt; K{conv_history empty?}
+    K -- yes --&gt; KSKIP[Ignore]
+    K -- no --&gt; L{len &gt; 10?}
+    L -- yes --&gt; M[Trim: history 0:2 + history -8:]
+    L -- no --&gt; N[history as-is]
+    M --&gt; O[gpt-4o-mini<br/>stream=True<br/>max_tokens=350<br/>system + history + user]
+    N --&gt; O
+    O -- delta --&gt; P[LLM_CHUNK + LLM_DONE]
+    P --&gt; Q[Append user + assistant turn]
+
+    R[ACTION_IGNORE / CONFIRM] --&gt; RST[sess.conv_history = empty<br/>sess.llm_streaming = False]
+
+    style B fill:#FEF3C7
+    style F fill:#DBEAFE
+    style O fill:#DCFCE7
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         SLIDE 20 — LLM System Prompt (Paris Classification)
+    ═══════════════════════════════════════════════════════════════════ -->
+    <section>
+      <h2>LLM System Prompt — Paris Classification</h2>
+      <pre><code class="language-text">## Hệ thống phân loại Paris (bắt buộc áp dụng)
+
+**Dạng polypoid (nhô cao):**
+- 0-Ip (cuống): Tổn thương có cuống rõ ràng
+- 0-Is (không cuống): Nhô cao, đáy rộng
+
+**Dạng phẳng/không polypoid:**
+- 0-IIa (nhô thấp): &lt; 2.5mm
+- 0-IIb (phẳng hoàn toàn): màu sắc thay đổi
+- 0-IIc (lõm nông): &lt; 1.2mm
+- 0-IIa+IIc (kết hợp): nguy cơ xâm lấn cao
+
+**Dạng lõm sâu:**
+- 0-III (loét): &gt; 1.2mm, bờ fibrin
+
+## Format phản hồi (bắt buộc 3 sections)
+**Phân loại Paris:** [Loại] — [mô tả màu sắc, bờ, kích thước]
+**Nhận định lâm sàng:** [lành / tiền ung thư / ác tính] — [lý do]
+**Checklist hành động:**
+- [ ] Bước 1
+- [ ] Bước 2
+...</code></pre>
+      <div class="callout">
+        <b>Why structured prompt?</b> Endoscopy reporting cần Paris classification chính xác (FR-013 baseline). Format 3 sections giúp UI render markdown đẹp + giảm hallucination. Prompt cố định ~1500 tokens → OpenAI auto-cache sau request đầu.
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         SLIDE 21 — WebSocket Protocol
+    ═══════════════════════════════════════════════════════════════════ -->
+    <section>
+      <h2>WebSocket Protocol — Event Reference</h2>
+      <div class="grid-2">
+        <div>
+          <h3>Server → Client</h3>
+          <table>
+            <tr><th>Event</th><th>Payload</th></tr>
+            <tr><td class="mono">DETECTION_FOUND</td><td>frame_index, timestamp_ms, location, lesion {label, confidence, bbox[4]}, frame_b64</td></tr>
+            <tr><td class="mono">STATE_CHANGE</td><td>state ∈ {IDLE, PLAYING, PAUSED_WAITING_INPUT, PROCESSING_LLM, EOS_SUMMARY}</td></tr>
+            <tr><td class="mono">LLM_CHUNK</td><td>chunk: string (delta)</td></tr>
+            <tr><td class="mono">LLM_DONE</td><td>{}</td></tr>
+            <tr><td class="mono">VIDEO_FINISHED</td><td>detections: list[DetectionData]</td></tr>
+            <tr><td class="mono">ERROR</td><td>message: string</td></tr>
+          </table>
+        </div>
+        <div>
+          <h3>Client → Server</h3>
+          <table>
+            <tr><th>Action</th><th>Payload</th><th>Trigger</th></tr>
+            <tr><td class="mono">ACTION_IGNORE</td><td>—</td><td>"Bỏ qua" / voice BO_QUA</td></tr>
+            <tr><td class="mono">ACTION_EXPLAIN</td><td>—</td><td>"Giải thích thêm" / voice GIAI_THICH</td></tr>
+            <tr><td class="mono">ACTION_CONFIRM</td><td>—</td><td>"Xác nhận" / voice XAC_NHAN</td></tr>
+            <tr><td class="mono">ACTION_RESUME</td><td>—</td><td>(legacy alias)</td></tr>
+            <tr><td class="mono">ACTION_FOLLOW_UP</td><td>{text: string}</td><td>UNKNOWN intent + llmInsight set</td></tr>
+          </table>
+        </div>
+      </div>
+      <div class="callout warn" style="margin-top: 0.6em;">
+        <b>Bbox convention</b>: <code>[x1, y1, x2, y2]</code> normalized to 1920×1080 virtual space. FE uses <code>FRAME_W=1920, FRAME_H=1080</code> as constants → percentage of full frame.
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         SLIDE 22 — Bbox Coordinate Normalization
+    ═══════════════════════════════════════════════════════════════════ -->
+    <section>
+      <h2>Bbox Coordinate Normalization</h2>
+      <div class="mermaid" style="height: 320px;">
+flowchart LR
+    A[Source video<br/>e.g. 1280x720] --&gt; B[GStreamer decode<br/>frame.shape = h×w]
+    B --&gt; C[Auto-detect viewport<br/>e.g. 866x720 crop]
+    C --&gt; D[YOLO infer on crop<br/>bbox in 0:866 x 0:720]
+    D --&gt; E[Add 8px padding]
+    E --&gt; F[Normalize to 1920x1080<br/>x*1920/frame.w<br/>y*1080/frame.h]
+    F --&gt; G[Send via WS]
+    G --&gt; H[FE: x/1920*100<br/>= percent of container]
+    H --&gt; I[CSS: left top width height]
+      </div>
+      <div class="grid-2">
+        <div>
+          <h3>Why virtual 1920×1080?</h3>
+          <ul>
+            <li>FE constants <code>FRAME_W/H</code> hard-coded</li>
+            <li>Source video resolution varies (720p, 1080p, 4K)</li>
+            <li>Single normalization step in BE → FE math always correct</li>
+          </ul>
+        </div>
+        <div>
+          <h3>Bbox label flip</h3>
+          <p>If <code>bbox.y &lt; 6%</code> (lesion ở mép trên), label flips từ <code>top: -36px</code> (above) sang <code>top: 4px</code> (inside) — tránh bị crop khỏi video container.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         SLIDE 23 — Failure Modes & Safeguards
+    ═══════════════════════════════════════════════════════════════════ -->
+    <section>
+      <h2>Failure Modes &amp; Safeguards</h2>
+      <table>
+        <tr><th>Failure</th><th>Symptom</th><th>Fix</th></tr>
+        <tr>
+          <td>WS concurrent writes</td>
+          <td>Starlette raises, WS closes, file deleted</td>
+          <td><code>asyncio.Lock</code> serializes <code>send_json</code></td>
+        </tr>
+        <tr>
+          <td>STOP race vs EOS event</td>
+          <td>Worker <code>return</code>, EOS skipped, FE stuck</td>
+          <td><code>should_stop=True; break</code> → <code>finally</code> emits <code>_eos_event</code></td>
+        </tr>
+        <tr>
+          <td>Worker crash (OOM, segfault)</td>
+          <td>Bridge sees dead proc + empty queue, exits silently</td>
+          <td>Bridge synthesizes <code>VIDEO_FINISHED</code> with accumulated detections</td>
+        </tr>
+        <tr>
+          <td>Track dedup blocks 2nd half</td>
+          <td>Lesions returning to same area never fire again</td>
+          <td>Spatial-temporal dedup (10s window, IoU 0.25)</td>
+        </tr>
+        <tr>
+          <td>Bbox label clipped at top</td>
+          <td>Label overflows above video container</td>
+          <td>Auto-flip when <code>bbox.y &lt; 6%</code></td>
+        </tr>
+        <tr>
+          <td>"Session not found" race</td>
+          <td>WS reconnect after upload deleted</td>
+          <td>FE handler resets state to IDLE on this specific error</td>
+        </tr>
+        <tr>
+          <td>Ignore button frozen</td>
+          <td>FE stays PAUSED after "Bỏ qua"</td>
+          <td>Optimistic UI update + <code>_set_state(PLAYING)</code> in worker after IGNORE</td>
+        </tr>
+        <tr>
+          <td>Library video deletion blocked</td>
+          <td>Lingering session locks file</td>
+          <td><code>_session_active()</code> checks <code>ctrl._proc.is_alive()</code>, not just registry</td>
+        </tr>
+      </table>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         SLIDE 24 — Spec 004 Chatbot Enhancement
+    ═══════════════════════════════════════════════════════════════════ -->
+    <section>
+      <h2>Spec 004 — Chatbot LLM Enhancement <span class="badge badge-py">P1+P2+P3</span></h2>
+      <table>
+        <tr><th>User Story</th><th>Priority</th><th>Trade-off</th><th>Status</th></tr>
+        <tr>
+          <td><b>US1</b> — Visual Analysis với Paris classification (gpt-4o vision, frame_b64 detail=low, max_tokens=700)</td>
+          <td>P1 (MVP)</td>
+          <td>+ Lâm sàng đúng / − Cost cao hơn 6×</td>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td><b>US2</b> — Hybrid Follow-up (gpt-4o-mini text-only, conversation history, no image re-sent)</td>
+          <td>P2</td>
+          <td>+ &lt;2s latency / − Phải reset history khi đổi detection</td>
+          <td>✅</td>
+        </tr>
+        <tr>
+          <td><b>US3</b> — In-session Cache (label:location key, in-memory dict)</td>
+          <td>P3</td>
+          <td>+ Instant 2nd hit / − Cache scope = session only</td>
+          <td>✅</td>
+        </tr>
+      </table>
+      <div class="grid-2" style="margin-top: 0.8em;">
+        <div>
+          <h3>Success Criteria</h3>
+          <ul>
+            <li>SC-003: ≥ 60% API cost reduction vs baseline</li>
+            <li>SC-002: Follow-up &lt; 2s first token</li>
+            <li>SC-001: 100% Paris classification when frame_b64 present</li>
+          </ul>
+        </div>
+        <div>
+          <h3>Mock Fallback</h3>
+          <p>Khi <code>OPENAI_API_KEY</code> rỗng → <code>_mock_llm_response()</code> trả Paris-formatted text giống hệt structure thật. Demo offline vẫn chạy được.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         SLIDE 25 — Tech Stack Summary
+    ═══════════════════════════════════════════════════════════════════ -->
+    <section>
+      <h2>Tech Stack Summary</h2>
+      <div class="grid-2">
+        <div>
+          <h3>Frontend <span class="badge badge-fe">browser</span></h3>
+          <ul>
+            <li><b>Next.js 15</b> App Router · React 19</li>
+            <li><b>TypeScript 5</b> strict</li>
+            <li><b>Material UI v7</b> + custom styled</li>
+            <li><b>framer-motion</b> animations</li>
+            <li><b>react-markdown + remark-gfm</b> (LLM output)</li>
+            <li><b>lucide-react</b> icons</li>
+            <li><b>Web Speech API</b> (browser native)</li>
+            <li><b>Web Audio API</b> (level meter)</li>
+          </ul>
+        </div>
+        <div>
+          <h3>Backend <span class="badge badge-py">python 3.10+</span></h3>
+          <ul>
+            <li><b>FastAPI</b> + Starlette WS</li>
+            <li><b>uvicorn</b> ASGI server</li>
+            <li><b>multiprocessing</b> (spawn ctx)</li>
+            <li><b>GStreamer 1.0</b> via PyGI (gi)</li>
+            <li><b>OpenCV</b> (cv2) frame manipulation</li>
+            <li><b>ultralytics</b> YOLOv8 + torch</li>
+            <li><b>boxmot</b> StrongSORT tracker (OSNet ReID)</li>
+            <li><b>openai (async)</b> + GPT-4o family</li>
+            <li><b>loguru</b> structured logs</li>
+          </ul>
+        </div>
+      </div>
+      <div class="callout">
+        <b>External services:</b> OpenAI API (gpt-4o vision, gpt-4o-mini text). Có thể swap bằng LLaVA-Med local (US6 baseline — chưa build).
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         SLIDE 26 — Closing
+    ═══════════════════════════════════════════════════════════════════ -->
+    <section class="title-slide">
+      <h1>Q&amp;A</h1>
+      <div class="subtitle">Defensive points đã cover:</div>
+      <ul style="display: inline-block; text-align: left; margin-top: 1em;">
+        <li>Why subprocess isolation? — CUDA fork + GLib threads + blocking inference</li>
+        <li>Why spatial-temporal dedup over track-ID? — max_age=300 + tracker re-association</li>
+        <li>Why hybrid LLM flow? — Cost + latency, vision khi cần thấy ảnh, text khi follow-up</li>
+        <li>Why <code>_ws_lock</code>? — Prevent Starlette concurrent-write panic</li>
+        <li>Why bbox normalize to 1920×1080 virtual? — Source resolution agnostic</li>
+        <li>Why graceful STOP? — Race với EOS event broke session report popup</li>
+      </ul>
+      <div class="meta" style="margin-top: 2em;">
+        Architecture &amp; design decisions verified against actual source code.
+      </div>
+    </section>
+
+  </div>
+</div>
+
+<!-- Reveal.js + plugins -->
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/highlight.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/notes/notes.js"></script>
+
+<!-- Mermaid -->
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.4.0/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: "default",
+    securityLevel: "loose",
+    flowchart: { useMaxWidth: true, htmlLabels: true, curve: "basis" },
+    sequence: { useMaxWidth: true },
+    themeVariables: {
+      primaryColor: "#006064",
+      primaryTextColor: "#ffffff",
+      primaryBorderColor: "#004D40",
+      lineColor: "#0F766E",
+      secondaryColor: "#FEF3C7",
+      tertiaryColor: "#F0F4F3",
+    },
+  });
+
+  const renderMermaid = async () => {
+    const blocks = document.querySelectorAll(".mermaid:not([data-rendered])");
+    for (const el of blocks) {
+      const id = "m" + Math.random().toString(36).slice(2, 9);
+      try {
+        const { svg } = await mermaid.render(id, el.textContent.trim());
+        el.innerHTML = svg;
+        el.setAttribute("data-rendered", "1");
+      } catch (e) {
+        el.innerHTML = `<pre style="color:#b91c1c">${String(e)}</pre>`;
+      }
+    }
+  };
+
+  // Initial render after DOM is ready
+  document.addEventListener("DOMContentLoaded", renderMermaid);
+
+  // Init Reveal AFTER mermaid renders so Reveal sees correct heights
+  window.addEventListener("load", async () => {
+    await renderMermaid();
+    Reveal.initialize({
+      hash: true,
+      slideNumber: "c/t",
+      controls: true,
+      progress: true,
+      history: true,
+      transition: "fade",
+      width: 1280,
+      height: 800,
+      margin: 0.04,
+      minScale: 0.2,
+      maxScale: 1.6,
+      plugins: [RevealHighlight, RevealNotes],
+    });
+  });
+</script>
+
+</body>
+</html>
