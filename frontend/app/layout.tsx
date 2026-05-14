@@ -2,6 +2,10 @@
 
 import type { Metadata } from "next";
 import { Inter, JetBrains_Mono } from "next/font/google";
+// Load design tokens as a side-effect — Next.js bundles this CSS file with
+// the app shell. Importing from globals.css via @import sometimes drops the
+// file on Tailwind v4's PostCSS pipeline; explicit import is safer.
+import "./tokens.css";
 import { ThemeProvider } from '@mui/material/styles';
 import CssBaseline from '@mui/material/CssBaseline';
 import { theme } from '@/lib/theme';

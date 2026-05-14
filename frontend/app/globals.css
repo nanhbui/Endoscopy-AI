@@ -1,9 +1,8 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
-/* Project design tokens (ported from new-theme/endoscopy/shared/tokens.css).
-   Loaded after Tailwind so :root vars are usable everywhere via var(--token). */
-@import "./tokens.css";
+/* Project design tokens are loaded from layout.tsx as a side-effect import
+   to avoid Tailwind v4 PostCSS occasionally dropping nested CSS @import. */
 
 @custom-variant dark (&:is(.dark *));
 

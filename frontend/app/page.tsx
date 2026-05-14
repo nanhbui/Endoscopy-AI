@@ -18,6 +18,31 @@ import {
 import { useAnalysis } from '@/context/AnalysisContext';
 import { API_BASE } from '@/lib/ws-client';
 
+// Hardcoded copies of the most-visible token values. Used directly in inline
+// styles where var(--token) resolution failed during initial migration (the
+// Tailwind v4 PostCSS pipeline sometimes drops nested @import). Keeps the
+// page rendering even if tokens.css briefly doesn't load.
+const HERO_GRADIENT = 'linear-gradient(135deg, #003A3D 0%, #006064 45%, #00838F 100%)';
+const C = {
+  teal600:   '#006064',
+  teal700:   '#004D50',
+  teal100:   '#C6E0E1',
+  neutral800: '#222B2A',
+  neutral700: '#36403F',
+  neutral600: '#4F5C5B',
+  neutral500: '#6E7C7B',
+  neutral400: '#9BA9A8',
+  neutral300: '#C9D4D3',
+  neutral200: '#E2EAE9',
+  neutral100: '#EEF2F2',
+  neutral50:  '#F7FAFA',
+  borderSubtle: '#E2EAE9',
+  bgSubtle:  '#F1F5F5',
+  bgPaper:   '#FFFFFF',
+  bgApp:     '#F7FAFA',
+  shadowSm:  '0 1px 2px rgba(13,27,42,0.04), 0 1px 1px rgba(13,27,42,0.03)',
+} as const;
+
 // ── KPI overview type — mirrors /analytics/overview when available ──────────
 // We tolerate the endpoint being missing (Phase E hasn't landed yet on this
 // branch) and fall back to whatever we can derive from sessions[].
@@ -108,7 +133,7 @@ function Hero({
   return (
     <div
       style={{
-        background: 'var(--hero-gradient)',
+        background: HERO_GRADIENT,
         color: 'white',
         position: 'relative',
         overflow: 'hidden',
@@ -152,7 +177,7 @@ function Hero({
             <h1 className="theme-h-display" style={{ margin: 0, color: 'white' }}>
               Phát hiện tổn thương real-time,
               <br />
-              <span style={{ color: 'var(--teal-100)' }}>
+              <span style={{ color: C.teal100 }}>
                 điều khiển hoàn toàn bằng giọng nói.
               </span>
             </h1>
@@ -171,7 +196,7 @@ function Hero({
                 href="/workspace"
                 style={{
                   display: 'inline-flex', alignItems: 'center', gap: 8,
-                  background: 'white', color: 'var(--teal-700)',
+                  background: 'white', color: C.teal700,
                   padding: '12px 20px', fontSize: 14, fontWeight: 600,
                   borderRadius: 'var(--r-md)', textDecoration: 'none',
                   boxShadow: '0 4px 20px rgba(0,0,0,0.20)',
@@ -226,7 +251,7 @@ function Hero({
                   <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.7)', marginTop: 4 }}>
                     {s.l}
                   </div>
-                  <div style={{ fontSize: 11, color: 'var(--teal-100)', marginTop: 8 }}>
+                  <div style={{ fontSize: 11, color: C.teal100, marginTop: 8 }}>
                     {s.sub}
                   </div>
                 </div>
@@ -255,7 +280,7 @@ const FEATURES = [
   {
     title: 'Smart Ignore & Memory',
     body:  'Backend SQLite ghi nhớ false-positive cross-session; vùng đã báo sai sẽ tự skip ở phiên sau.',
-    icon:  Brain, color: 'var(--teal-600)',
+    icon:  Brain, color: C.teal600,
   },
   {
     title: 'Trợ lý LLM y khoa',
@@ -283,10 +308,10 @@ function FeatureRow() {
           key={f.title}
           className="theme-fade-up"
           style={{
-            background: 'var(--bg-paper)',
+            background: C.bgPaper,
             border: '1px solid var(--border-subtle)',
             borderRadius: 'var(--r-xl)',
-            boxShadow: 'var(--shadow-sm)',
+            boxShadow: C.shadowSm,
             padding: 24,
           }}
         >
@@ -301,7 +326,7 @@ function FeatureRow() {
             <f.icon size={18} />
           </div>
           <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 6 }}>{f.title}</div>
-          <div style={{ fontSize: 13, color: 'var(--neutral-600)', lineHeight: 1.6 }}>
+          <div style={{ fontSize: 13, color: C.neutral600, lineHeight: 1.6 }}>
             {f.body}
           </div>
         </div>
@@ -333,10 +358,10 @@ function CurrentSessionPanel({
   return (
     <div
       style={{
-        background: 'var(--bg-paper)',
+        background: C.bgPaper,
         border: '1px solid var(--border-subtle)',
         borderRadius: 'var(--r-xl)',
-        boxShadow: 'var(--shadow-sm)',
+        boxShadow: C.shadowSm,
         overflow: 'hidden',
       }}
     >
@@ -361,7 +386,7 @@ function CurrentSessionPanel({
             padding: '6px 10px', borderRadius: 'var(--r-pill)',
             background: isPlaying ? 'rgba(2,119,189,0.08)' : 'rgba(154,165,177,0.10)',
             border: `1px solid ${isPlaying ? 'rgba(2,119,189,0.25)' : 'var(--border-default)'}`,
-            color: isPlaying ? 'var(--st-analyzed)' : 'var(--neutral-500)',
+            color: isPlaying ? 'var(--st-analyzed)' : C.neutral500,
             fontSize: 12, fontWeight: 600,
           }}
         >
@@ -378,7 +403,7 @@ function CurrentSessionPanel({
           href="/workspace"
           style={{
             display: 'inline-flex', alignItems: 'center', gap: 6,
-            background: 'var(--teal-600)', color: 'white',
+            background: C.teal600, color: 'white',
             padding: '8px 14px', fontSize: 13, fontWeight: 550,
             borderRadius: 'var(--r-md)', textDecoration: 'none',
           }}
@@ -391,7 +416,7 @@ function CurrentSessionPanel({
       <div
         style={{
           display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)',
-          gap: 1, background: 'var(--border-subtle)',
+          gap: 1, background: C.borderSubtle,
         }}
       >
         <StatCell label="Bắt đầu" value={startTs} mono />
@@ -409,13 +434,13 @@ function CurrentSessionPanel({
 
 function StatCell({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
   return (
-    <div style={{ padding: '20px 24px', background: 'var(--bg-paper)' }}>
+    <div style={{ padding: '20px 24px', background: C.bgPaper }}>
       <div className="theme-eyebrow" style={{ fontSize: 11 }}>{label}</div>
       <div
         style={{
           fontSize: 22, fontWeight: 700, marginTop: 4, letterSpacing: '-0.01em',
           fontFamily: mono ? 'var(--font-mono)' : undefined,
-          color: 'var(--neutral-800)',
+          color: C.neutral800,
         }}
       >
         {value}
@@ -439,7 +464,7 @@ function SessionsPreview({
         <Link
           href="/report"
           style={{
-            marginLeft: 'auto', fontSize: 13, color: 'var(--teal-600)',
+            marginLeft: 'auto', fontSize: 13, color: C.teal600,
             fontWeight: 550, textDecoration: 'none', display: 'inline-flex',
             alignItems: 'center', gap: 4,
           }}
@@ -450,10 +475,10 @@ function SessionsPreview({
 
       <div
         style={{
-          background: 'var(--bg-paper)',
+          background: C.bgPaper,
           border: '1px solid var(--border-subtle)',
           borderRadius: 'var(--r-xl)',
-          boxShadow: 'var(--shadow-sm)',
+          boxShadow: C.shadowSm,
           overflow: 'hidden',
         }}
       >
@@ -461,10 +486,10 @@ function SessionsPreview({
           <div
             style={{
               padding: '48px 24px', textAlign: 'center',
-              color: 'var(--neutral-500)',
+              color: C.neutral500,
             }}
           >
-            <ScanSearch size={28} style={{ marginBottom: 8, color: 'var(--neutral-300)' }} />
+            <ScanSearch size={28} style={{ marginBottom: 8, color: C.neutral300 }} />
             <div style={{ fontSize: 14, fontWeight: 600 }}>Chưa có phiên nào</div>
             <div style={{ fontSize: 12, marginTop: 4 }}>
               Tải video lên ở Workspace để bắt đầu phân tích đầu tiên.
@@ -473,14 +498,14 @@ function SessionsPreview({
         ) : (
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
-              <tr style={{ background: 'var(--bg-subtle)' }}>
+              <tr style={{ background: C.bgSubtle }}>
                 {['Phiên', 'Tên', 'Thời gian', 'Phát hiện', 'Nguồn', ''].map((h) => (
                   <th
                     key={h}
                     style={{
                       textAlign: 'left', padding: '10px 16px',
                       fontSize: 11, fontWeight: 700, letterSpacing: '0.06em',
-                      textTransform: 'uppercase', color: 'var(--neutral-500)',
+                      textTransform: 'uppercase', color: C.neutral500,
                       borderBottom: '1px solid var(--border-subtle)',
                     }}
                   >
@@ -506,7 +531,7 @@ function SessionsPreview({
                     <span style={{ fontWeight: 550 }}>{s.name}</span>
                   </td>
                   <td style={tdStyle}>
-                    <span style={{ color: 'var(--neutral-500)', fontSize: 12 }}>
+                    <span style={{ color: C.neutral500, fontSize: 12 }}>
                       {new Date(s.startedAt).toLocaleString('vi-VN', {
                         day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
                       })}
@@ -518,13 +543,13 @@ function SessionsPreview({
                         {s.detections.length}
                       </span>
                     ) : (
-                      <span style={{ color: 'var(--neutral-400)' }}>—</span>
+                      <span style={{ color: C.neutral400 }}>—</span>
                     )}
                   </td>
                   <td style={tdStyle}>
                     <span
                       className="theme-chip theme-chip--ignored"
-                      style={{ background: 'var(--bg-subtle)', color: 'var(--neutral-600)' }}
+                      style={{ background: C.bgSubtle, color: C.neutral600 }}
                     >
                       {SOURCE_LABEL[s.source]?.icon}
                       {SOURCE_LABEL[s.source]?.txt ?? s.source}
@@ -537,7 +562,7 @@ function SessionsPreview({
                       style={{
                         display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                         width: 28, height: 28, borderRadius: 'var(--r-sm)',
-                        color: 'var(--neutral-500)', textDecoration: 'none',
+                        color: C.neutral500, textDecoration: 'none',
                       }}
                     >
                       <ChevronRight size={14} />
@@ -554,12 +579,12 @@ function SessionsPreview({
             style={{
               padding: '12px 24px',
               borderTop: '1px solid var(--border-subtle)',
-              background: 'var(--bg-subtle)',
-              fontSize: 12, color: 'var(--neutral-500)', textAlign: 'center',
+              background: C.bgSubtle,
+              fontSize: 12, color: C.neutral500, textAlign: 'center',
             }}
           >
             Hiển thị {rows.length} phiên gần nhất —{' '}
-            <Link href="/report" style={{ color: 'var(--teal-600)', fontWeight: 600 }}>
+            <Link href="/report" style={{ color: C.teal600, fontWeight: 600 }}>
               xem tất cả
             </Link>
           </div>
@@ -572,20 +597,20 @@ function SessionsPreview({
 const tdStyle: React.CSSProperties = {
   padding: '14px 16px',
   fontSize: 13,
-  color: 'var(--neutral-700)',
+  color: C.neutral700,
   verticalAlign: 'middle',
 };
 
 // ── Pipeline graph — 7-node horizontal flow ────────────────────────────────
 
 const PIPELINE_NODES = [
-  { id: 'src',    label: 'Video source', sub: 'Upload · RTSP',     icon: Radio,      color: 'var(--neutral-600)' },
-  { id: 'gst',    label: 'GStreamer',    sub: 'decode · scale',    icon: Activity,   color: 'var(--neutral-600)' },
+  { id: 'src',    label: 'Video source', sub: 'Upload · RTSP',     icon: Radio,      color: C.neutral600 },
+  { id: 'gst',    label: 'GStreamer',    sub: 'decode · scale',    icon: Activity,   color: C.neutral600 },
   { id: 'yolo',   label: 'YOLO v8',      sub: 'object detect',     icon: Zap,        color: 'var(--st-detected)' },
-  { id: 'pause',  label: 'Pause + STT',  sub: 'Whisper-VI',        icon: Mic,        color: 'var(--teal-600)' },
+  { id: 'pause',  label: 'Pause + STT',  sub: 'Whisper-VI',        icon: Mic,        color: C.teal600 },
   { id: 'llm',    label: 'LLM',          sub: 'Ollama local',      icon: MessageSquareText, color: 'var(--st-processing)' },
   { id: 'intent', label: 'Voice intent', sub: 'BỎ_QUA / GIẢI_THÍCH', icon: Sparkles, color: 'var(--st-confirmed)' },
-  { id: 'res',    label: 'Resume',       sub: 'state → PLAYING',   icon: Play,       color: 'var(--neutral-600)' },
+  { id: 'res',    label: 'Resume',       sub: 'state → PLAYING',   icon: Play,       color: C.neutral600 },
 ];
 
 function PipelineGraphSection() {
@@ -593,17 +618,17 @@ function PipelineGraphSection() {
     <div>
       <div style={{ marginBottom: 16 }}>
         <h2 className="theme-h-h2" style={{ margin: 0 }}>Pipeline phân tích</h2>
-        <p style={{ marginTop: 4, fontSize: 12, color: 'var(--neutral-500)', letterSpacing: '0.02em' }}>
+        <p style={{ marginTop: 4, fontSize: 12, color: C.neutral500, letterSpacing: '0.02em' }}>
           Luồng dữ liệu real-time từ camera tới báo cáo lâm sàng
         </p>
       </div>
 
       <div
         style={{
-          background: 'var(--bg-paper)',
+          background: C.bgPaper,
           border: '1px solid var(--border-subtle)',
           borderRadius: 'var(--r-xl)',
-          boxShadow: 'var(--shadow-sm)',
+          boxShadow: C.shadowSm,
           padding: 32,
           overflow: 'auto',
         }}
@@ -616,7 +641,7 @@ function PipelineGraphSection() {
                   flex: 1, padding: '16px 14px',
                   border: '1px solid var(--border-subtle)',
                   borderRadius: 'var(--r-md)',
-                  background: 'var(--bg-paper)',
+                  background: C.bgPaper,
                   display: 'flex', flexDirection: 'column', gap: 8,
                   position: 'relative',
                 }}
@@ -633,7 +658,7 @@ function PipelineGraphSection() {
                 <div style={{ fontSize: 13, fontWeight: 600 }}>{n.label}</div>
                 <div
                   style={{
-                    color: 'var(--neutral-500)', fontSize: 11,
+                    color: C.neutral500, fontSize: 11,
                     fontFamily: 'var(--font-mono)',
                   }}
                 >
@@ -644,7 +669,7 @@ function PipelineGraphSection() {
                 <div
                   style={{
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    flex: '0 0 28px', color: 'var(--neutral-300)',
+                    flex: '0 0 28px', color: C.neutral300,
                   }}
                 >
                   <svg width="20" height="14" viewBox="0 0 20 14" fill="none">
@@ -679,14 +704,14 @@ function PipelineGraphSection() {
               <div
                 style={{
                   fontSize: 22, fontWeight: 700, fontFamily: 'var(--font-mono)',
-                  letterSpacing: '-0.01em', marginTop: 2, color: 'var(--neutral-800)',
+                  letterSpacing: '-0.01em', marginTop: 2, color: C.neutral800,
                 }}
               >
                 {m.v}
               </div>
               <div
                 style={{
-                  marginTop: 2, fontSize: 11, color: 'var(--neutral-500)',
+                  marginTop: 2, fontSize: 11, color: C.neutral500,
                   letterSpacing: '0.02em',
                 }}
               >
