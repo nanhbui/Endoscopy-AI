@@ -95,7 +95,20 @@ export default function PrintReportPage() {
         <button onClick={() => window.print()} className="btn primary">
           <Printer size={14} /> In / Lưu PDF
         </button>
-        <button onClick={() => router.back()} className="btn">
+        {/* This page is opened in a fresh tab via window.open() so there's
+            no history to navigate back to. window.close() succeeds on the
+            tab the script opened; router.back() is the fallback if the
+            user landed here directly via URL. */}
+        <button
+          onClick={() => {
+            window.close();
+            // If close failed (page wasn't script-opened), fall back to
+            // browser back. Tiny delay so close() has a chance to actually
+            // close before back() fires.
+            setTimeout(() => router.back(), 50);
+          }}
+          className="btn"
+        >
           <X size={14} /> Đóng
         </button>
       </div>
