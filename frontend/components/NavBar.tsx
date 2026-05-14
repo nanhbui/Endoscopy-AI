@@ -87,11 +87,15 @@ export default function NavBar() {
         </Link>
 
         {/* Nav links — horizontal scroll when the viewport can't fit all
-            items rather than wrapping into a 2nd line that breaks the header. */}
+            items rather than wrapping into a 2nd line that breaks the header.
+            justifyContent: center balances the bar visually so links sit in
+            the gap between the brand (left) and the action cluster (right)
+            instead of crowding the left side. */}
         <nav
           className="nav-links"
           style={{
-            display: 'flex', alignItems: 'center', gap: 4, marginLeft: 4,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            gap: 4,
             flex: 1, minWidth: 0,
             overflowX: 'auto', overflowY: 'hidden',
             scrollbarWidth: 'none',
