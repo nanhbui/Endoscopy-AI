@@ -11,7 +11,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
-  Gauge, ScanLine, ScrollText, Activity, Settings, BookOpen,
+  Microscope, Gauge, ScanLine, ScrollText, Activity, Settings, BookOpen,
 } from 'lucide-react';
 
 const navItems = [
@@ -56,23 +56,19 @@ export default function NavBar() {
         >
           <span
             style={{
-              width: 36, height: 36, borderRadius: 10,
+              width: 38, height: 38, borderRadius: 10,
               background: 'var(--hero-gradient)',
               color: 'white',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
-              boxShadow: '0 4px 10px rgba(0,96,100,0.25)',
+              boxShadow: '0 4px 12px rgba(0,96,100,0.30)',
               flexShrink: 0,
             }}
+            aria-label="AI Endoscopy Suite logo"
           >
-            {/* Scope icon — matches new-theme inline svg */}
-            <svg width={20} height={20} viewBox="0 0 20 20" fill="none" aria-hidden>
-              <circle cx={10} cy={10} r={8.5} stroke="currentColor" strokeWidth={1.5} />
-              <circle cx={10} cy={10} r={3.5} fill="currentColor" />
-              <path
-                d="M10 1.5 V4.5 M10 15.5 V18.5 M1.5 10 H4.5 M15.5 10 H18.5"
-                stroke="currentColor" strokeWidth={1.5} strokeLinecap="round"
-              />
-            </svg>
+            {/* Microscope icon — original brand mark, more recognizable than
+                new-theme's scope-aperture SVG. Inset on the hero-gradient
+                tile from new-theme so the chrome still feels updated. */}
+            <Microscope size={22} strokeWidth={2.2} />
           </span>
           <span style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.1 }}>
             <span style={{ fontWeight: 700, fontSize: 14, letterSpacing: '-0.01em', color: 'var(--neutral-800)' }}>
