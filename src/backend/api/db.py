@@ -42,6 +42,25 @@ CREATE TABLE IF NOT EXISTS lesion_reports (
 
 _INDEX_DDL = "CREATE INDEX IF NOT EXISTS idx_lesion_session ON lesion_reports(session_id)"
 
+# Phase D — "Báo sai" persistent false-positive store.
+# Bbox stored as full-frame normalized to 1920×1080 so cross-session match
+# works regardless of original source resolution (same as DETECTION_FOUND payload).
+# IoU-based match at query time, no spatial index needed at <10k rows.
+_FALSE_POSITIVES_DDL = """
+CREATE TABLE IF NOT EXISTS false_positives (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    label              TEXT NOT NULL,
+    bbox_x1            REAL NOT NULL,
+    bbox_y1            REAL NOT NULL,
+    bbox_x2            REAL NOT NULL,
+    bbox_y2            REAL NOT NULL,
+    reported_at        INTEGER NOT NULL,    -- unix epoch ms
+    session_id_source  TEXT                  -- which session originally reported it
+)
+"""
+
+_FP_LABEL_INDEX_DDL = "CREATE INDEX IF NOT EXISTS idx_fp_label ON false_positives(label)"
+
 
 def _connect() -> sqlite3.Connection:
     """Open a fresh connection. Caller must close. Each call sets pragmas
@@ -54,11 +73,13 @@ def _connect() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    """Create the lesion_reports table if missing. Safe to call repeatedly."""
+    """Create all Phase A + Phase D tables if missing. Safe to call repeatedly."""
     try:
         with _connect() as conn:
             conn.execute(_LESION_REPORTS_DDL)
             conn.execute(_INDEX_DDL)
+            conn.execute(_FALSE_POSITIVES_DDL)
+            conn.execute(_FP_LABEL_INDEX_DDL)
         logger.info("SQLite DB ready at {}", _DB_PATH)
     except sqlite3.Error as e:
         logger.error("init_db failed: {}", e)
@@ -119,3 +140,82 @@ def get_lesion_reports_for_session(session_id: str) -> list[dict]:
 def db_path() -> Path:
     """Exposed for tests / health checks that need the on-disk location."""
     return _DB_PATH
+
+
+# ── False-positives (Phase D) ────────────────────────────────────────────────
+
+_FRAME_W = 1920.0
+_FRAME_H = 1080.0
+_MAX_FP_AREA_RATIO = 0.7  # reject near-full-frame bboxes — they cause IoU>=0.6
+                          # matches against unrelated future detections (Copilot
+                          # high-severity finding, see PR review).
+
+
+def save_false_positive(label: str, bbox: list[float], session_id_source: str,
+                        reported_at_ms: int) -> bool:
+    """Persist one false-positive entry. bbox is [x1,y1,x2,y2] normalized to
+    1920×1080 (matches DETECTION_FOUND payload). Returns True on success."""
+    if len(bbox) < 4:
+        return False
+    w = max(0.0, float(bbox[2]) - float(bbox[0]))
+    h = max(0.0, float(bbox[3]) - float(bbox[1]))
+    area_ratio = (w * h) / (_FRAME_W * _FRAME_H)
+    if area_ratio <= 0.0 or area_ratio > _MAX_FP_AREA_RATIO:
+        logger.warning(
+            "save_false_positive rejected: bbox area ratio {:.2%} exceeds {:.0%} cap "
+            "(label={}, bbox={})", area_ratio, _MAX_FP_AREA_RATIO, label, bbox,
+        )
+        return False
+    try:
+        with _connect() as conn:
+            conn.execute(
+                """INSERT INTO false_positives
+                   (label, bbox_x1, bbox_y1, bbox_x2, bbox_y2, reported_at, session_id_source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (label, float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3]),
+                 reported_at_ms, session_id_source),
+            )
+        return True
+    except sqlite3.Error as e:
+        logger.error("save_false_positive failed: {}", e)
+        return False
+
+
+def load_all_false_positives() -> list[dict]:
+    """Load every false-positive entry as a list of dicts. Called once per
+    WS connect — small table, no pagination needed at this scale."""
+    try:
+        with _connect() as conn:
+            rows = conn.execute(
+                "SELECT label, bbox_x1, bbox_y1, bbox_x2, bbox_y2 FROM false_positives"
+            ).fetchall()
+        return [
+            {"label": r[0], "bbox": [r[1], r[2], r[3], r[4]]}
+            for r in rows
+        ]
+    except sqlite3.Error as e:
+        logger.error("load_all_false_positives failed: {}", e)
+        return []
+
+
+def _iou(a: list[float], b: list[float]) -> float:
+    """Standard IoU between two [x1,y1,x2,y2] boxes. Defined here to avoid
+    importing it into endoscopy_ws_server — keep the DB module self-contained."""
+    ix1 = max(a[0], b[0]); iy1 = max(a[1], b[1])
+    ix2 = min(a[2], b[2]); iy2 = min(a[3], b[3])
+    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    ua = (a[2]-a[0])*(a[3]-a[1]) + (b[2]-b[0])*(b[3]-b[1]) - inter
+    return inter / ua if ua > 0 else 0.0
+
+
+def matches_false_positive(label: str, bbox: list[float],
+                           false_positives: list[dict],
+                           iou_threshold: float = 0.6) -> bool:
+    """Check if (label, bbox) matches any entry in the FP list. IoU 0.6 chosen
+    as a balance: cross-session videos won't have pixel-perfect repeat, but
+    same anatomical region should overlap > 60 % on the normalized 1920×1080
+    canvas. Lower than session-local 0.8 because cross-session is fuzzier."""
+    for fp in false_positives:
+        if fp["label"] == label and _iou(fp["bbox"], bbox) >= iou_threshold:
+            return True
+    return False

@@ -62,7 +62,10 @@ from llm_prompts import (                                              # noqa: E
     LESION_REPORT_PROMPT,
     build_lesion_user_message,
 )
-from db import init_db, save_lesion_report                              # noqa: E402
+from db import (                                                       # noqa: E402
+    init_db, save_lesion_report,
+    save_false_positive, load_all_false_positives, matches_false_positive,
+)
 
 # ── Config ───────────────────────────────────────────────────────────────────
 # ENDOSCOPY_UPLOAD_DIR env var overrides default (needed on GPU server)
@@ -534,6 +537,13 @@ async def ws_analysis(websocket: WebSocket, video_id: str):
     ctrl.set_loop(asyncio.get_running_loop())
     ctrl.start(sess["video_path"])
 
+    # Phase D: load persistent false-positive list ONCE per session. Auto-skip
+    # any DETECTION_FOUND whose (label + bbox IoU >0.6) matches an entry, so
+    # the user isn't asked the same false alarm twice across sessions.
+    sess["false_positives"] = load_all_false_positives()
+    logger.info("Loaded {} persistent false-positives for session {}",
+                len(sess["false_positives"]), video_id)
+
     # Serialise all WS writes through a single lock — prevents concurrent send errors
     # when _relay_events and _stream_llm/_stream_follow_up both write at the same time.
     _ws_lock = asyncio.Lock()
@@ -552,6 +562,24 @@ async def ws_analysis(websocket: WebSocket, video_id: str):
             # Track confirmed detections (user did NOT ignore)
             if evt["event"] == "VIDEO_FINISHED":
                 sess["confirmed_detections"] = evt["data"]["detections"]
+
+            # Phase D: auto-skip detections matching known false-positives.
+            # Filter at this layer (main process) rather than in the worker
+            # subprocess so FP updates during a session take effect immediately.
+            if evt["event"] == "DETECTION_FOUND":
+                det = evt["data"]
+                lesion = det.get("lesion", {})
+                if matches_false_positive(
+                    lesion.get("label", ""),
+                    list(lesion.get("bbox", [])),
+                    sess.get("false_positives", []),
+                ):
+                    logger.info("Auto-skip false-positive: {} at frame {}",
+                                lesion.get("label"), det.get("frame_index"))
+                    # Tell controller to resume so the pipeline doesn't stay
+                    # paused on a detection the user already classified as wrong.
+                    ctrl.send_action("ACTION_IGNORE")
+                    continue  # don't forward to FE
 
             try:
                 async with _ws_lock:
@@ -600,6 +628,49 @@ async def ws_analysis(websocket: WebSocket, video_id: str):
                 sess["conv_history"] = []
                 sess["llm_streaming"] = False
                 ctrl.send_action(action, msg.get("payload"))
+
+            elif action == "ACTION_REPORT_FALSE_POSITIVE":
+                # Phase D — persist (label, bbox) so future detections matching
+                # this region auto-skip (across sessions). Then behave like IGNORE
+                # to advance the pipeline past the current pending detection.
+                pending = ctrl._pending
+                if pending:
+                    lesion = pending.get("lesion", {})
+                    label = lesion.get("label", "")
+                    bbox = list(lesion.get("bbox", []))
+                    if label and len(bbox) >= 4:
+                        ok = save_false_positive(
+                            label=label, bbox=bbox,
+                            session_id_source=video_id,
+                            reported_at_ms=int(time.time() * 1000),
+                        )
+                        if ok:
+                            sess["false_positives"].append({"label": label, "bbox": bbox})
+                            logger.info(
+                                "False-positive persisted: {} bbox={} (now {} total)",
+                                label, [round(v, 1) for v in bbox],
+                                len(sess["false_positives"]),
+                            )
+                sess["conv_history"] = []
+                sess["llm_streaming"] = False
+                ctrl.send_action("ACTION_IGNORE", msg.get("payload"))
+
+            elif action == "ACTION_RECHECK":
+                # Phase D — re-run YOLO on the currently paused frame with a
+                # lowered confidence threshold. The worker subprocess owns the
+                # model + last frame, so we forward a RECHECK:<conf> command
+                # and let it emit new DETECTION_FOUND events directly.
+                payload = msg.get("payload") or {}
+                try:
+                    conf = float(payload.get("conf", 0.4))
+                except (TypeError, ValueError):
+                    conf = 0.4
+                # Clamp to a sane band — too low (<0.2) floods false positives,
+                # too high (>0.6) won't surface anything the first pass missed.
+                conf = max(0.2, min(0.6, conf))
+                if ctrl._cmd_q:
+                    ctrl._cmd_q.put(f"RECHECK:{conf:.2f}")
+                logger.info("Re-check requested at conf={:.2f}", conf)
 
             else:
                 ctrl.send_action(action, msg.get("payload"))

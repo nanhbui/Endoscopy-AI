@@ -49,6 +49,7 @@ export type ServerEvent =
   | { event: "LLM_CHUNK";          data: { chunk: string } }
   | { event: "LLM_DONE";           data: Record<string, never> }
   | { event: "LESION_REPORT_DONE"; data: { frame_index: number; report: LesionReport } }
+  | { event: "RECHECK_EMPTY";      data: { conf: number; error?: string } }
   | { event: "VIDEO_FINISHED";     data: { detections: DetectionData[] } }
   | { event: "ERROR";              data: { message: string } };
 
@@ -59,7 +60,15 @@ export type ClientAction =
   | { action: "ACTION_EXPLAIN" }
   | { action: "ACTION_RESUME" }
   | { action: "ACTION_CONFIRM" }
-  | { action: "ACTION_FOLLOW_UP"; payload: { text: string } };
+  | { action: "ACTION_FOLLOW_UP"; payload: { text: string } }
+  // Phase D — three new doctor actions:
+  //   REPORT_FALSE_POSITIVE: mark this detection as wrong AND persist so future
+  //     sessions auto-skip the same (label + bbox region).
+  //   RECHECK: re-run YOLO on the paused frame at a lower confidence threshold.
+  //     New finding arrives as a fresh DETECTION_FOUND, or RECHECK_EMPTY if none.
+  //   (Quick-confirm reuses ACTION_CONFIRM — we just expose the button pre-LLM.)
+  | { action: "ACTION_REPORT_FALSE_POSITIVE" }
+  | { action: "ACTION_RECHECK"; payload?: { conf?: number } };
 
 // ── Video library types ───────────────────────────────────────────────────────
 

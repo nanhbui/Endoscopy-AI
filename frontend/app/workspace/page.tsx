@@ -10,6 +10,7 @@ import {
   ClipboardList,
   Clock,
   FileVideo,
+  Flag,
   MapPin,
   Mic,
   MicOff,
@@ -22,6 +23,8 @@ import {
   X,
   Zap,
 } from 'lucide-react';
+import IconButton from '@mui/material/IconButton';
+import Tooltip from '@mui/material/Tooltip';
 import { useRouter } from 'next/navigation';
 import MuiDialog from '@mui/material/Dialog';
 import MuiDialogContent from '@mui/material/DialogContent';
@@ -533,11 +536,35 @@ interface DetectionBarProps {
   onExplain: () => void;
   onIgnore: () => void;
   onConfirm: () => void;
+  // Phase D — 3 doctor actions exposed during the pre-LLM review window.
+  onQuickConfirm: () => void;       // skip Giải thích, mark confirmed, resume
+  onReportFalsePositive: () => void; // persist (label+bbox) for cross-session auto-skip
+  onRecheck: () => void;             // re-run YOLO on this frame at lower conf
 }
 
-function DetectionBar({ detection, llmInsight, voiceSupported, isVoiceListening, onExplain, onIgnore, onConfirm }: DetectionBarProps) {
+// Shared button styling factory — keeps the row visually consistent and
+// makes color the only thing that varies per action.
+function actionBtnSx(bg: string, hoverBg: string, text: string = '#000') {
+  return {
+    borderRadius: '7px',
+    backgroundColor: bg,
+    color: text,
+    fontWeight: 700,
+    fontSize: '0.72rem',
+    py: 0.4, px: 1,
+    whiteSpace: 'nowrap',
+    minWidth: 0,
+    '&:hover': { backgroundColor: hoverBg },
+  };
+}
+
+function DetectionBar({
+  detection, llmInsight, voiceSupported, isVoiceListening,
+  onExplain, onIgnore, onConfirm,
+  onQuickConfirm, onReportFalsePositive, onRecheck,
+}: DetectionBarProps) {
   return (
-    <Box sx={{ position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 4, px: 2, py: 1.25, backdropFilter: 'blur(14px)', backgroundColor: 'rgba(13,17,23,0.82)', borderTop: '1px solid rgba(245,158,11,0.25)', display: 'flex', alignItems: 'center', gap: 1.5 }}>
+    <Box sx={{ position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 4, px: 2, py: 1.25, backdropFilter: 'blur(14px)', backgroundColor: 'rgba(13,17,23,0.82)', borderTop: '1px solid rgba(245,158,11,0.25)', display: 'flex', alignItems: 'center', gap: 1 }}>
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, flex: 1, minWidth: 0 }}>
         <AlertTriangle size={14} color="#F59E0B" />
         <Typography sx={{ fontSize: '0.78rem', fontWeight: 700, color: '#FCD34D', whiteSpace: 'nowrap' }}>{detection.label}</Typography>
@@ -553,14 +580,49 @@ function DetectionBar({ detection, llmInsight, voiceSupported, isVoiceListening,
         </Box>
       )}
       {llmInsight ? (
+        // Post-LLM: doctor read the AI report — only Confirm / Ignore matter now.
         <>
-          <MuiButton size="small" variant="contained" onClick={onConfirm} sx={{ borderRadius: '7px', backgroundColor: 'rgba(34,197,94,0.85)', color: '#000', fontWeight: 700, fontSize: '0.75rem', py: 0.4, px: 1.25, whiteSpace: 'nowrap', '&:hover': { backgroundColor: '#16A34A' } }}>Xác nhận</MuiButton>
-          <MuiButton size="small" variant="outlined" onClick={onIgnore} sx={{ borderRadius: '7px', borderColor: 'rgba(255,255,255,0.2)', color: '#fff', fontWeight: 600, fontSize: '0.75rem', py: 0.4, px: 1.25, whiteSpace: 'nowrap', '&:hover': { borderColor: '#EF4444', color: '#FCA5A5' } }}>Bỏ qua</MuiButton>
+          <MuiButton size="small" variant="contained" onClick={onConfirm}
+            sx={actionBtnSx('rgba(34,197,94,0.85)', '#16A34A')}>Xác nhận</MuiButton>
+          <MuiButton size="small" variant="outlined" onClick={onIgnore}
+            sx={{ borderRadius: '7px', borderColor: 'rgba(255,255,255,0.2)', color: '#fff', fontWeight: 600, fontSize: '0.72rem', py: 0.4, px: 1, whiteSpace: 'nowrap', '&:hover': { borderColor: '#EF4444', color: '#FCA5A5' } }}>Bỏ qua</MuiButton>
         </>
       ) : (
+        // Pre-LLM: 2 primary text-buttons (Giải thích / Xác nhận luôn) + 3
+        // secondary icon-only buttons (Kiểm tra lại / Báo sai / Bỏ qua).
+        // Icons keep the bar compact and let primary actions stay visually dominant.
         <>
-          <MuiButton size="small" variant="outlined" onClick={onExplain} sx={{ borderRadius: '7px', borderColor: 'rgba(255,255,255,0.2)', color: '#fff', fontWeight: 600, fontSize: '0.75rem', py: 0.4, px: 1.25, whiteSpace: 'nowrap', '&:hover': { borderColor: '#0277BD', color: '#4FC3F7' } }}>Giải thích</MuiButton>
-          <MuiButton size="small" variant="contained" onClick={onIgnore} sx={{ borderRadius: '7px', backgroundColor: 'rgba(245,158,11,0.85)', color: '#000', fontWeight: 700, fontSize: '0.75rem', py: 0.4, px: 1.25, whiteSpace: 'nowrap', '&:hover': { backgroundColor: '#F59E0B' } }}>Bỏ qua</MuiButton>
+          <MuiButton size="small" variant="contained" onClick={onExplain}
+            startIcon={<Sparkles size={12} />}
+            sx={actionBtnSx('rgba(2,119,189,0.9)', '#0277BD', '#fff')}>Giải thích</MuiButton>
+          <MuiButton size="small" variant="contained" onClick={onQuickConfirm}
+            startIcon={<CheckCircle2 size={12} />}
+            sx={actionBtnSx('rgba(34,197,94,0.85)', '#16A34A')}>Xác nhận luôn</MuiButton>
+
+          {/* Divider between primary and secondary actions */}
+          <Box sx={{ width: '1px', height: 18, backgroundColor: 'rgba(255,255,255,0.15)', mx: 0.25 }} />
+
+          <Tooltip title="Kiểm tra lại — AI dò thêm với ngưỡng thấp hơn" arrow>
+            <IconButton size="small" onClick={onRecheck}
+              aria-label="Kiểm tra lại với ngưỡng thấp hơn"
+              sx={{ color: 'rgba(216,180,254,0.85)', border: '1px solid rgba(168,85,247,0.3)', borderRadius: '7px', p: 0.6, '&:hover': { backgroundColor: 'rgba(168,85,247,0.15)', borderColor: '#A855F7' } }}>
+              <RefreshCw size={14} />
+            </IconButton>
+          </Tooltip>
+          <Tooltip title="Báo sai — đánh dấu false positive (persist)" arrow>
+            <IconButton size="small" onClick={onReportFalsePositive}
+              aria-label="Báo false positive (lưu lâu dài)"
+              sx={{ color: 'rgba(252,165,165,0.9)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: '7px', p: 0.6, '&:hover': { backgroundColor: 'rgba(239,68,68,0.15)', borderColor: '#EF4444' } }}>
+              <Flag size={14} />
+            </IconButton>
+          </Tooltip>
+          <Tooltip title="Bỏ qua — chỉ session hiện tại" arrow>
+            <IconButton size="small" onClick={onIgnore}
+              aria-label="Bỏ qua detection trong session hiện tại"
+              sx={{ color: 'rgba(252,211,77,0.85)', border: '1px solid rgba(245,158,11,0.3)', borderRadius: '7px', p: 0.6, '&:hover': { backgroundColor: 'rgba(245,158,11,0.12)', borderColor: '#F59E0B' } }}>
+              <X size={14} />
+            </IconButton>
+          </Tooltip>
         </>
       )}
     </Box>
@@ -587,6 +649,9 @@ export default function Workspace() {
     explainMore,
     followUpChat,
     confirmDetection,
+    quickConfirm,
+    reportFalsePositive,
+    recheck,
     uploadOnly,
     prepareFromLibrary,
     connectLive,
@@ -962,7 +1027,7 @@ export default function Workspace() {
                   <VideoContainer>
                     <LiveStreamPanel source={liveSource} pipelineState={pipelineState} />
                     {pipelineState === 'PAUSED_WAITING_INPUT' && currentDetection && (
-                      <DetectionBar detection={currentDetection} llmInsight={llmInsight} voiceSupported={voiceSupported} isVoiceListening={isVoiceListening} onExplain={explainMore} onIgnore={ignoreDetection} onConfirm={confirmDetection} />
+                      <DetectionBar detection={currentDetection} llmInsight={llmInsight} voiceSupported={voiceSupported} isVoiceListening={isVoiceListening} onExplain={explainMore} onIgnore={ignoreDetection} onConfirm={confirmDetection} onQuickConfirm={quickConfirm} onReportFalsePositive={reportFalsePositive} onRecheck={() => recheck(0.4)} />
                     )}
                   </VideoContainer>
                 ) : libraryReady && !videoUrl && pipelineState === 'IDLE' ? (
@@ -984,7 +1049,7 @@ export default function Workspace() {
                       </Box>
                     )}
                     {pipelineState === 'PAUSED_WAITING_INPUT' && currentDetection && (
-                      <DetectionBar detection={currentDetection} llmInsight={llmInsight} voiceSupported={voiceSupported} isVoiceListening={isVoiceListening} onExplain={explainMore} onIgnore={ignoreDetection} onConfirm={confirmDetection} />
+                      <DetectionBar detection={currentDetection} llmInsight={llmInsight} voiceSupported={voiceSupported} isVoiceListening={isVoiceListening} onExplain={explainMore} onIgnore={ignoreDetection} onConfirm={confirmDetection} onQuickConfirm={quickConfirm} onReportFalsePositive={reportFalsePositive} onRecheck={() => recheck(0.4)} />
                     )}
                     {currentDetection && (() => {
                       const _c = bboxColorFor(currentDetection.label);
@@ -1057,7 +1122,7 @@ export default function Workspace() {
                       </Box>
                     )}
                     {pipelineState === 'PAUSED_WAITING_INPUT' && currentDetection && (
-                      <DetectionBar detection={currentDetection} llmInsight={llmInsight} voiceSupported={voiceSupported} isVoiceListening={isVoiceListening} onExplain={explainMore} onIgnore={ignoreDetection} onConfirm={confirmDetection} />
+                      <DetectionBar detection={currentDetection} llmInsight={llmInsight} voiceSupported={voiceSupported} isVoiceListening={isVoiceListening} onExplain={explainMore} onIgnore={ignoreDetection} onConfirm={confirmDetection} onQuickConfirm={quickConfirm} onReportFalsePositive={reportFalsePositive} onRecheck={() => recheck(0.4)} />
                     )}
 
                     {/* AI bbox overlay on top of video */}
@@ -1314,10 +1379,14 @@ export default function Workspace() {
                     </Box>
                   </Box>
 
-                  {/* Action buttons */}
-                  <Box sx={{ px: 2.5, pb: 2, display: 'flex', gap: 1 }}>
+                  {/* Action buttons.
+                      Column layout because pre-LLM state stacks 2 rows
+                      (primary CTAs + secondary icons). Post-LLM state uses
+                      a row inside (2 buttons), so the wrapping flex-column
+                      doesn't visually change the post-LLM look. */}
+                  <Box sx={{ px: 2.5, pb: 2, display: 'flex', flexDirection: 'column', gap: 1 }}>
                     {llmInsight ? (
-                      <>
+                      <Box sx={{ display: 'flex', gap: 1 }}>
                         <MuiButton
                           variant="contained" fullWidth size="small" onClick={confirmDetection}
                           sx={{ borderRadius: '8px', backgroundColor: '#16A34A', color: '#fff', fontWeight: 700, fontSize: '0.78rem', py: 0.85, boxShadow: '0 3px 10px rgba(22,163,74,0.3)', '&:hover': { backgroundColor: '#15803D' } }}
@@ -1330,7 +1399,7 @@ export default function Workspace() {
                         >
                           Bỏ qua
                         </MuiButton>
-                      </>
+                      </Box>
                     ) : pipelineState === 'PROCESSING_LLM' ? (
                       <Box sx={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1, py: 0.85, color: '#0277BD' }}>
                         <CircularProgress size={14} thickness={5} sx={{ color: '#0277BD' }} />
@@ -1339,20 +1408,49 @@ export default function Workspace() {
                         </Typography>
                       </Box>
                     ) : (
+                      // Phase D — pre-LLM. Row 1: 2 primary CTAs full-width.
+                      // Row 2: 3 icon tools centered. Column flex on the parent
+                      // makes them stack vertically.
                       <>
-                        <MuiButton
-                          variant="contained" fullWidth size="small" onClick={explainMore}
-                          startIcon={<Sparkles size={14} />}
-                          sx={{ borderRadius: '8px', backgroundColor: '#D97706', color: '#fff', fontWeight: 700, fontSize: '0.78rem', py: 0.85, boxShadow: '0 3px 10px rgba(217,119,6,0.3)', '&:hover': { backgroundColor: '#B45309' } }}
-                        >
-                          Giải thích
-                        </MuiButton>
-                        <MuiButton
-                          variant="outlined" fullWidth size="small" onClick={ignoreDetection}
-                          sx={{ borderRadius: '8px', borderColor: 'rgba(146,64,14,0.3)', color: '#92400E', fontWeight: 700, fontSize: '0.78rem', py: 0.85, '&:hover': { backgroundColor: 'rgba(245,158,11,0.08)', borderColor: '#D97706' } }}
-                        >
-                          Bỏ qua
-                        </MuiButton>
+                        <Box sx={{ display: 'flex', gap: 0.75 }}>
+                          <MuiButton
+                            variant="contained" fullWidth size="small" onClick={explainMore}
+                            startIcon={<Sparkles size={13} />}
+                            sx={{ borderRadius: '8px', backgroundColor: '#D97706', color: '#fff', fontWeight: 700, fontSize: '0.76rem', py: 0.75, boxShadow: '0 2px 8px rgba(217,119,6,0.25)', '&:hover': { backgroundColor: '#B45309' } }}
+                          >
+                            Giải thích
+                          </MuiButton>
+                          <MuiButton
+                            variant="contained" fullWidth size="small" onClick={quickConfirm}
+                            startIcon={<CheckCircle2 size={13} />}
+                            sx={{ borderRadius: '8px', backgroundColor: '#16A34A', color: '#fff', fontWeight: 700, fontSize: '0.76rem', py: 0.75, boxShadow: '0 2px 8px rgba(22,163,74,0.25)', '&:hover': { backgroundColor: '#15803D' } }}
+                          >
+                            Xác nhận luôn
+                          </MuiButton>
+                        </Box>
+                        <Box sx={{ display: 'flex', justifyContent: 'center', gap: 0.75 }}>
+                          <Tooltip title="Kiểm tra lại — AI dò với ngưỡng thấp hơn" arrow>
+                            <IconButton size="small" onClick={() => recheck(0.4)}
+                              aria-label="Kiểm tra lại với ngưỡng thấp hơn"
+                              sx={{ color: '#7C3AED', border: '1px solid rgba(124,58,237,0.35)', borderRadius: '8px', p: 0.7, '&:hover': { backgroundColor: 'rgba(124,58,237,0.08)', borderColor: '#7C3AED' } }}>
+                              <RefreshCw size={15} />
+                            </IconButton>
+                          </Tooltip>
+                          <Tooltip title="Báo sai — lưu vào DB, các phiên sau auto-skip vùng này" arrow>
+                            <IconButton size="small" onClick={reportFalsePositive}
+                              aria-label="Báo false positive (lưu lâu dài)"
+                              sx={{ color: '#DC2626', border: '1px solid rgba(220,38,38,0.35)', borderRadius: '8px', p: 0.7, '&:hover': { backgroundColor: 'rgba(220,38,38,0.08)', borderColor: '#DC2626' } }}>
+                              <Flag size={15} />
+                            </IconButton>
+                          </Tooltip>
+                          <Tooltip title="Bỏ qua — chỉ session hiện tại" arrow>
+                            <IconButton size="small" onClick={ignoreDetection}
+                              aria-label="Bỏ qua detection trong session hiện tại"
+                              sx={{ color: '#92400E', border: '1px solid rgba(146,64,14,0.3)', borderRadius: '8px', p: 0.7, '&:hover': { backgroundColor: 'rgba(245,158,11,0.08)', borderColor: '#D97706' } }}>
+                              <X size={15} />
+                            </IconButton>
+                          </Tooltip>
+                        </Box>
                       </>
                     )}
                   </Box>

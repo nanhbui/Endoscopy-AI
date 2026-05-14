@@ -517,6 +517,11 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
     frame_index = 0
     paused = False
     should_stop = False
+    # Phase D — remember the frame we paused on so RECHECK can re-run YOLO
+    # against it with a lower confidence threshold without rewinding the video.
+    _last_paused_frame = None
+    _last_paused_frame_index = 0
+    _last_paused_timestamp_ms = 0
 
     # Realtime sync diagnostics: every 1 s of ACTIVE wall-time (excludes pauses),
     # log how far behind/ahead the backend's video-time is. Pause durations are
@@ -552,6 +557,85 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                         data = _json.loads(parts[2])
                         _ignored.append({"fi": fi, "bbox": data["bbox"]})
                     paused = False
+                elif cmd.startswith("RECHECK:") and _last_paused_frame is not None and model is not None:
+                    # Phase D — re-run YOLO on the paused frame at a lower
+                    # confidence threshold. Skips StrongSORT (no temporal context
+                    # for a single frame) and per-class thresholds (the whole
+                    # point is to bypass them). Emits the highest-conf finding
+                    # as a fresh DETECTION_FOUND; stays paused either way.
+                    try:
+                        _rc_conf = float(cmd.split(":", 1)[1])
+                    except (ValueError, IndexError):
+                        _rc_conf = 0.4
+                    print(f"[Worker] RECHECK frame {_last_paused_frame_index} at conf={_rc_conf:.2f}", flush=True)
+                    try:
+                        rc_results = model(_last_paused_frame, conf=_rc_conf, verbose=False)
+                        rc_vx, rc_vy, rc_vfw, rc_vfh = _detect_viewport(_last_paused_frame)
+                        rc_dets = []
+                        for rcr in rc_results:
+                            if rcr.boxes is None:
+                                continue
+                            for box in rcr.boxes:
+                                if box.conf is None or box.conf.shape[0] == 0:
+                                    continue
+                                _bx1, _by1, _bx2, _by2 = box.xyxy[0].tolist()
+                                _cx, _cy = (_bx1 + _bx2) / 2, (_by1 + _by2) / 2
+                                if not (rc_vx <= _cx <= rc_vx + rc_vfw and rc_vy <= _cy <= rc_vy + rc_vfh):
+                                    continue
+                                _area = (_bx2 - _bx1) * (_by2 - _by1) / max(rc_vfw * rc_vfh, 1)
+                                if _area > MAX_BBOX_AREA_RATIO:
+                                    continue
+                                rc_dets.append([_bx1, _by1, _bx2, _by2, float(box.conf[0]), int(box.cls[0])])
+                        if rc_dets:
+                            rc_dets.sort(key=lambda d: d[4], reverse=True)
+                            _bx1, _by1, _bx2, _by2, _bc, _bcls = rc_dets[0]
+                            _bw, _bh = _bx2 - _bx1, _by2 - _by1
+                            _px, _py = _bw * 0.25, _bh * 0.25
+                            _bx1 = max(float(rc_vx),               _bx1 - _px)
+                            _by1 = max(float(rc_vy),               _by1 - _py)
+                            _bx2 = min(float(rc_vx + rc_vfw),      _bx2 + _px)
+                            _by2 = min(float(rc_vy + rc_vfh),      _by2 + _py)
+                            _xyxy = [_bx1, _by1, _bx2, _by2]
+                            _fw_full = _last_paused_frame.shape[1]
+                            _fh_full = _last_paused_frame.shape[0]
+                            _xyxy_norm = [
+                                _xyxy[0] / _fw_full * 1920,
+                                _xyxy[1] / _fh_full * 1080,
+                                _xyxy[2] / _fw_full * 1920,
+                                _xyxy[3] / _fh_full * 1080,
+                            ]
+                            _label = _clean_label(model_names.get(_bcls, f"class_{_bcls}"))
+                            _thumb = _crop_b64(_last_paused_frame, _xyxy)
+                            _bbox_thumb_pct = {
+                                "x":     (max(rc_vx, _xyxy[0]) - rc_vx) / rc_vfw * 100,
+                                "y":     (max(rc_vy, _xyxy[1]) - rc_vy) / rc_vfh * 100,
+                                "width":  (min(rc_vx + rc_vfw, _xyxy[2]) - max(rc_vx, _xyxy[0])) / rc_vfw * 100,
+                                "height": (min(rc_vy + rc_vfh, _xyxy[3]) - max(rc_vy, _xyxy[1])) / rc_vfh * 100,
+                            }
+                            _rc_data = {
+                                "frame_index": _last_paused_frame_index,
+                                "timestamp_ms": _last_paused_timestamp_ms,
+                                "lesion": {
+                                    "label": _label,
+                                    "confidence": round(_bc, 4),
+                                    "bbox": _xyxy_norm,
+                                    "bbox_thumb": _bbox_thumb_pct,
+                                },
+                                "frame_b64": _thumb,
+                            }
+                            result_q.put({"event": "DETECTION_FOUND", "data": _rc_data})
+                            print(f"[Worker] RECHECK found: {_label} conf={_bc:.2f}", flush=True)
+                        else:
+                            result_q.put({"event": "RECHECK_EMPTY", "data": {"conf": _rc_conf}})
+                            print(f"[Worker] RECHECK no detections at conf={_rc_conf:.2f}", flush=True)
+                    except Exception as _rc_exc:
+                        # Always emit a terminal event so FE leaves the "rechecking"
+                        # affordance — without this the UI sits paused forever on
+                        # silent inference failures (Copilot review finding).
+                        result_q.put({"event": "RECHECK_EMPTY",
+                                      "data": {"conf": _rc_conf, "error": str(_rc_exc)}})
+                        print(f"[Worker] RECHECK failed: {_rc_exc}", flush=True)
+                    # Stay paused — user reviews the new detection (or empty result) and decides.
 
             # Pause/resume the GStreamer pipeline alongside Python so the video
             # clock doesn't keep ticking while the user is reviewing a detection.
@@ -807,6 +891,12 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                         confirmed.append(det_data)
                         result_q.put({"event": "DETECTION_FOUND", "data": det_data})
                         paused = True
+                        # Phase D: snapshot frame for potential RECHECK request.
+                        # Copy avoids holding a reference to the GStreamer buffer
+                        # which gets recycled while paused.
+                        _last_paused_frame = frame.copy()
+                        _last_paused_frame_index = frame_index
+                        _last_paused_timestamp_ms = timestamp_ms
                         # Freeze GStreamer immediately so the video clock stops
                         # ticking forward while the user reviews the detection.
                         gst_pipeline.set_state(Gst.State.PAUSED)

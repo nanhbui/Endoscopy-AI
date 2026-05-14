@@ -134,6 +134,12 @@ interface AnalysisContextType {
   /** Confirm detection as valid → resume pipeline. */
   confirmDetection: () => void;
   resumePlayback: () => void;
+  /** Phase D — confirm pre-LLM (skip Giải thích, mark detection valid, resume). */
+  quickConfirm: () => void;
+  /** Phase D — flag this detection as persistent false positive in DB. */
+  reportFalsePositive: () => void;
+  /** Phase D — re-run YOLO on paused frame at lower conf (default 0.4). */
+  recheck: (conf?: number) => void;
   setIsPlaying: (v: boolean) => void;
   addDetection: (d: Detection) => void;
   removeDetection: (timestamp: number) => void;
@@ -344,6 +350,17 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
         }));
         break;
       }
+      case "RECHECK_EMPTY": {
+        // Recheck pass returned no new detection (or the worker threw). User
+        // stays on the original paused detection — log so devs can correlate
+        // with backend output; no state mutation needed.
+        if (evt.data.error) {
+          console.warn(`[WS] RECHECK failed at conf=${evt.data.conf}: ${evt.data.error}`);
+        } else {
+          console.info(`[WS] RECHECK at conf=${evt.data.conf} found nothing`);
+        }
+        break;
+      }
       case "VIDEO_FINISHED": {
         setPipelineState("EOS_SUMMARY");
         setIsConnected(false);
@@ -534,6 +551,44 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
     setCurrentDetection(null);
   }, []);
 
+  // Phase D — quick-confirm without invoking the LLM. Wraps confirmDetection
+  // since the wire-level action is identical; exposed as its own name for
+  // call-site clarity (the button appears pre-LLM, while confirmDetection's
+  // button appears post-LLM after Giải thích).
+  const quickConfirm = useCallback(() => {
+    if (!wsRef.current) return;
+    wsRef.current.send({ action: "ACTION_CONFIRM" });
+    updateCurrentSession((sess) => ({
+      ...sess,
+      detections: sess.detections.map((d, i) => (i === 0 ? { ...d, status: "confirmed" } : d)),
+    }));
+    setPipelineState("PLAYING");
+    setCurrentDetection(null);
+    llmInsightRef.current = ""; setLlmInsight("");
+  }, [updateCurrentSession]);
+
+  // Phase D — flag this detection as a persistent false positive. Server saves
+  // (label + bbox) to SQLite so future sessions auto-skip the same region.
+  const reportFalsePositive = useCallback(() => {
+    if (!wsRef.current) return;
+    wsRef.current.send({ action: "ACTION_REPORT_FALSE_POSITIVE" });
+    updateCurrentSession((sess) => ({
+      ...sess,
+      detections: sess.detections.map((d, i) => (i === 0 ? { ...d, status: "ignored" } : d)),
+    }));
+    setPipelineState("PLAYING");
+    setCurrentDetection(null);
+    llmInsightRef.current = ""; setLlmInsight("");
+  }, [updateCurrentSession]);
+
+  // Phase D — request a re-detect on the paused frame at a lower YOLO conf.
+  // Result arrives as a fresh DETECTION_FOUND (or RECHECK_EMPTY) via WS,
+  // handled by the standard server-event switch.
+  const recheck = useCallback((conf: number = 0.4) => {
+    if (!wsRef.current) return;
+    wsRef.current.send({ action: "ACTION_RECHECK", payload: { conf } });
+  }, []);
+
   const setIsPlaying = useCallback((v: boolean) => {
     if (!v) {
       clearMockTimers();
@@ -613,6 +668,9 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       followUpChat,
       confirmDetection,
       resumePlayback,
+      quickConfirm,
+      reportFalsePositive,
+      recheck,
       setIsPlaying,
       addDetection,
       removeDetection,
@@ -625,7 +683,9 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       currentDetection, isListeningVoice, llmInsight, detections,
       uploadOnly, uploadAndConnect, connectLive, prepareFromLibrary, selectFromLibrary,
       startMockAnalysis, resetPipeline, ignoreDetection,
-      explainMore, followUpChat, confirmDetection, resumePlayback, setIsPlaying,
+      explainMore, followUpChat, confirmDetection, resumePlayback,
+      quickConfirm, reportFalsePositive, recheck,
+      setIsPlaying,
       addDetection, removeDetection, resetAnalysis, removeSession, clearSessions,
     ],
   );
