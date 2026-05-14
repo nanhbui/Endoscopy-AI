@@ -892,14 +892,72 @@ export default function Workspace() {
     <Box sx={{ minHeight: 'calc(100vh - 130px)', py: 3, px: { xs: 1.5, lg: 3 }, backgroundColor: 'background.default' }}>
       <Box sx={{ maxWidth: '1440px', mx: 'auto' }}>
 
-        {/* Page header */}
-        <Box sx={{ mb: 3 }}>
-          <Typography variant="h3" sx={{ fontSize: '1.375rem', fontWeight: 700, color: 'text.primary', mb: 0.5 }}>
-            Workspace phân tích
-          </Typography>
-          <Typography variant="body2" color="textSecondary">
-            Tải video nội soi lên, theo dõi luồng và tương tác với trợ lý AI theo thời gian thực.
-          </Typography>
+        {/* Session top bar — ported from new-theme/workspace.jsx SessionTopBar.
+            Left: page title + active video/session label. Middle: pipeline
+            state pill with pulsing dot (greens when streaming, orange when
+            paused on detection, etc). Right: future slot for voice/settings. */}
+        <Box
+          sx={{
+            mb: 3, px: 2.5, py: 1.75,
+            borderRadius: '12px',
+            backgroundColor: '#FFFFFF',
+            border: '1px solid #E2EAE9',
+            boxShadow: '0 1px 2px rgba(13,27,42,0.04)',
+            display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap',
+          }}
+        >
+          <Box sx={{ flex: '1 1 auto', minWidth: 0 }}>
+            <Typography
+              sx={{
+                fontSize: '0.66rem', fontWeight: 700, letterSpacing: '0.12em',
+                color: '#6E7C7B', textTransform: 'uppercase', mb: 0.25,
+              }}
+            >
+              WORKSPACE PHÂN TÍCH
+            </Typography>
+            <Typography
+              sx={{
+                fontSize: '1.05rem', fontWeight: 700, color: '#222B2A',
+                lineHeight: 1.3,
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}
+            >
+              {videoFile?.name ?? (libraryReady
+                ? 'Video từ thư viện'
+                : sourceMode === 'live'
+                  ? (isConnected ? `Live: ${liveSource}` : 'Live stream — chờ kết nối')
+                  : 'Chưa chọn video')}
+            </Typography>
+          </Box>
+
+          {/* Pipeline state pill */}
+          <Box
+            sx={{
+              display: 'inline-flex', alignItems: 'center', gap: 0.75,
+              px: 1.5, py: 0.75,
+              borderRadius: '999px',
+              backgroundColor: statusConfig.bg,
+              border: `1px solid ${statusConfig.color}40`,
+              color: statusConfig.textColor,
+              fontSize: '0.78rem', fontWeight: 600,
+              flexShrink: 0,
+            }}
+          >
+            <Box
+              sx={{
+                width: 8, height: 8, borderRadius: '50%',
+                backgroundColor: statusConfig.color,
+                boxShadow: `0 0 0 3px ${statusConfig.color}33`,
+                animation: (pipelineState === 'PLAYING' || pipelineState === 'PROCESSING_LLM')
+                  ? 'workspacePulseDot 1.6s ease-in-out infinite' : 'none',
+                '@keyframes workspacePulseDot': {
+                  '0%, 100%': { opacity: 1 },
+                  '50%': { opacity: 0.45 },
+                },
+              }}
+            />
+            {statusConfig.text}
+          </Box>
         </Box>
 
         {/* Backend offline banner */}
