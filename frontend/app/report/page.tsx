@@ -670,43 +670,102 @@ export default function ReportPage() {
     <Box sx={{ minHeight: 'calc(100vh - 130px)', py: 5, px: { xs: 2, lg: 4 }, backgroundColor: 'background.default' }}>
       <Container maxWidth="lg" sx={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
 
-        <Box sx={{ display: 'flex', flexDirection: { xs: 'column', md: 'row' }, alignItems: { md: 'flex-start' }, justifyContent: 'space-between', gap: 2 }}>
-          <Box>
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 1, px: 1.5, py: 0.4, borderRadius: '6px', backgroundColor: 'rgba(0,96,100,0.1)', width: 'fit-content' }}>
-              <FileText size={12} color="#006064" />
-              <Typography variant="caption" sx={{ fontWeight: 700, color: '#006064', letterSpacing: '0.05em', textTransform: 'uppercase' }}>
-                Báo cáo tổng kết
-              </Typography>
-            </Box>
-            <Typography variant="h3" sx={{ fontSize: '1.5rem', fontWeight: 800, color: 'text.primary', mb: 0.5 }}>
+        {/* Header card — new-theme structure: eyebrow + display-h2 + stat row
+            on the left, action cluster on the right. Single white card with
+            subtle border so the whole header feels cohesive. */}
+        <Box
+          sx={{
+            display: 'flex', flexDirection: { xs: 'column', md: 'row' },
+            alignItems: { md: 'center' }, justifyContent: 'space-between',
+            gap: 2.5, p: { xs: 2.5, md: 3 },
+            borderRadius: '16px', backgroundColor: '#FFFFFF',
+            border: '1px solid #E2EAE9',
+            boxShadow: '0 1px 2px rgba(13,27,42,0.04)',
+          }}
+        >
+          <Box sx={{ flex: 1, minWidth: 0 }}>
+            <Typography
+              sx={{
+                fontSize: '0.66rem', fontWeight: 700, letterSpacing: '0.12em',
+                color: '#6E7C7B', textTransform: 'uppercase', mb: 0.75,
+                display: 'inline-flex', alignItems: 'center', gap: 0.6,
+              }}
+            >
+              <FileText size={11} /> Báo cáo tổng kết
+            </Typography>
+            <Typography
+              sx={{
+                fontSize: { xs: '1.45rem', md: '1.65rem' },
+                fontWeight: 700, color: '#222B2A',
+                letterSpacing: '-0.015em', lineHeight: 1.25, mb: 0.75,
+              }}
+            >
               Lịch sử phiên nội soi
             </Typography>
-            <Typography variant="body2" color="textSecondary">
-              {sessions.length} phiên · {totalDetections} tổn thương · Lưu cục bộ tối đa 10 phiên gần nhất
-            </Typography>
+
+            {/* Compact stat row: 2 numbers + retention note */}
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 2.5, flexWrap: 'wrap' }}>
+              <Box sx={{ display: 'inline-flex', alignItems: 'baseline', gap: 0.5 }}>
+                <Typography sx={{ fontSize: '1.05rem', fontWeight: 700, color: '#006064', fontFamily: 'var(--font-mono)' }}>
+                  {sessions.length}
+                </Typography>
+                <Typography sx={{ fontSize: '0.78rem', color: '#6E7C7B' }}>
+                  phiên
+                </Typography>
+              </Box>
+              <Box sx={{ width: 1, height: 14, backgroundColor: '#E2EAE9' }} />
+              <Box sx={{ display: 'inline-flex', alignItems: 'baseline', gap: 0.5 }}>
+                <Typography sx={{ fontSize: '1.05rem', fontWeight: 700, color: '#D97706', fontFamily: 'var(--font-mono)' }}>
+                  {totalDetections}
+                </Typography>
+                <Typography sx={{ fontSize: '0.78rem', color: '#6E7C7B' }}>
+                  tổn thương
+                </Typography>
+              </Box>
+              <Box sx={{ width: 1, height: 14, backgroundColor: '#E2EAE9' }} />
+              <Typography sx={{ fontSize: '0.72rem', color: '#9BA9A8' }}>
+                Lưu cục bộ tối đa 10 phiên gần nhất
+              </Typography>
+            </Box>
           </Box>
 
-          <Box sx={{ display: 'flex', gap: 1.5, flexWrap: 'wrap' }}>
+          <Box sx={{ display: 'flex', gap: 1.25, flexWrap: 'wrap', flexShrink: 0 }}>
             <MuiButton
               variant="outlined"
-              startIcon={<Trash2 size={16} />}
+              startIcon={<Trash2 size={14} />}
               onClick={() => {
                 if (window.confirm('Xoá toàn bộ lịch sử phiên?')) clearSessions();
               }}
-              sx={{ borderRadius: '10px', fontWeight: 700, borderColor: 'rgba(220,38,38,0.3)', color: '#DC2626', px: 2.5, '&:hover': { backgroundColor: 'rgba(220,38,38,0.06)', borderColor: '#DC2626' } }}
+              sx={{
+                borderRadius: '8px', fontWeight: 600, fontSize: '0.82rem',
+                textTransform: 'none', borderColor: '#E2EAE9',
+                color: '#C44E52', px: 2,
+                '&:hover': { backgroundColor: 'rgba(196,78,82,0.06)', borderColor: '#C44E52' },
+              }}
             >
               Xoá tất cả
             </MuiButton>
             <Dialog>
               <DialogTrigger asChild>
-                <MuiButton variant="contained" startIcon={<Download size={18} />} sx={{ borderRadius: '10px', px: 3, py: 1.25, fontWeight: 700, whiteSpace: 'nowrap', flexShrink: 0 }}>
+                <MuiButton
+                  variant="contained"
+                  startIcon={<Download size={14} />}
+                  sx={{
+                    borderRadius: '8px', px: 2.5, py: 1, fontWeight: 600, fontSize: '0.82rem',
+                    textTransform: 'none', backgroundColor: '#006064',
+                    boxShadow: '0 2px 8px rgba(0,96,100,0.25)',
+                    '&:hover': { backgroundColor: '#004D50' },
+                  }}
+                >
                   Xuất báo cáo PDF
                 </MuiButton>
               </DialogTrigger>
               <DialogContent>
                 <DialogHeader>
                   <DialogTitle>Xuất báo cáo PDF</DialogTitle>
-                  <DialogDescription>Chức năng xuất file sẽ được kết nối sau.</DialogDescription>
+                  <DialogDescription>
+                    Mở chi tiết từng phiên và bấm &quot;Xuất PDF&quot; ở footer để in báo cáo riêng từng phiên.
+                  </DialogDescription>
                 </DialogHeader>
                 <DialogFooter>
                   <MuiButton variant="outlined" sx={{ borderRadius: '8px' }}>Đóng</MuiButton>
