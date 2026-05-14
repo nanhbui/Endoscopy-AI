@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { useAnalysis } from '@/context/AnalysisContext';
 import { API_BASE } from '@/lib/ws-client';
+import { PipelineGraphSection as GstPipelineGraph } from '@/components/pipeline-graph-section';
 
 // Hardcoded copies of the most-visible token values. Used directly in inline
 // styles where var(--token) resolution failed during initial migration (the
@@ -116,7 +117,11 @@ export default function Home() {
         <FeatureRow />
         {currentSession && <CurrentSessionPanel session={currentSession} isPlaying={isPlaying} />}
         <SessionsPreview rows={recentSessions} hasMore={sessions.length > recentSessions.length} />
-        <PipelineGraphSection />
+
+        {/* Real GStreamer DOT graph from backend — restored from the original
+            page. The earlier rewrite replaced it with a static 7-node
+            conceptual flow which isn't useful for inspecting the live pipeline. */}
+        <GstPipelineGraph />
       </div>
     </div>
   );
@@ -601,126 +606,3 @@ const tdStyle: React.CSSProperties = {
   verticalAlign: 'middle',
 };
 
-// ── Pipeline graph — 7-node horizontal flow ────────────────────────────────
-
-const PIPELINE_NODES = [
-  { id: 'src',    label: 'Video source', sub: 'Upload · RTSP',     icon: Radio,      color: C.neutral600 },
-  { id: 'gst',    label: 'GStreamer',    sub: 'decode · scale',    icon: Activity,   color: C.neutral600 },
-  { id: 'yolo',   label: 'YOLO v8',      sub: 'object detect',     icon: Zap,        color: 'var(--st-detected)' },
-  { id: 'pause',  label: 'Pause + STT',  sub: 'Whisper-VI',        icon: Mic,        color: C.teal600 },
-  { id: 'llm',    label: 'LLM',          sub: 'Ollama local',      icon: MessageSquareText, color: 'var(--st-processing)' },
-  { id: 'intent', label: 'Voice intent', sub: 'BỎ_QUA / GIẢI_THÍCH', icon: Sparkles, color: 'var(--st-confirmed)' },
-  { id: 'res',    label: 'Resume',       sub: 'state → PLAYING',   icon: Play,       color: C.neutral600 },
-];
-
-function PipelineGraphSection() {
-  return (
-    <div>
-      <div style={{ marginBottom: 16 }}>
-        <h2 className="theme-h-h2" style={{ margin: 0 }}>Pipeline phân tích</h2>
-        <p style={{ marginTop: 4, fontSize: 12, color: C.neutral500, letterSpacing: '0.02em' }}>
-          Luồng dữ liệu real-time từ camera tới báo cáo lâm sàng
-        </p>
-      </div>
-
-      <div
-        style={{
-          background: C.bgPaper,
-          border: '1px solid var(--border-subtle)',
-          borderRadius: 'var(--r-xl)',
-          boxShadow: C.shadowSm,
-          padding: 32,
-          overflow: 'auto',
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'stretch', gap: 0, minWidth: 920 }}>
-          {PIPELINE_NODES.map((n, i) => (
-            <span key={n.id} style={{ display: 'contents' }}>
-              <div
-                style={{
-                  flex: 1, padding: '16px 14px',
-                  border: '1px solid var(--border-subtle)',
-                  borderRadius: 'var(--r-md)',
-                  background: C.bgPaper,
-                  display: 'flex', flexDirection: 'column', gap: 8,
-                  position: 'relative',
-                }}
-              >
-                <div
-                  style={{
-                    width: 28, height: 28, borderRadius: 'var(--r-sm)',
-                    background: `${n.color}14`, color: n.color,
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  }}
-                >
-                  <n.icon size={14} />
-                </div>
-                <div style={{ fontSize: 13, fontWeight: 600 }}>{n.label}</div>
-                <div
-                  style={{
-                    color: C.neutral500, fontSize: 11,
-                    fontFamily: 'var(--font-mono)',
-                  }}
-                >
-                  {n.sub}
-                </div>
-              </div>
-              {i < PIPELINE_NODES.length - 1 && (
-                <div
-                  style={{
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    flex: '0 0 28px', color: C.neutral300,
-                  }}
-                >
-                  <svg width="20" height="14" viewBox="0 0 20 14" fill="none">
-                    <path
-                      d="M0 7 H17 M13 2 L18 7 L13 12"
-                      stroke="currentColor" strokeWidth="1.5"
-                      strokeLinecap="round" strokeLinejoin="round"
-                    />
-                  </svg>
-                </div>
-              )}
-            </span>
-          ))}
-        </div>
-
-        {/* Metric row */}
-        <div
-          style={{
-            marginTop: 24, paddingTop: 20,
-            borderTop: '1px dashed var(--border-default)',
-            display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 16,
-          }}
-        >
-          {[
-            { l: 'Latency end-to-end', v: '~150 ms', sub: 'YOLO 47ms · STT 38ms · LLM 47ms (TTFT)' },
-            { l: 'GPU utilization',    v: '68%',     sub: 'RTX 4080 SUPER · 14/16 GB' },
-            { l: 'Frames/sec',         v: '30 fps',  sub: 'native · 1080p YUV422' },
-            { l: 'Voice intent acc.',  v: '96.8%',   sub: '124 phiên kiểm thử' },
-          ].map((m) => (
-            <div key={m.l}>
-              <div className="theme-eyebrow" style={{ fontSize: 11 }}>{m.l}</div>
-              <div
-                style={{
-                  fontSize: 22, fontWeight: 700, fontFamily: 'var(--font-mono)',
-                  letterSpacing: '-0.01em', marginTop: 2, color: C.neutral800,
-                }}
-              >
-                {m.v}
-              </div>
-              <div
-                style={{
-                  marginTop: 2, fontSize: 11, color: C.neutral500,
-                  letterSpacing: '0.02em',
-                }}
-              >
-                {m.sub}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
