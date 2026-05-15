@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Activity, Gauge, Microscope, ScanLine, ScrollText } from 'lucide-react';
+import { BarChart3, Gauge, Microscope, ScanLine, ScrollText } from 'lucide-react';
 
 import AppBar from '@mui/material/AppBar';
 import Toolbar from '@mui/material/Toolbar';
@@ -10,12 +10,13 @@ import Box from '@mui/material/Box';
 import MuiButton from '@mui/material/Button';
 import Container from '@mui/material/Container';
 import Typography from '@mui/material/Typography';
+import { AiHealthBadge } from '@/components/ai-health-badge';
 
 const navItems = [
   { href: '/', label: 'Dashboard', icon: Gauge },
   { href: '/workspace', label: 'Workspace', icon: ScanLine },
   { href: '/report', label: 'Báo cáo', icon: ScrollText },
-  { href: '/train', label: 'Train', icon: Activity },
+  { href: '/analytics', label: 'Thống kê', icon: BarChart3 },
 ];
 
 export default function NavBar() {
@@ -75,8 +76,9 @@ export default function NavBar() {
             </Box>
           </Box>
 
-          {/* Nav Items */}
+          {/* Nav Items + AI health pill (Phase C5) */}
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, overflowX: 'auto' }}>
+            <Box sx={{ mr: 1 }}><AiHealthBadge /></Box>
             {navItems.map(({ href, label, icon: Icon }) => {
               const isActive = pathname === href;
               return (

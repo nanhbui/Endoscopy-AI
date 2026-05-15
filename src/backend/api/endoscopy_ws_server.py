@@ -280,6 +280,201 @@ async def health():
     return {"status": "ok", "active_sessions": len(_sessions)}
 
 
+# Phase C5 — Ollama health probe. Returns {ok, model, latency_ms, error?}.
+# Frontend pings this on workspace mount + before each LLM-heavy action to
+# surface "AI offline" banners early instead of waiting 90s for timeout.
+# Tries a 1-token completion so we exercise the actual inference path, not
+# just the HTTP /api/tags endpoint (which can return 200 while the model
+# runner is stuck).
+@app.get("/health/ollama")
+async def health_ollama():
+    client = _get_llm_client()
+    if client is None:
+        return {"ok": False, "error": "no_client", "backend": LLM_BACKEND}
+    t0 = time.monotonic()
+    try:
+        # Tiny round-trip: 1-token completion against a 1-word prompt. Cheap
+        # and avoids loading vision tower / running through the long system
+        # prompt. ~100-300ms when healthy.
+        await asyncio.wait_for(
+            client.chat.completions.create(
+                model=_llm_model_name("vision"),
+                messages=[{"role": "user", "content": "ok"}],
+                max_tokens=1,
+            ),
+            timeout=10,  # short bound — anything slower is unhealthy
+        )
+        return {
+            "ok": True,
+            "model": _llm_model_name("vision"),
+            "backend": LLM_BACKEND,
+            "latency_ms": int((time.monotonic() - t0) * 1000),
+        }
+    except Exception as exc:
+        code, friendly = _classify_llm_error(exc)
+        return {
+            "ok": False,
+            "code": code,
+            "error": friendly,
+            "backend": LLM_BACKEND,
+            "latency_ms": int((time.monotonic() - t0) * 1000),
+        }
+
+
+# Phase E (replaces /train) — analytics aggregates for the dashboard page.
+# Single endpoint returning everything the frontend page needs so we don't
+# pay 5× round-trip latency on a slow clinical network.
+@app.get("/analytics/overview")
+async def analytics_overview():
+    from collections import Counter
+    from db import _connect
+
+    try:
+        with _connect() as conn:
+            # KPIs — cheap COUNTs.
+            n_sessions_lr = conn.execute(
+                "SELECT COUNT(DISTINCT session_id) FROM lesion_reports").fetchone()[0]
+            n_sessions_sum = conn.execute(
+                "SELECT COUNT(*) FROM session_summaries").fetchone()[0]
+            n_findings = conn.execute(
+                "SELECT COUNT(*) FROM lesion_reports").fetchone()[0]
+            # false_positives table may not exist on a fresh DB if Phase D
+            # was never run — try/except keeps the endpoint healthy.
+            try:
+                n_fp = conn.execute("SELECT COUNT(*) FROM false_positives").fetchone()[0]
+            except Exception:
+                n_fp = 0
+            try:
+                n_qa = conn.execute("SELECT COUNT(*) FROM qa_messages").fetchone()[0]
+            except Exception:
+                n_qa = 0
+
+            # Severity distribution (denormalized column → no JSON parse needed).
+            sev_rows = conn.execute(
+                "SELECT severity, COUNT(*) FROM lesion_reports GROUP BY severity"
+            ).fetchall()
+            severity_dist = {r[0] or "—": r[1] for r in sev_rows}
+
+            # Top labels — primary_dx is bilingual long; group by first 50 chars
+            # so "Viêm dạ dày HP (...)" and "Viêm dạ dày HP (Helicobacter...)"
+            # collapse into one bucket.
+            label_rows = conn.execute(
+                "SELECT label, COUNT(*) FROM lesion_reports GROUP BY label ORDER BY 2 DESC LIMIT 6"
+            ).fetchall()
+            top_labels = [{"label": r[0] or "?", "count": r[1]} for r in label_rows]
+
+            # Recent sessions (latest 10 with summary if present).
+            recent_rows = conn.execute(
+                """SELECT lr.session_id,
+                          COUNT(*) AS n_findings,
+                          MAX(lr.generated_at) AS last_at,
+                          (SELECT json_extract(ss.summary_json, '$.overall_risk')
+                             FROM session_summaries ss
+                             WHERE ss.session_id = lr.session_id) AS risk
+                   FROM lesion_reports lr
+                   GROUP BY lr.session_id
+                   ORDER BY last_at DESC
+                   LIMIT 10"""
+            ).fetchall()
+            recent_sessions = [
+                {
+                    "session_id": r[0],
+                    "n_findings": r[1],
+                    "last_at": r[2],
+                    "overall_risk": r[3],
+                }
+                for r in recent_rows
+            ]
+
+            # Paris class — needs JSON parse since it's nested in report_json.
+            # Cheap enough at ~50 reports; if it grows we'd denormalize.
+            paris_rows = conn.execute(
+                "SELECT report_json FROM lesion_reports").fetchall()
+        # Outside the with block — JSON parsing is pure-Python.
+        paris_counter: Counter = Counter()
+        for (rj,) in paris_rows:
+            try:
+                desc = json.loads(rj).get("description", {})
+                paris = desc.get("paris_class") or "Không xác định"
+                # Strip parenthetical EN to make buckets cluster better.
+                key = paris.split("(")[0].strip()[:30]
+                paris_counter[key] += 1
+            except Exception:
+                continue
+        paris_dist = [
+            {"class": k, "count": v}
+            for k, v in paris_counter.most_common(8)
+        ]
+
+        return {
+            "kpis": {
+                "sessions":         max(n_sessions_lr, n_sessions_sum),
+                "findings":         n_findings,
+                "summaries":        n_sessions_sum,
+                "false_positives":  n_fp,
+                "qa_messages":      n_qa,
+            },
+            "severity_dist":   severity_dist,
+            "top_labels":      top_labels,
+            "paris_dist":      paris_dist,
+            "recent_sessions": recent_sessions,
+        }
+    except Exception as exc:
+        logger.error("analytics overview failed: {}", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# Phase E.2 — false-positive management on the analytics page.
+# Doctor can review every FP the system is auto-skipping and delete entries
+# they reported by mistake. Delete = the model resumes flagging that region.
+@app.get("/analytics/false-positives")
+async def list_false_positives():
+    from db import _connect
+    try:
+        with _connect() as conn:
+            rows = conn.execute(
+                """SELECT id, label, bbox_x1, bbox_y1, bbox_x2, bbox_y2,
+                          reported_at, session_id_source, frame_b64
+                   FROM false_positives
+                   ORDER BY reported_at DESC"""
+            ).fetchall()
+        return {
+            "items": [
+                {
+                    "id": r[0], "label": r[1],
+                    "bbox": [r[2], r[3], r[4], r[5]],
+                    "reported_at": r[6], "session_id_source": r[7],
+                    "frame_b64": r[8],  # nullable — older rows pre-v2 won't have it
+                }
+                for r in rows
+            ],
+        }
+    except Exception as exc:
+        logger.error("list_false_positives failed: {}", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.delete("/analytics/false-positives/{fp_id}")
+async def delete_false_positive(fp_id: int):
+    """Delete one FP entry. Active sessions still have it cached in
+    sess['false_positives'] until they reconnect — that's acceptable for the
+    "I changed my mind" use case."""
+    from db import _connect
+    try:
+        with _connect() as conn:
+            cur = conn.execute("DELETE FROM false_positives WHERE id = ?", (fp_id,))
+            removed = cur.rowcount
+        if removed == 0:
+            raise HTTPException(status_code=404, detail="FP entry not found")
+        logger.info("Deleted false_positive id={}", fp_id)
+        return {"ok": True, "deleted": removed}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("delete_false_positive failed: {}", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.get("/pipeline/metrics")
 async def get_pipeline_metrics():
     """Parse GstShark CSV logs and return per-element performance metrics."""
@@ -792,11 +987,16 @@ async def ws_analysis(websocket: WebSocket, video_id: str):
                     lesion = pending.get("lesion", {})
                     label = lesion.get("label", "")
                     bbox = list(lesion.get("bbox", []))
+                    # Save the cropped thumbnail too so the analytics page can
+                    # show what was reported (frame_b64 is the small viewport
+                    # crop created by the worker — already JPEG-encoded).
+                    thumb = pending.get("frame_b64")
                     if label and len(bbox) >= 4:
                         ok = save_false_positive(
                             label=label, bbox=bbox,
                             session_id_source=video_id,
                             reported_at_ms=int(time.time() * 1000),
+                            frame_b64=thumb,
                         )
                         if ok:
                             sess["false_positives"].append({"label": label, "bbox": bbox})

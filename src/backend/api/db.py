@@ -55,11 +55,17 @@ CREATE TABLE IF NOT EXISTS false_positives (
     bbox_x2            REAL NOT NULL,
     bbox_y2            REAL NOT NULL,
     reported_at        INTEGER NOT NULL,    -- unix epoch ms
-    session_id_source  TEXT                  -- which session originally reported it
+    session_id_source  TEXT,                 -- which session originally reported it
+    frame_b64          TEXT                  -- cropped thumbnail for analytics review (v2)
 )
 """
 
 _FP_LABEL_INDEX_DDL = "CREATE INDEX IF NOT EXISTS idx_fp_label ON false_positives(label)"
+
+# Idempotent migration: ALTER TABLE ADD COLUMN succeeds only the first time;
+# subsequent calls raise OperationalError "duplicate column" which we swallow.
+# Lets older deployments pick up the frame_b64 column without a manual migration.
+_FP_ADD_FRAME_B64 = "ALTER TABLE false_positives ADD COLUMN frame_b64 TEXT"
 
 # Phase B — session summary table. One row per session (UPSERT on re-summary
 # from EOS re-trigger). Stores the full SESSION_SUMMARY_SCHEMA JSON so the
@@ -109,6 +115,12 @@ def init_db() -> None:
             conn.execute(_INDEX_DDL)
             conn.execute(_FALSE_POSITIVES_DDL)
             conn.execute(_FP_LABEL_INDEX_DDL)
+            # v2 migration: add frame_b64 column to existing FP tables.
+            # Already-exists raises OperationalError — swallow it.
+            try:
+                conn.execute(_FP_ADD_FRAME_B64)
+            except sqlite3.OperationalError:
+                pass
             conn.execute(_SESSION_SUMMARIES_DDL)
             conn.execute(_QA_MESSAGES_DDL)
             conn.execute(_QA_SESSION_INDEX_DDL)
@@ -184,9 +196,12 @@ _MAX_FP_AREA_RATIO = 0.7  # reject near-full-frame bboxes — they cause IoU>=0.
 
 
 def save_false_positive(label: str, bbox: list[float], session_id_source: str,
-                        reported_at_ms: int) -> bool:
+                        reported_at_ms: int,
+                        frame_b64: Optional[str] = None) -> bool:
     """Persist one false-positive entry. bbox is [x1,y1,x2,y2] normalized to
-    1920×1080 (matches DETECTION_FOUND payload). Returns True on success."""
+    1920×1080 (matches DETECTION_FOUND payload). frame_b64 is the cropped
+    thumbnail of the reported region (~140px wide) — stored so the analytics
+    page can show what the doctor flagged. Returns True on success."""
     if len(bbox) < 4:
         return False
     w = max(0.0, float(bbox[2]) - float(bbox[0]))
@@ -202,10 +217,11 @@ def save_false_positive(label: str, bbox: list[float], session_id_source: str,
         with _connect() as conn:
             conn.execute(
                 """INSERT INTO false_positives
-                   (label, bbox_x1, bbox_y1, bbox_x2, bbox_y2, reported_at, session_id_source)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                   (label, bbox_x1, bbox_y1, bbox_x2, bbox_y2, reported_at,
+                    session_id_source, frame_b64)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (label, float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3]),
-                 reported_at_ms, session_id_source),
+                 reported_at_ms, session_id_source, frame_b64),
             )
         return True
     except sqlite3.Error as e:

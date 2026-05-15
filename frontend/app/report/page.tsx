@@ -510,13 +510,26 @@ function SessionDetailModal({
           >
             Xoá phiên
           </MuiButton>
-          <MuiButton
-            variant="contained"
-            onClick={onClose}
-            sx={{ borderRadius: '10px', fontWeight: 700, backgroundColor: '#006064', px: 3, '&:hover': { backgroundColor: '#004D51' } }}
-          >
-            Đóng
-          </MuiButton>
+          <Box sx={{ display: 'flex', gap: 1.25 }}>
+            {/* Phase C4 — open print-friendly view in new tab; auto-print
+                fires on mount so doctor only needs to hit "Save as PDF" in
+                the browser's print dialog. */}
+            <MuiButton
+              variant="outlined"
+              startIcon={<Download size={14} />}
+              onClick={() => window.open(`/report/print/${session.id}`, '_blank', 'noopener,noreferrer')}
+              sx={{ borderRadius: '10px', fontWeight: 700, borderColor: '#006064', color: '#006064', px: 2.5, '&:hover': { backgroundColor: 'rgba(0,96,100,0.06)' } }}
+            >
+              Xuất PDF
+            </MuiButton>
+            <MuiButton
+              variant="contained"
+              onClick={onClose}
+              sx={{ borderRadius: '10px', fontWeight: 700, backgroundColor: '#006064', px: 3, '&:hover': { backgroundColor: '#004D51' } }}
+            >
+              Đóng
+            </MuiButton>
+          </Box>
         </Box>
       </MuiDialogContent>
     </MuiDialog>
