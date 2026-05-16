@@ -65,3 +65,6 @@ sample_code/
 *.db-shm
 *.db-wal
 src/backend/api/data/endoscopy.db
+new-theme/
+.speckit/
+.specify/
