@@ -33,8 +33,8 @@
 ROOT        := $(shell pwd)
 VENV        := $(ROOT)/.venv
 PYTHON      := $(VENV)/bin/python
-PIP         := $(VENV)/bin/pip
-UVICORN     := $(VENV)/bin/python -m uvicorn
+UV          := uv
+UVICORN     := $(UV) run uvicorn
 BE_SRC      := $(ROOT)/src/backend/api
 FE_SRC      := $(ROOT)/frontend
 
@@ -62,9 +62,10 @@ help:
 	@echo "  $(GREEN)make dev$(RESET)              Start backend + frontend (dev mode, parallel)"
 	@echo "  $(GREEN)make be$(RESET)               Start backend only"
 	@echo "  $(GREEN)make fe$(RESET)               Start frontend only"
-	@echo "  $(GREEN)make install$(RESET)          Install all deps (Python venv + Node modules)"
-	@echo "  $(GREEN)make install-py$(RESET)       Install Python deps into .venv"
+	@echo "  $(GREEN)make install$(RESET)          Install all deps (uv sync + npm ci)"
+	@echo "  $(GREEN)make install-py$(RESET)       Install Python deps with uv (auto-installs uv if needed)"
 	@echo "  $(GREEN)make install-fe$(RESET)       Install Node modules (npm ci)"
+	@echo "  $(GREEN)make requirements-export$(RESET) Export requirements.txt from uv.lock (fallback)"
 	@echo "  $(GREEN)make docker-up$(RESET)        Build & start Docker Compose (GPU)"
 	@echo "  $(GREEN)make docker-down$(RESET)      Stop Docker Compose stack"
 	@echo "  $(GREEN)make docker-logs$(RESET)      Tail logs from all containers"
@@ -117,10 +118,21 @@ install: install-py install-fe
 	@echo "$(GREEN)All dependencies installed.$(RESET)"
 
 install-py:
-	@echo "$(CYAN)Installing Python dependencies into .venv…$(RESET)"
-	@if [ ! -d "$(VENV)" ]; then python3 -m venv $(VENV); fi
-	$(PIP) install --upgrade pip
-	$(PIP) install -r $(ROOT)/requirements.txt
+	@echo "$(CYAN)Installing Python dependencies with uv…$(RESET)"
+	@command -v uv >/dev/null 2>&1 || { \
+		echo "$(YELLOW)uv not found — installing…$(RESET)"; \
+		curl -LsSf https://astral.sh/uv/install.sh | sh; \
+		echo "$(YELLOW)Add to PATH: source \$$HOME/.local/bin/env$(RESET)"; \
+	}
+	$(UV) sync
+	@echo "$(GREEN)✔ Python deps installed into .venv (uv-managed)$(RESET)"
+
+# Refresh exported requirements.txt — fallback for environments without uv
+# (e.g. the remote GPU server's pip-only path).
+requirements-export:
+	@echo "$(CYAN)Exporting requirements.txt from uv.lock…$(RESET)"
+	$(UV) export --format requirements-txt --no-dev --no-hashes --output-file $(ROOT)/requirements.txt
+	@echo "$(GREEN)✔ requirements.txt regenerated$(RESET)"
 
 install-fe:
 	@echo "$(CYAN)Installing Node modules…$(RESET)"
@@ -153,7 +165,7 @@ test:
 	@echo "$(CYAN)Frontend tests…$(RESET)"
 	cd $(FE_SRC) && npm test
 	@echo "$(CYAN)Backend tests…$(RESET)"
-	$(PYTHON) -m pytest $(ROOT)/tests -v
+	$(UV) run pytest $(ROOT)/tests -v
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Env
@@ -299,12 +311,10 @@ sync: _require-vpn
 	@echo "$(GREEN)✔ Sync complete$(RESET)"
 
 remote-install: _require-vpn
-	@echo "$(CYAN)Installing Python deps on GPU server…$(RESET)"
-	$(SSH) "cd $(REMOTE_DIR) && \
-		[ ! -d .venv ] && python3 -m venv .venv || true && \
-		.venv/bin/pip install --upgrade pip -q && \
-		.venv/bin/pip install -r requirements.txt"
-	@echo "$(GREEN)✔ Remote install done$(RESET)"
+	@echo "$(CYAN)Installing Python deps on GPU server with uv…$(RESET)"
+	$(SSH) "command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh"
+	$(SSH) "cd $(REMOTE_DIR) && \$$HOME/.local/bin/uv sync || uv sync"
+	@echo "$(GREEN)✔ Remote install done (uv-managed)$(RESET)"
 
 remote-dev: _require-vpn env-check
 	@echo "$(CYAN)Deploying & starting stack on GPU server…$(RESET)"

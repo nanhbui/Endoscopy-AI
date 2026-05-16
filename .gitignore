@@ -68,3 +68,4 @@ src/backend/api/data/endoscopy.db
 new-theme/
 .speckit/
 .specify/
+plans/

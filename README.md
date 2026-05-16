@@ -353,7 +353,8 @@ DATN_ver0/
 
 ### Tối thiểu (CPU-only)
 
-- Python 3.10+ · Node.js 18+
+- Python 3.10–3.11 · Node.js 18+
+- [uv](https://docs.astral.sh/uv/) (auto-install qua Makefile nếu thiếu)
 - 8 GB RAM, 20 GB disk
 - GStreamer 1.0 + plugins (`good`, `bad`, `libav`)
 - ffmpeg ≥ 4.0 (Whisper audio decode)
@@ -377,32 +378,47 @@ DATN_ver0/
 
 ### Phương án A — Local (dev)
 
+Dự án dùng **[uv](https://docs.astral.sh/uv/)** làm Python package manager (10-100× nhanh hơn pip, có lock file). Vẫn giữ `requirements.txt` cho ai chưa muốn cài uv.
+
 ```bash
 git clone git@github.com:nanhbui/Endoscopy-AI.git
 cd Endoscopy-AI
 
-# 1. Backend
-python3.10 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-# GStreamer (Ubuntu/Debian)
+# 1. System deps — GStreamer + ffmpeg (Ubuntu/Debian)
 sudo apt install -y \
   gstreamer1.0-tools gstreamer1.0-plugins-base \
   gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-  gstreamer1.0-libav python3-gi
+  gstreamer1.0-libav python3-gi ffmpeg
 
-# 2. Frontend
+# 2. Backend — uv tự tạo .venv + cài deps từ uv.lock
+curl -LsSf https://astral.sh/uv/install.sh | sh    # bỏ qua nếu đã có uv
+uv sync                                            # cài deps chính
+uv sync --extra training                           # + deps fine-tune (optional)
+
+# 3. Frontend
 cd frontend && npm install && cd ..
 
-# 3. Env config
+# 4. Env config
 cp src/backend/api/.env.example src/backend/api/.env
 cp frontend/.env.local.example frontend/.env.local
 # Mở file .env, điền OPENAI_API_KEY hoặc set LLM_BACKEND=ollama
 
-# 4. Verify
+# 5. Verify
 make env-check
 ```
+
+<details>
+<summary><b>Fallback — vẫn dùng pip thuần (không khuyến nghị)</b></summary>
+
+```bash
+python3.10 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+`requirements.txt` được export từ `uv.lock` qua `make requirements-export` — cập nhật lại mỗi lần đổi deps.
+
+</details>
 
 ### Phương án B — Docker Compose (GPU)
 
@@ -444,10 +460,9 @@ make clean          # xoá __pycache__, .next, etc.
 ### Chạy thủ công
 
 ```bash
-# Backend (hot reload)
-source .venv/bin/activate
+# Backend (hot reload) — uv tự dùng .venv, không cần activate
 cd src/backend/api
-uvicorn endoscopy_ws_server:app --host 0.0.0.0 --port 8001 --reload
+uv run uvicorn endoscopy_ws_server:app --host 0.0.0.0 --port 8001 --reload
 
 # Frontend
 cd frontend
