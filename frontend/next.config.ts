@@ -4,6 +4,13 @@ const nextConfig: NextConfig = {
   // Produces a self-contained bundle for Docker: node server.js
   output: 'standalone',
 
+  // Allow dev HMR websocket from ngrok tunnel (Next dev rejects unknown Origin → 401)
+  allowedDevOrigins: [
+    'ferris-smudgy-fondue.ngrok-free.dev',
+    '*.ngrok-free.dev',
+    '*.ngrok-free.app',
+  ],
+
   // Proxy /api/* to FastAPI backend (development only; Docker uses direct fetch)
   async rewrites() {
     return [

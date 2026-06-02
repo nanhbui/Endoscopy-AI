@@ -269,9 +269,10 @@ gpu-status: _require-vpn
 # .env files are explicitly synced separately (excluded from broad sync for safety)
 sync: _require-vpn
 	@echo "$(CYAN)Syncing code to $(GPU_USER)@$(GPU_HOST):$(REMOTE_DIR) …$(RESET)"
-	rsync -avz --progress \
+	rsync -avz --progress --no-links \
 		--exclude='.git' \
 		--exclude='.venv' \
+		--exclude='.claude' \
 		--exclude='frontend/node_modules' \
 		--exclude='frontend/.next' \
 		--exclude='__pycache__' \
@@ -324,3 +325,54 @@ remote-down: _require-vpn
 remote-logs: _require-vpn
 	@echo "$(CYAN)Streaming logs from GPU server (Ctrl-C to stop)…$(RESET)"
 	$(SSH) "cd $(REMOTE_DIR) && docker compose logs -f 2>&1 | grep -v 'env file.*not found' || true"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Remote ngrok stack (server4 native: BE + FE + Caddy + ngrok via ~/start-stack.sh)
+# ─────────────────────────────────────────────────────────────────────────────
+remote-stack-up: _require-vpn
+	@echo "$(CYAN)Starting ngrok stack on $(GPU_HOST)…$(RESET)"
+	$(SSH) 'bash ~/start-stack.sh'
+
+remote-stack-down: _require-vpn
+	@echo "$(CYAN)Stopping ngrok stack on $(GPU_HOST)…$(RESET)"
+	$(SSH) 'bash ~/stop-stack.sh'
+
+remote-stack-status: _require-vpn
+	@echo "$(CYAN)Stack status on $(GPU_HOST):$(RESET)"
+	@$(SSH) "ss -tln | grep -E ':(8001|3000|8080)' || echo '  ✗ no service listening'; echo; pgrep -fa 'uvicorn|next|caddy|ngrok' | head"
+
+remote-log-be: _require-vpn
+	$(SSH) 'tail -n 200 -f ~/logs/be.log'
+
+remote-log-fe: _require-vpn
+	$(SSH) 'tail -n 200 -f ~/logs/fe.log'
+
+remote-log-caddy: _require-vpn
+	$(SSH) 'tail -n 200 -f ~/logs/caddy.log'
+
+remote-log-ngrok: _require-vpn
+	$(SSH) 'tail -n 200 -f ~/logs/ngrok.log'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Auto-sync: watch local code → rsync to server4 on every change
+# BE auto-reloads via uvicorn --reload; FE needs `npm run dev` for HMR
+# ─────────────────────────────────────────────────────────────────────────────
+sync-fast: _require-vpn
+	@rsync -azq --no-links \
+		--exclude='.git' --exclude='.venv' --exclude='.claude' \
+		--exclude='node_modules' --exclude='.next' \
+		--exclude='__pycache__' --exclude='*.pyc' --exclude='*.log' \
+		$(ROOT)/src/ $(GPU_USER)@$(GPU_HOST):$(REMOTE_DIR)/src/
+	@rsync -azq --no-links \
+		--exclude='node_modules' --exclude='.next' --exclude='.claude' \
+		$(ROOT)/frontend/ $(GPU_USER)@$(GPU_HOST):$(REMOTE_DIR)/frontend/
+
+sync-watch: _require-vpn
+	@which inotifywait > /dev/null || { echo "$(RED)Install inotify-tools: sudo apt install inotify-tools$(RESET)"; exit 1; }
+	@echo "$(CYAN)Watching src/ + frontend/ — rsync on change. Ctrl-C to stop.$(RESET)"
+	@$(MAKE) --no-print-directory sync-fast
+	@while inotifywait -qq -r -e modify,create,delete,move \
+		--exclude '(\.venv|node_modules|\.next|\.git|__pycache__|\.pyc$$|\.swp$$|\.log$$)' \
+		$(ROOT)/src $(ROOT)/frontend; do \
+		$(MAKE) --no-print-directory sync-fast && echo "$(GREEN)$$(date +%T) ✔ synced$(RESET)"; \
+	done
