@@ -5,8 +5,8 @@ Pull pre-built images, run on any host with NVIDIA GPU. No source clone required
 ## Image registry
 
 ```
-docker.io/nanhbui/endoscopy-backend:<tag>
-docker.io/nanhbui/endoscopy-frontend:<tag>
+docker.io/ngocanh031004/endoscopy-backend:<tag>
+docker.io/ngocanh031004/endoscopy-frontend:<tag>
 ```
 
 Tags:
@@ -18,12 +18,19 @@ Tags:
 | | |
 |---|---|
 | OS | Ubuntu 22.04+ (any Linux with cgroups v2) |
-| GPU | NVIDIA, CUDA 11.8 compatible (RTX 20xx or newer) |
-| Drivers | `nvidia-smi` works on host |
+| **GPU** | **NVIDIA, CUDA 11.8 compatible — REQUIRED. Backend does YOLO + StrongSORT ReID inference per frame; CPU-only will not work in real time. Tested on RTX 4080 SUPER (server4). Minimum recommended: RTX 3060 (8GB VRAM) for sub-100ms latency.** |
+| VRAM | 6GB+ (YOLO ~2GB + StrongSORT ReID ~3GB; headroom for batching) |
+| Drivers | `nvidia-smi` works on host (driver ≥ 525 for CUDA 11.8) |
 | Toolkit | `nvidia-container-toolkit` installed (`sudo apt install nvidia-container-toolkit && sudo systemctl restart docker`) |
 | Docker | 24+ with compose plugin |
 | Disk | ~10GB for images + uploads volume |
 | RAM | 16GB+ |
+
+> **Không có GPU → BE crash hoặc chạy CPU 1-2 fps = không demo được.** Image base là `nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04` — bắt buộc host phải có NVIDIA driver + `nvidia-container-toolkit` cấu hình runtime. Verify trước khi pull:
+> ```bash
+> docker run --rm --gpus all nvidia/cuda:11.8.0-base-ubuntu22.04 nvidia-smi
+> ```
+> Phải thấy bảng GPU. Nếu lỗi → fix host setup trước.
 
 ## Quick start
 
@@ -101,7 +108,7 @@ In GitHub repo Settings → Secrets and variables → Actions:
 
 | Name | Value |
 |---|---|
-| `DOCKERHUB_USERNAME` | `nanhbui` |
+| `DOCKERHUB_USERNAME` | `ngocanh031004` |
 | `DOCKERHUB_TOKEN` | Personal Access Token from https://hub.docker.com/settings/security (NOT password) |
 
 ### Release flow

@@ -14,7 +14,7 @@
 services:
 
   backend:
-    image: ${DH_USERNAME:-nanhbui}/endoscopy-backend:${IMAGE_TAG:-latest}
+    image: ${DH_USERNAME:-ngocanh031004}/endoscopy-backend:${IMAGE_TAG:-latest}
     container_name: endoscopy-backend
     restart: unless-stopped
     ports:
@@ -44,7 +44,7 @@ services:
       start_period: 30s
 
   frontend:
-    image: ${DH_USERNAME:-nanhbui}/endoscopy-frontend:${IMAGE_TAG:-latest}
+    image: ${DH_USERNAME:-ngocanh031004}/endoscopy-frontend:${IMAGE_TAG:-latest}
     container_name: endoscopy-frontend
     restart: unless-stopped
     ports:
