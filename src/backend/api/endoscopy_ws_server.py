@@ -1146,6 +1146,33 @@ async def ws_analysis(websocket: WebSocket, video_id: str):
                 sess["llm_streaming"] = False
                 ctrl.send_action(action, msg.get("payload"))
 
+            elif action == "ACTION_CONFIRM_TRACK":
+                # Phase 02 — "Xác nhận luôn": register a track id so subsequent
+                # frames carrying it emit CONFIRMED_CAPTURE every 2 s instead of
+                # pausing. Behaves like ACTION_CONFIRM for the current pending
+                # detection (resume pipeline + clear LLM streaming).
+                payload = msg.get("payload") or {}
+                tid = payload.get("track_id")
+                if isinstance(tid, int) and tid >= 0 and ctrl._cmd_q:
+                    ctrl._cmd_q.put(f"CONFIRM_TRACK:{tid}")
+                    logger.info("Confirm-luôn registered: track_id={}", tid)
+                sess["conv_history"] = []
+                sess["llm_streaming"] = False
+                ctrl.send_action("ACTION_CONFIRM", payload)
+
+            elif action == "ACTION_MUTE_TRACK":
+                # Phase 02 — "Bỏ qua" symmetric to confirm-luôn: subsequent
+                # frames with this track_id are dropped silently (no events,
+                # no pause). Session-only, no DB persistence.
+                payload = msg.get("payload") or {}
+                tid = payload.get("track_id")
+                if isinstance(tid, int) and tid >= 0 and ctrl._cmd_q:
+                    ctrl._cmd_q.put(f"MUTE_TRACK:{tid}")
+                    logger.info("Mute registered: track_id={}", tid)
+                sess["conv_history"] = []
+                sess["llm_streaming"] = False
+                ctrl.send_action("ACTION_IGNORE", payload)
+
             elif action == "ACTION_REPORT_FALSE_POSITIVE":
                 # Phase D — persist (label, bbox) so future detections matching
                 # this region auto-skip (across sessions). Then behave like IGNORE

@@ -488,6 +488,22 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
 
         return True
 
+    def _encode_full_frame_b64(frame: np.ndarray, max_w: int = 1280, q: int = 70) -> Optional[str]:
+        """Encode an entire frame (no crop, no overlay) as downscaled JPEG b64.
+           Used by RECHECK_RESULT — the zoom modal needs the full paused frame
+           so it can render N bbox overlays at their original coordinates."""
+        try:
+            out = frame
+            if out.shape[1] > max_w:
+                scale = max_w / out.shape[1]
+                out = cv2.resize(out, (max_w, int(out.shape[0] * scale)))
+            ok, buf = cv2.imencode(".jpg", out, [cv2.IMWRITE_JPEG_QUALITY, q])
+            if ok:
+                return base64.b64encode(buf.tobytes()).decode()
+        except Exception:
+            pass
+        return None
+
     def _crop_b64(frame: np.ndarray, bbox: list) -> Optional[str]:
         """Build the detection thumbnail (frame_b64) — viewport crop with a
            yellow reference rectangle drawn directly on the image (in the same
@@ -536,6 +552,21 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
     # detections and drift backend ahead of frontend.
     _last_detection_pts_ns: Optional[int] = None
 
+    # Phase 02 — per-session track state. Set by FE via ACTION_CONFIRM_TRACK
+    # (Xác nhận luôn) / ACTION_MUTE_TRACK (Bỏ qua). Worker-local, cleared on
+    # subprocess respawn — there is no cross-session persistence by design.
+    #  - confirmed_track_ids: emit CONFIRMED_CAPTURE every CAPTURE_INTERVAL_MS,
+    #    never pause.
+    #  - muted_track_ids:     fully silent; no events, no pause.
+    confirmed_track_ids: set[int] = set()
+    muted_track_ids: set[int] = set()
+    last_capture_ms: dict[int, int] = {}
+    CAPTURE_INTERVAL_MS = int(_os.environ.get("ENDOSCOPY_CAPTURE_INTERVAL_MS", "2000"))
+    # Bookkeeping: prune stale throttle entries every N frames to bound memory
+    # on hours-long live sessions where many tracks come and go.
+    _PRUNE_EVERY_FRAMES = 1000
+    _PRUNE_STALE_MS = 300_000  # 5 min
+
     try:
         while True:
             # Drain command queue
@@ -557,6 +588,21 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                         data = _json.loads(parts[2])
                         _ignored.append({"fi": fi, "bbox": data["bbox"]})
                     paused = False
+                elif cmd.startswith("CONFIRM_TRACK:"):
+                    # Phase 02 — register a track id as "confirmed luôn".
+                    # Subsequent frames carrying this id emit CONFIRMED_CAPTURE
+                    # at CAPTURE_INTERVAL_MS cadence and never pause.
+                    try:
+                        confirmed_track_ids.add(int(cmd.split(":", 1)[1]))
+                    except ValueError:
+                        pass
+                elif cmd.startswith("MUTE_TRACK:"):
+                    # Phase 02 — register a track id as session-muted.
+                    # Subsequent frames carrying this id are silently dropped.
+                    try:
+                        muted_track_ids.add(int(cmd.split(":", 1)[1]))
+                    except ValueError:
+                        pass
                 elif cmd.startswith("RECHECK:") and _last_paused_frame is not None and model is not None:
                     # Phase D — re-run YOLO on the paused frame at a lower
                     # confidence threshold. Skips StrongSORT (no temporal context
@@ -620,11 +666,49 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                                     "confidence": round(_bc, 4),
                                     "bbox": _xyxy_norm,
                                     "bbox_thumb": _bbox_thumb_pct,
+                                    # Recheck bypasses the tracker (single frame, no temporal context);
+                                    # -1 sentinel tells FE this detection is manual, not auto-trackable.
+                                    "track_id": -1,
                                 },
                                 "frame_b64": _thumb,
                             }
                             result_q.put({"event": "DETECTION_FOUND", "data": _rc_data})
                             print(f"[Worker] RECHECK found: {_label} conf={_bc:.2f}", flush=True)
+
+                            # Phase 03 — additionally emit RECHECK_RESULT with ALL bboxes
+                            # so the zoom modal can render every candidate (not just top-1).
+                            # Backward-compat: legacy DETECTION_FOUND above stays for older FE.
+                            _all_boxes = []
+                            _fw_norm = _last_paused_frame.shape[1]
+                            _fh_norm = _last_paused_frame.shape[0]
+                            for _ab_x1, _ab_y1, _ab_x2, _ab_y2, _ab_c, _ab_cls in rc_dets[:10]:
+                                _ab_bw, _ab_bh = _ab_x2 - _ab_x1, _ab_y2 - _ab_y1
+                                _ab_px, _ab_py = _ab_bw * 0.25, _ab_bh * 0.25
+                                _abx1 = max(float(rc_vx),           _ab_x1 - _ab_px)
+                                _aby1 = max(float(rc_vy),           _ab_y1 - _ab_py)
+                                _abx2 = min(float(rc_vx + rc_vfw),  _ab_x2 + _ab_px)
+                                _aby2 = min(float(rc_vy + rc_vfh),  _ab_y2 + _ab_py)
+                                _all_boxes.append({
+                                    "label": _clean_label(model_names.get(_ab_cls, f"class_{_ab_cls}")),
+                                    "confidence": round(_ab_c, 4),
+                                    "bbox": [
+                                        _abx1 / _fw_norm * 1920,
+                                        _aby1 / _fh_norm * 1080,
+                                        _abx2 / _fw_norm * 1920,
+                                        _aby2 / _fh_norm * 1080,
+                                    ],
+                                })
+                            result_q.put({
+                                "event": "RECHECK_RESULT",
+                                "data": {
+                                    "frame_index": _last_paused_frame_index,
+                                    "timestamp_ms": _last_paused_timestamp_ms,
+                                    "frame_b64_full": _encode_full_frame_b64(_last_paused_frame),
+                                    "boxes": _all_boxes,
+                                    "conf": _rc_conf,
+                                },
+                            })
+                            print(f"[Worker] RECHECK_RESULT emitted: {len(_all_boxes)} boxes", flush=True)
                         else:
                             result_q.put({"event": "RECHECK_EMPTY", "data": {"conf": _rc_conf}})
                             print(f"[Worker] RECHECK no detections at conf={_rc_conf:.2f}", flush=True)
@@ -857,6 +941,40 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                             xyxy[3] / _fh_full * 1080,
                         ]
 
+                        # ── Phase 02: per-track session-state shortcuts ──────
+                        # Muted track → silently drop (no events, no pause).
+                        if track_id in muted_track_ids:
+                            continue
+                        # Confirmed track → emit CONFIRMED_CAPTURE at fixed
+                        # cadence per track id; never pause. The doctor
+                        # already validated this lesion at first detection.
+                        if track_id in confirmed_track_ids:
+                            _now_ms = int(time.monotonic() * 1000)
+                            _last_ms = last_capture_ms.get(track_id, 0)
+                            if _now_ms - _last_ms >= CAPTURE_INTERVAL_MS:
+                                _cap_bbox_thumb_pct = {
+                                    "x":     (max(_vx, xyxy[0]) - _vx) / _vfw * 100,
+                                    "y":     (max(_vy, xyxy[1]) - _vy) / _vfh * 100,
+                                    "width":  (min(_vx + _vfw, xyxy[2]) - max(_vx, xyxy[0])) / _vfw * 100,
+                                    "height": (min(_vy + _vfh, xyxy[3]) - max(_vy, xyxy[1])) / _vfh * 100,
+                                }
+                                _cap_data = {
+                                    "frame_index": frame_index,
+                                    "timestamp_ms": timestamp_ms,
+                                    "lesion": {
+                                        "label": label,
+                                        "confidence": round(det_conf, 4),
+                                        "bbox": xyxy_norm,
+                                        "bbox_thumb": _cap_bbox_thumb_pct,
+                                        "track_id": int(track_id),
+                                    },
+                                    "frame_b64": _crop_b64(frame, xyxy),
+                                }
+                                result_q.put({"event": "CONFIRMED_CAPTURE", "data": _cap_data})
+                                last_capture_ms[track_id] = _now_ms
+                                print(f"[Worker] CONFIRMED_CAPTURE track_id={track_id} {label} ts_ms={timestamp_ms}", flush=True)
+                            continue
+
                         # Spatial-temporal dedup
                         if _is_recently_reported(timestamp_ms, xyxy_norm, label):
                             continue
@@ -884,6 +1002,7 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                                 "confidence": round(det_conf, 4),
                                 "bbox": xyxy_norm,            # normalized to 1920×1080 (full frame)
                                 "bbox_thumb": bbox_thumb_pct, # viewport-relative %, for thumbnail overlay
+                                "track_id": int(track_id),    # StrongSORT id, stable per-lesion within session
                             },
                             "frame_b64": thumbnail_b64,
                         }
@@ -909,6 +1028,12 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                     print(f"[Worker] YOLO/tracker error frame {frame_index}: {exc}", flush=True)
 
             frame_index += 1
+            # Phase 02 — prune stale capture-cadence entries every N frames to
+            # bound memory on hours-long live sessions.
+            if last_capture_ms and frame_index % _PRUNE_EVERY_FRAMES == 0:
+                _cut_ms = int(time.monotonic() * 1000) - _PRUNE_STALE_MS
+                for _stale_id in [tid for tid, ts in last_capture_ms.items() if ts < _cut_ms]:
+                    last_capture_ms.pop(_stale_id, None)
 
     except Exception as exc:
         import traceback

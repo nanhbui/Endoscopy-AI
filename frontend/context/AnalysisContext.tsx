@@ -81,6 +81,10 @@ export interface Detection {
   confidence: number;
   bbox: { x: number; y: number; width: number; height: number };
   timestamp: number;
+  /** StrongSORT track id, stable per-lesion in current session.
+   *  `-1` = recheck-origin (manual inspection, not auto-trackable).
+   *  `undefined` = legacy detection from older BE. */
+  trackId?: number;
   frame_b64?: string;
   /** Markdown rendering of the structured lesion report (legacy fallback +
    *  Phase A bridge). Kept for ReactMarkdown surfaces and history that
@@ -195,6 +199,7 @@ function toDetection(d: DetectionData): Detection {
       height: ((y2 - y1) / FRAME_H) * 100,
     },
     timestamp: d.timestamp_ms / 1000,
+    trackId: d.lesion.track_id,
     frame_b64: d.frame_b64,
   };
 }
