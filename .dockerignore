@@ -14,12 +14,18 @@ frontend/node_modules
 frontend/.next
 frontend/logs
 
-# Data & models (mounted as volumes)
+# Data (mounted as volumes; do NOT bake into image)
 data/
 sample_code/
-*.pt
+
+# Model weights — block root-level + scratch artifacts, but explicitly bake
+# the curated `models/` directory into the backend image so a fresh
+# `docker run` works without a separate weights-download step.
 *.onnx
 *.trt
+/yolov8n.pt
+!models/*.pt
+!models/*.torchscript
 
 # Logs
 logs/
