@@ -31,9 +31,10 @@ FROM builder AS runtime
 
 WORKDIR /app
 
-# Copy source
+# Copy source + curated model weights (StrongSORT ReID + YOLO checkpoints)
 COPY src/ ./src/
 COPY scripts/ ./scripts/
+COPY models/ ./models/
 
 # Default env (overridden by docker-compose env_file)
 ENV HOST=0.0.0.0 \

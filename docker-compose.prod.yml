@@ -1,0 +1,66 @@
+# ── Endoscopy AI — Production compose ────────────────────────────────────────
+#
+# Pull pre-built images from Docker Hub and run on any host with NVIDIA GPU
+# + nvidia-container-toolkit. No source clone required.
+#
+# Usage:
+#   1. Pull: `docker compose -f docker-compose.prod.yml pull`
+#   2. Provide env files:
+#        - src/backend/api/.env  (OPENAI_API_KEY, OLLAMA_MODEL, etc.)
+#        - frontend/.env.local   (NEXT_PUBLIC_API_BASE if different from build-arg)
+#      Or override via shell env: DH_USERNAME=<user> IMAGE_TAG=v0.1.0-revamp
+#   3. Run: `docker compose -f docker-compose.prod.yml up -d`
+
+services:
+
+  backend:
+    image: ${DH_USERNAME:-nanhbui}/endoscopy-backend:${IMAGE_TAG:-latest}
+    container_name: endoscopy-backend
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    env_file:
+      - src/backend/api/.env
+    environment:
+      - ENDOSCOPY_UPLOAD_DIR=/app/data/uploads
+      - PIPELINE_DIR=/app/src/backend/pipeline
+      - LOG_LEVEL=INFO
+      - ENDOSCOPY_CAPTURE_INTERVAL_MS=2000
+    volumes:
+      - uploads:/app/data/uploads
+      - backend_logs:/app/src/backend/api/logs
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  frontend:
+    image: ${DH_USERNAME:-nanhbui}/endoscopy-frontend:${IMAGE_TAG:-latest}
+    container_name: endoscopy-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file:
+      - frontend/.env.local
+    environment:
+      - NODE_ENV=production
+      - LOG_LEVEL=info
+    volumes:
+      - frontend_logs:/app/logs
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  uploads:
+  backend_logs:
+  frontend_logs:

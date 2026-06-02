@@ -5,6 +5,11 @@ torch>=2.0.0
 torchvision>=0.15.0
 numpy>=1.24.0
 
+# Multi-object tracker (StrongSORT via boxmot) — emits stable per-lesion
+# track_id consumed by FE "Xác nhận luôn" / "Bỏ qua" UX. Without this the
+# worker falls back to no tracker and track_id stays 0 for every detection.
+boxmot>=10.0.0
+
 # Voice recognition — faster-whisper (nhẹ hơn openai-whisper, không cần torch)
 faster-whisper>=1.0.0
 
