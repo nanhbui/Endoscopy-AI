@@ -40,6 +40,7 @@ import { LesionReportCard } from '@/components/lesion-report-card';
 import { DisclaimerBanner } from '@/components/disclaimer';
 import { SessionSummaryPanel } from '@/components/session-summary-panel';
 import { ConfirmedCapturesPanel } from '@/components/confirmed-captures-panel';
+import { ZoomInspectModal } from '@/components/zoom-inspect-modal';
 
 import TextField from '@mui/material/TextField';
 import ToggleButton from '@mui/material/ToggleButton';
@@ -678,6 +679,9 @@ export default function Workspace() {
     addConfirmedTrack,
     addMutedTrack,
     removeCapture,
+    recheckResult,
+    isRecheckModalOpen,
+    closeRecheckModal,
     sendSessionQA,
     lastError,
     dismissError,
@@ -1727,6 +1731,14 @@ export default function Workspace() {
         onClose={() => setIsSourceModalOpen(false)}
         onUploadAndConnect={handleUploadAndConnect}
         onLibrarySelect={handleLibrarySelectFromModal}
+      />
+
+      {/* Phase 05 — opens on RECHECK_RESULT after click "Kiểm tra lại". */}
+      <ZoomInspectModal
+        open={isRecheckModalOpen}
+        payload={recheckResult}
+        videoRef={videoRef}
+        onClose={closeRecheckModal}
       />
     </Box>
   );
