@@ -99,6 +99,27 @@ export interface Detection {
 
 export type SessionSource = "upload" | "live" | "library";
 
+/** Phase 02 — silent capture appended to side panel when a confirmed-luôn
+ *  track is re-detected. Mirrors Detection but is session-only (not
+ *  persisted) and click-to-seek via `timestamp`. */
+export interface CapturedDetection {
+  trackId: number;
+  label: string;
+  confidence: number;
+  timestamp: number;       // seconds, same scale as Detection.timestamp
+  bbox: { x: number; y: number; width: number; height: number };
+  frame_b64?: string;      // dropped before localStorage write
+}
+
+/** Phase 03 — RECHECK_RESULT payload, consumed by zoom modal (Phase 05). */
+export interface RecheckResultPayload {
+  frameIndex: number;
+  timestampSec: number;
+  frameB64Full?: string;
+  conf: number;
+  boxes: { label: string; confidence: number; bbox: [number, number, number, number] }[];
+}
+
 /** A single analysis session — one video / live stream run. */
 export interface Session {
   id: string;
@@ -113,6 +134,13 @@ export interface Session {
   qaMessages?: QaMessage[];
   /** Phase B — true while the LLM is streaming a Q&A response. */
   qaStreaming?: boolean;
+  /** Phase 02 — StrongSORT track ids the doctor "Xác nhận luôn"-ed.
+   *  Worker emits CONFIRMED_CAPTURE for these instead of pausing. */
+  confirmedTrackIds?: number[];
+  /** Phase 02 — track ids the doctor "Bỏ qua"-ed. Silent in worker. */
+  mutedTrackIds?: number[];
+  /** Phase 02 — captures appended on CONFIRMED_CAPTURE events. */
+  captures?: CapturedDetection[];
 }
 
 export type PipelineState =
@@ -160,6 +188,19 @@ interface AnalysisContextType {
   reportFalsePositive: () => void;
   /** Phase D — re-run YOLO on paused frame at lower conf (default 0.4). */
   recheck: (conf?: number) => void;
+  /** Phase 02 — "Xác nhận luôn": register this track id so subsequent frames
+   *  carrying it auto-capture (silent, 2s cadence) instead of pausing. */
+  addConfirmedTrack: (trackId: number) => void;
+  /** Phase 02 — "Bỏ qua": register this track id so subsequent frames carrying
+   *  it are silently dropped (no events, no pause, no capture). */
+  addMutedTrack: (trackId: number) => void;
+  /** Phase 03 — last RECHECK_RESULT payload (consumed by zoom modal). */
+  recheckResult: RecheckResultPayload | null;
+  isRecheckModalOpen: boolean;
+  openRecheckModal: () => void;
+  closeRecheckModal: () => void;
+  /** Phase 02 — remove a single capture from the current session's grid. */
+  removeCapture: (timestamp: number) => void;
   /** Phase B — send a chat question. Uses WS streaming when available,
    *  HTTP fallback when WS closed (e.g. browsing /report page). Optional
    *  `sessionId` targets a specific session — default is currentSessionId. */
@@ -223,7 +264,14 @@ function loadSessions(): Session[] {
 /** Persist sessions; on quota error, drop oldest entries until it fits. */
 function saveSessions(sessions: Session[]): void {
   if (typeof window === "undefined") return;
-  let payload = sessions.slice(0, MAX_SESSIONS);
+  // Strip captures[].frame_b64 (~30 KB each) before write — quota too small
+  // to hold them; captures remain in-memory only for the current session UX.
+  const stripped = sessions.map((s) =>
+    s.captures && s.captures.length
+      ? { ...s, captures: s.captures.map(({ frame_b64: _omit, ...rest }) => rest) }
+      : s,
+  );
+  let payload = stripped.slice(0, MAX_SESSIONS);
   while (payload.length > 0) {
     try {
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
@@ -253,6 +301,10 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
 
   const [sessions, setSessions] = useState<Session[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
+
+  // Phase 03 — RECHECK_RESULT payload + modal open flag (consumed by Phase 05 zoom modal).
+  const [recheckResult, setRecheckResult] = useState<RecheckResultPayload | null>(null);
+  const [isRecheckModalOpen, setIsRecheckModalOpen] = useState(false);
 
   const wsRef = useRef<EndoscopyWsClient | null>(null);
   const llmInsightRef = useRef("");
@@ -393,6 +445,42 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
         } else {
           console.info(`[WS] RECHECK at conf=${evt.data.conf} found nothing`);
         }
+        break;
+      }
+      case "CONFIRMED_CAPTURE": {
+        // Phase 02 — silent thumbnail capture from a confirmed-luôn track.
+        // Append to current session's captures (capped 200, drop oldest).
+        const det = evt.data;
+        const [x1, y1, x2, y2] = det.lesion.bbox;
+        const cap: CapturedDetection = {
+          trackId: det.lesion.track_id ?? -1,
+          label: det.lesion.label,
+          confidence: det.lesion.confidence,
+          timestamp: det.timestamp_ms / 1000,
+          bbox: {
+            x: (x1 / FRAME_W) * 100,
+            y: (y1 / FRAME_H) * 100,
+            width: ((x2 - x1) / FRAME_W) * 100,
+            height: ((y2 - y1) / FRAME_H) * 100,
+          },
+          frame_b64: det.frame_b64,
+        };
+        updateCurrentSession((sess) => {
+          const list = [...(sess.captures ?? []), cap];
+          return { ...sess, captures: list.slice(-200) };
+        });
+        break;
+      }
+      case "RECHECK_RESULT": {
+        // Phase 03 — stash payload + open modal (Phase 05 modal consumes).
+        setRecheckResult({
+          frameIndex: evt.data.frame_index,
+          timestampSec: evt.data.timestamp_ms / 1000,
+          frameB64Full: evt.data.frame_b64_full,
+          conf: evt.data.conf,
+          boxes: evt.data.boxes,
+        });
+        setIsRecheckModalOpen(true);
         break;
       }
       case "VIDEO_FINISHED": {
@@ -709,6 +797,50 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
     wsRef.current.send({ action: "ACTION_RECHECK", payload: { conf } });
   }, []);
 
+  // Phase 02 — "Xác nhận luôn": register track id with worker so the same
+  // lesion silently auto-captures from then on (no more pauses). Resume
+  // pipeline + clear current detection bar (legacy ACTION_CONFIRM semantics).
+  const addConfirmedTrack = useCallback((trackId: number) => {
+    if (!wsRef.current) return;
+    if (!Number.isInteger(trackId) || trackId < 0) return;
+    wsRef.current.send({ action: "ACTION_CONFIRM_TRACK", payload: { track_id: trackId } });
+    updateCurrentSession((sess) => ({
+      ...sess,
+      confirmedTrackIds: [...(sess.confirmedTrackIds ?? []), trackId],
+    }));
+    setPipelineState("PLAYING");
+    setCurrentDetection(null);
+    llmInsightRef.current = "";
+    setLlmInsight("");
+  }, [updateCurrentSession]);
+
+  // Phase 02 — "Bỏ qua": symmetric session-mute. Worker drops further frames
+  // for this track silently.
+  const addMutedTrack = useCallback((trackId: number) => {
+    if (!wsRef.current) return;
+    if (!Number.isInteger(trackId) || trackId < 0) return;
+    wsRef.current.send({ action: "ACTION_MUTE_TRACK", payload: { track_id: trackId } });
+    updateCurrentSession((sess) => ({
+      ...sess,
+      mutedTrackIds: [...(sess.mutedTrackIds ?? []), trackId],
+    }));
+    setPipelineState("PLAYING");
+    setCurrentDetection(null);
+    llmInsightRef.current = "";
+    setLlmInsight("");
+  }, [updateCurrentSession]);
+
+  const openRecheckModal = useCallback(() => setIsRecheckModalOpen(true), []);
+  const closeRecheckModal = useCallback(() => setIsRecheckModalOpen(false), []);
+
+  // Phase 02 — declutter helper for the captures grid.
+  const removeCapture = useCallback((timestamp: number) => {
+    updateCurrentSession((sess) => ({
+      ...sess,
+      captures: (sess.captures ?? []).filter((c) => c.timestamp !== timestamp),
+    }));
+  }, [updateCurrentSession]);
+
   // Phase B — chatbot send. Two paths:
   //   - Live WS path (during/just-after session): action ACTION_SESSION_QA;
   //     reply streams in via SESSION_QA_CHUNK case.
@@ -853,6 +985,13 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       quickConfirm,
       reportFalsePositive,
       recheck,
+      addConfirmedTrack,
+      addMutedTrack,
+      recheckResult,
+      isRecheckModalOpen,
+      openRecheckModal,
+      closeRecheckModal,
+      removeCapture,
       sendSessionQA,
       lastError,
       dismissError: () => setLastError(null),
@@ -870,6 +1009,9 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       startMockAnalysis, resetPipeline, ignoreDetection,
       explainMore, followUpChat, confirmDetection, resumePlayback,
       quickConfirm, reportFalsePositive, recheck,
+      addConfirmedTrack, addMutedTrack,
+      recheckResult, isRecheckModalOpen, openRecheckModal, closeRecheckModal,
+      removeCapture,
       sendSessionQA, lastError, setIsPlaying,
       addDetection, removeDetection, resetAnalysis, removeSession, clearSessions,
     ],
