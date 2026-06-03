@@ -1,9 +1,12 @@
-# ── Stage 1: Dependencies ─────────────────────────────────────────────────────
+# ── Stage 1: Dependencies (full — includes dev deps needed for next build) ───
+# next build needs tailwindcss, postcss, typescript etc. The standalone output
+# in Stage 3 strips dev deps anyway, so installing them here costs nothing at
+# runtime but is REQUIRED for the build step.
 FROM node:20-alpine AS deps
 
 WORKDIR /app
 COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci --omit=dev
+RUN npm ci
 
 # ── Stage 2: Builder ──────────────────────────────────────────────────────────
 FROM node:20-alpine AS builder
