@@ -271,6 +271,28 @@ export async function deleteLibraryVideo(libraryId: string): Promise<void> {
   }
 }
 
+// ── DB-backed session history (Report page durability) ────────────────────────
+
+export interface DbSessionRow {
+  session_id: string;
+  started_at: number;       // unix ms
+  detections: { frame_index: number; label: string; severity: string; report: LesionReport | null }[];
+  summary: SessionSummary | null;
+}
+
+/** Fetch the persisted session list from the backend DB. Returns [] on failure
+ *  so the Report page falls back gracefully to its localStorage list. */
+export async function listDbSessions(): Promise<DbSessionRow[]> {
+  try {
+    const res = await fetch(`${API_BASE}/sessions`);
+    if (!res.ok) return [];
+    const j = await res.json();
+    return Array.isArray(j.sessions) ? (j.sessions as DbSessionRow[]) : [];
+  } catch {
+    return [];
+  }
+}
+
 // ── EndoscopyWsClient ─────────────────────────────────────────────────────────
 
 export class EndoscopyWsClient {

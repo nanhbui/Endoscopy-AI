@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { motion as framMotion } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -9,7 +9,29 @@ import {
   ScanSearch, Sparkles, Trash2, Video, X, Zap, Radio, FolderOpen, Upload, ChevronLeft,
 } from 'lucide-react';
 import { useAnalysis, type Detection, type DetectionStatus, type Session } from '@/context/AnalysisContext';
+import { listDbSessions, type DbSessionRow } from '@/lib/ws-client';
 import { SessionSummaryPanel } from '@/components/session-summary-panel';
+
+/** Map a DB-backed session row to the UI Session shape. DB rows have no frame
+ *  thumbnails (not stored server-side) — the card falls back to a placeholder.
+ *  Local sessions (richer, with thumbnails) take precedence on id collisions. */
+function dbRowToSession(d: DbSessionRow): Session {
+  return {
+    id: d.session_id,
+    name: `Phiên ${d.session_id.slice(0, 8)}`,
+    source: 'library',
+    startedAt: d.started_at,
+    detections: (d.detections ?? []).map((x) => ({
+      label: x.label || x.report?.conclusion?.primary_dx || 'Tổn thương',
+      confidence: (x.report?.conclusion?.ai_confidence ?? 0) / 100,
+      bbox: { x: 0, y: 0, width: 0, height: 0 },
+      timestamp: 0,
+      status: 'confirmed' as DetectionStatus,
+      lesionReport: x.report ?? undefined,
+    })),
+    summary: (d.summary ?? undefined) as Session['summary'],
+  };
+}
 
 import {
   Dialog,
@@ -652,18 +674,37 @@ export default function ReportPage() {
   const { sessions, removeSession, clearSessions, sendSessionQA } = useAnalysis();
   const [openSessionId, setOpenSessionId] = useState<string | null>(null);
   const [openDetection, setOpenDetection] = useState<Detection | null>(null);
+  const [dbSessions, setDbSessions] = useState<Session[]>([]);
+
+  // Pull the durable session list from the backend DB (survives cache clears /
+  // origin changes). Merge with the localStorage list: local entries win on id
+  // collisions because they carry frame thumbnails the DB doesn't store.
+  useEffect(() => {
+    let alive = true;
+    listDbSessions()
+      .then((rows) => { if (alive) setDbSessions(rows.map(dbRowToSession)); })
+      .catch(() => { /* keep localStorage-only list */ });
+    return () => { alive = false; };
+  }, []);
+
+  const allSessions = useMemo(() => {
+    const byId = new Map<string, Session>();
+    for (const s of dbSessions) byId.set(s.id, s);
+    for (const s of sessions) byId.set(s.id, s);   // local overrides DB (richer)
+    return [...byId.values()].sort((a, b) => b.startedAt - a.startedAt);
+  }, [dbSessions, sessions]);
 
   const openSession = useMemo(
-    () => sessions.find((s) => s.id === openSessionId) ?? null,
-    [sessions, openSessionId],
+    () => allSessions.find((s) => s.id === openSessionId) ?? null,
+    [allSessions, openSessionId],
   );
 
   const totalDetections = useMemo(
-    () => sessions.reduce((acc, s) => acc + s.detections.length, 0),
-    [sessions],
+    () => allSessions.reduce((acc, s) => acc + s.detections.length, 0),
+    [allSessions],
   );
 
-  if (sessions.length === 0) {
+  if (allSessions.length === 0) {
     return (
       <Box sx={{ minHeight: 'calc(100vh - 130px)', py: 5, px: { xs: 2, lg: 4 }, backgroundColor: 'background.default', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         <Box sx={{ textAlign: 'center', maxWidth: 360 }}>
@@ -720,7 +761,7 @@ export default function ReportPage() {
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 2.5, flexWrap: 'wrap' }}>
               <Box sx={{ display: 'inline-flex', alignItems: 'baseline', gap: 0.5 }}>
                 <Typography sx={{ fontSize: '1.05rem', fontWeight: 700, color: '#006064', fontFamily: 'var(--font-mono)' }}>
-                  {sessions.length}
+                  {allSessions.length}
                 </Typography>
                 <Typography sx={{ fontSize: '0.78rem', color: '#6E7C7B' }}>
                   phiên
@@ -789,7 +830,7 @@ export default function ReportPage() {
         </Box>
 
         <Grid container spacing={2.5}>
-          {sessions.map((session, idx) => (
+          {allSessions.map((session, idx) => (
             <Grid size={{ xs: 12, sm: 6, md: 4 }} key={session.id}>
               <SessionCard
                 session={session}

@@ -341,6 +341,54 @@ def load_all_confirmed_lesions() -> list[dict]:
         return []
 
 
+# ── Session history (DB-backed report list) ──────────────────────────────────
+
+def list_all_sessions() -> list[dict]:
+    """Aggregate every session that has persisted data (reports and/or a summary)
+    so the Report page can list them straight from the DB — durable across
+    browser cache clears and origin changes (localStorage is none of those).
+
+    Returns newest-first: [{session_id, started_at(ms), detections:[{frame_index,
+    label, severity, report}], summary}]."""
+    try:
+        with _connect() as conn:
+            reps = conn.execute(
+                "SELECT session_id, frame_index, report_json, generated_at, label, severity "
+                "FROM lesion_reports ORDER BY generated_at ASC"
+            ).fetchall()
+            sums = conn.execute(
+                "SELECT session_id, summary_json, generated_at FROM session_summaries"
+            ).fetchall()
+    except sqlite3.Error as e:
+        logger.error("list_all_sessions failed: {}", e)
+        return []
+
+    sessions: dict[str, dict] = {}
+
+    def _slot(sid: str, ts: int) -> dict:
+        s = sessions.setdefault(
+            sid, {"session_id": sid, "started_at": ts, "detections": [], "summary": None})
+        s["started_at"] = min(s["started_at"], ts)
+        return s
+
+    for sid, fi, rj, gen, label, sev in reps:
+        s = _slot(sid, gen)
+        try:
+            report = json.loads(rj)
+        except (json.JSONDecodeError, TypeError):
+            report = None
+        s["detections"].append({"frame_index": fi, "label": label,
+                                "severity": sev, "report": report})
+    for sid, sj, gen in sums:
+        s = _slot(sid, gen)
+        try:
+            s["summary"] = json.loads(sj)
+        except (json.JSONDecodeError, TypeError):
+            s["summary"] = None
+
+    return sorted(sessions.values(), key=lambda x: x["started_at"], reverse=True)
+
+
 # ── Session summaries (Phase B) ──────────────────────────────────────────────
 
 def save_session_summary(session_id: str, summary: dict, model: str,
