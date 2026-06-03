@@ -57,6 +57,9 @@ sys.path.insert(0, str(_PIPELINE_DIR))
 
 from pipeline_controller import PipelineController, PipelineState   # noqa: E402
 from video_library import VideoLibrary                               # noqa: E402
+from video_proxy import (                                            # noqa: E402
+    playback_path, ensure_proxy_async, remove_proxy,
+)
 from llm_prompts import (                                              # noqa: E402
     LESION_REPORT_SCHEMA,
     LESION_REPORT_PROMPT,
@@ -65,6 +68,7 @@ from llm_prompts import (                                              # noqa: E
 from db import (                                                       # noqa: E402
     init_db, save_lesion_report, get_lesion_reports_for_session,
     save_false_positive, load_all_false_positives, matches_false_positive,
+    save_confirmed_lesion, load_all_confirmed_lesions,
     save_session_summary, get_session_summary,
     append_qa_message, get_qa_history,
 )
@@ -246,6 +250,17 @@ init_db()
 _sessions: Dict[str, dict] = {}
 
 _library = VideoLibrary(LIBRARY_DIR)
+
+# Pre-build low-bitrate playback proxies for existing library videos so the
+# browser <video> streams smoothly over a slow remote link (see video_proxy).
+# Runs in background threads; no-op for videos that already have a proxy.
+try:
+    for _e in _library.load_index():
+        _p = _e.get("path")
+        if _p:
+            ensure_proxy_async(Path(_p))
+except Exception as _exc:  # pragma: no cover - best effort at startup
+    logger.warning("Proxy pre-build skipped: {}", _exc)
 
 _llm_client: Optional[AsyncOpenAI] = None
 
@@ -826,6 +841,9 @@ async def upload_to_library(request: Request, filename: str = "video.mp4"):
         "path": str(dest),
     }
     _library.add_entry(entry)
+    # Build the low-bitrate playback proxy in the background so the first replay
+    # of this video streams smoothly over a slow link.
+    ensure_proxy_async(dest)
     return {k: entry[k] for k in ("library_id", "filename", "size_bytes", "uploaded_at")} | {"duplicate": False}
 
 
@@ -875,6 +893,7 @@ async def delete_library_video(library_id: str):
     _library.remove_entry(library_id)
     file_path = Path(entry["path"])
     file_path.unlink(missing_ok=True)
+    remove_proxy(file_path)   # drop the playback proxy alongside the original
     logger.info("Library video deleted: {}", library_id)
     return {"deleted": True, "library_id": library_id}
 
@@ -973,12 +992,16 @@ async def stream_session_video(video_id: str):
     video_path = sess.get("video_path")
     if not video_path or not isinstance(video_path, Path) or not video_path.exists():
         raise HTTPException(status_code=404, detail="Video file not found")
-    suffix = video_path.suffix.lower()
+    # Serve the low-bitrate playback proxy when available (smooth over slow
+    # links); falls back to the original and builds the proxy in the background
+    # so the next play is smooth. Detection always uses the original file.
+    serve_path = playback_path(video_path)
+    suffix = serve_path.suffix.lower()
     media_type = {
         ".mp4": "video/mp4", ".mov": "video/quicktime",
         ".avi": "video/x-msvideo", ".mkv": "video/x-matroska",
     }.get(suffix, "video/mp4")
-    return FileResponse(str(video_path), media_type=media_type)
+    return FileResponse(str(serve_path), media_type=media_type)
 
 
 # ── WebSocket endpoint ────────────────────────────────────────────────────────
@@ -999,7 +1022,13 @@ async def ws_analysis(websocket: WebSocket, video_id: str):
     ctrl = PipelineController(video_id=video_id)
     sess["controller"] = ctrl
     ctrl.set_loop(asyncio.get_running_loop())
-    ctrl.start(sess["video_path"])
+
+    # Phase 02: load persistent "Xác nhận luôn" lesions BEFORE start so the
+    # worker auto-captures them (no pause) from the first frame of this run.
+    sess["confirmed_lesions"] = load_all_confirmed_lesions()
+    logger.info("Loaded {} confirmed-always lesions for session {}",
+                len(sess["confirmed_lesions"]), video_id)
+    ctrl.start(sess["video_path"], confirmed_lesions=sess["confirmed_lesions"])
 
     # Phase D: load persistent false-positive list ONCE per session. Auto-skip
     # any DETECTION_FOUND whose (label + bbox IoU >0.6) matches an entry, so
@@ -1147,15 +1176,35 @@ async def ws_analysis(websocket: WebSocket, video_id: str):
                 ctrl.send_action(action, msg.get("payload"))
 
             elif action == "ACTION_CONFIRM_TRACK":
-                # Phase 02 — "Xác nhận luôn": register a track id so subsequent
-                # frames carrying it emit CONFIRMED_CAPTURE every 2 s instead of
-                # pausing. Behaves like ACTION_CONFIRM for the current pending
-                # detection (resume pipeline + clear LLM streaming).
+                # Phase 02 — "Xác nhận luôn": persist this lesion (label + bbox)
+                # to the DB so on the NEXT run of the video it auto-captures to
+                # the side panel instead of pausing. Also push CONFIRM_LESION to
+                # the worker so it applies for the rest of THIS run. Then behave
+                # like ACTION_CONFIRM (resume + clear LLM streaming).
                 payload = msg.get("payload") or {}
-                tid = payload.get("track_id")
-                if isinstance(tid, int) and tid >= 0 and ctrl._cmd_q:
-                    ctrl._cmd_q.put(f"CONFIRM_TRACK:{tid}")
-                    logger.info("Confirm-luôn registered: track_id={}", tid)
+                pending = ctrl._pending
+                if pending:
+                    lesion = pending.get("lesion", {})
+                    label = lesion.get("label", "")
+                    bbox = list(lesion.get("bbox", []))
+                    thumb = pending.get("frame_b64")
+                    if label and len(bbox) >= 4:
+                        ok = save_confirmed_lesion(
+                            label=label, bbox=bbox,
+                            session_id_source=video_id,
+                            reported_at_ms=int(time.time() * 1000),
+                            frame_b64=thumb,
+                        )
+                        if ok:
+                            sess["confirmed_lesions"].append({"label": label, "bbox": bbox})
+                        if ctrl._cmd_q:
+                            ctrl._cmd_q.put("CONFIRM_LESION:" + json.dumps(
+                                {"label": label, "bbox": bbox}))
+                        logger.info(
+                            "Confirm-luôn persisted: {} bbox={} (now {} total)",
+                            label, [round(v, 1) for v in bbox],
+                            len(sess["confirmed_lesions"]),
+                        )
                 sess["conv_history"] = []
                 sess["llm_streaming"] = False
                 ctrl.send_action("ACTION_CONFIRM", payload)
