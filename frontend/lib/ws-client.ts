@@ -8,6 +8,22 @@
 export const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8001";
 export const WS_BASE  = API_BASE.replace(/^http/, "ws");
 
+// Skip ngrok's browser-warning interstitial for fetch + XHR when API goes via ngrok.
+if (typeof window !== "undefined" && API_BASE.includes("ngrok") && !(window as unknown as { __NGROK_PATCHED__?: boolean }).__NGROK_PATCHED__) {
+  (window as unknown as { __NGROK_PATCHED__?: boolean }).__NGROK_PATCHED__ = true;
+  const origFetch = window.fetch.bind(window);
+  window.fetch = (input, init = {}) => {
+    const headers = new Headers(init.headers);
+    headers.set("ngrok-skip-browser-warning", "1");
+    return origFetch(input, { ...init, headers });
+  };
+  const origOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (this: XMLHttpRequest, ...args: unknown[]) {
+    (origOpen as (...a: unknown[]) => void).apply(this, args);
+    try { this.setRequestHeader("ngrok-skip-browser-warning", "1"); } catch { /* state may not allow */ }
+  } as typeof XMLHttpRequest.prototype.open;
+}
+
 // ── Inbound event types (server → client) ────────────────────────────────────
 
 export interface DetectionData {
@@ -21,6 +37,9 @@ export interface DetectionData {
      *  reference rectangle that backend draws on frame_b64. Used for the styled
      *  overlay on the cropped thumbnail. */
     bbox_thumb?: { x: number; y: number; width: number; height: number };
+    /** StrongSORT track id, stable per-lesion within a session.
+     *  `-1` = recheck-origin detection (no temporal context — not auto-trackable). */
+    track_id?: number;
   };
   frame_b64?: string;
 }
@@ -68,11 +87,26 @@ export interface SessionSummary {
 
 export type ServerEvent =
   | { event: "DETECTION_FOUND";       data: DetectionData }
+  // Phase 02 — silent thumbnail capture for tracks marked "Xác nhận luôn".
+  // Same shape as DETECTION_FOUND but pipeline does NOT pause; FE appends
+  // to the captures side panel instead of opening DetectionBar.
+  | { event: "CONFIRMED_CAPTURE";     data: DetectionData }
   | { event: "STATE_CHANGE";          data: { state: string } }
   | { event: "LLM_CHUNK";             data: { chunk: string } }
   | { event: "LLM_DONE";              data: Record<string, never> }
   | { event: "LESION_REPORT_DONE";    data: { frame_index: number; report: LesionReport } }
   | { event: "RECHECK_EMPTY";         data: { conf: number; error?: string } }
+  // Phase 03 — recheck returns ALL bboxes (not just top-1) for the zoom modal.
+  // `boxes` is sorted desc by confidence, capped at 10. `frame_b64_full` is the
+  // downscaled paused frame (≤1280 wide, JPEG q70). Legacy DETECTION_FOUND
+  // with top-1 is still emitted alongside for back-compat with older FE.
+  | { event: "RECHECK_RESULT";        data: {
+      frame_index: number;
+      timestamp_ms: number;
+      frame_b64_full?: string;
+      conf: number;
+      boxes: { label: string; confidence: number; bbox: [number, number, number, number] }[];
+    } }
   | { event: "VIDEO_FINISHED";        data: { detections: DetectionData[] } }
   // Phase B — session summary + Q&A chatbot events:
   | { event: "SESSION_SUMMARY_DONE";  data: { summary: SessionSummary | null; reason?: string } }
@@ -105,6 +139,11 @@ export type ClientAction =
   //   (Quick-confirm reuses ACTION_CONFIRM — we just expose the button pre-LLM.)
   | { action: "ACTION_REPORT_FALSE_POSITIVE" }
   | { action: "ACTION_RECHECK"; payload?: { conf?: number } }
+  // Phase 02 — track-id-based auto-handling. Once registered, subsequent
+  // frames carrying that track id either auto-capture (confirm-luôn) or
+  // are dropped silently (mute), without further DetectionBar pauses.
+  | { action: "ACTION_CONFIRM_TRACK"; payload: { track_id: number } }
+  | { action: "ACTION_MUTE_TRACK";    payload: { track_id: number } }
   // Phase B — session-level Q&A (distinct from per-detection ACTION_FOLLOW_UP).
   | { action: "ACTION_SESSION_QA"; payload: { text: string } };
 

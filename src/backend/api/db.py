@@ -67,6 +67,26 @@ _FP_LABEL_INDEX_DDL = "CREATE INDEX IF NOT EXISTS idx_fp_label ON false_positive
 # Lets older deployments pick up the frame_b64 column without a manual migration.
 _FP_ADD_FRAME_B64 = "ALTER TABLE false_positives ADD COLUMN frame_b64 TEXT"
 
+# Phase 02 — "Xác nhận luôn" persistent confirmed-lesion store. Same shape as
+# false_positives but opposite intent: a matching detection on a later run is
+# NOT paused — it is silently captured to the side panel. bbox normalized to
+# 1920×1080 so cross-run IoU match works regardless of source resolution.
+_CONFIRMED_LESIONS_DDL = """
+CREATE TABLE IF NOT EXISTS confirmed_lesions (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    label              TEXT NOT NULL,
+    bbox_x1            REAL NOT NULL,
+    bbox_y1            REAL NOT NULL,
+    bbox_x2            REAL NOT NULL,
+    bbox_y2            REAL NOT NULL,
+    reported_at        INTEGER NOT NULL,    -- unix epoch ms
+    session_id_source  TEXT,                 -- run that first confirmed it
+    frame_b64          TEXT                  -- cropped thumbnail for review
+)
+"""
+
+_CL_LABEL_INDEX_DDL = "CREATE INDEX IF NOT EXISTS idx_cl_label ON confirmed_lesions(label)"
+
 # Phase B — session summary table. One row per session (UPSERT on re-summary
 # from EOS re-trigger). Stores the full SESSION_SUMMARY_SCHEMA JSON so the
 # frontend's summary panel can render without re-querying the LLM.
@@ -121,6 +141,8 @@ def init_db() -> None:
                 conn.execute(_FP_ADD_FRAME_B64)
             except sqlite3.OperationalError:
                 pass
+            conn.execute(_CONFIRMED_LESIONS_DDL)
+            conn.execute(_CL_LABEL_INDEX_DDL)
             conn.execute(_SESSION_SUMMARIES_DDL)
             conn.execute(_QA_MESSAGES_DDL)
             conn.execute(_QA_SESSION_INDEX_DDL)
@@ -267,6 +289,56 @@ def matches_false_positive(label: str, bbox: list[float],
         if fp["label"] == label and _iou(fp["bbox"], bbox) >= iou_threshold:
             return True
     return False
+
+
+# ── Confirmed-always lesions (Phase 02 — "Xác nhận luôn") ─────────────────────
+
+def save_confirmed_lesion(label: str, bbox: list[float], session_id_source: str,
+                          reported_at_ms: int,
+                          frame_b64: Optional[str] = None) -> bool:
+    """Persist one confirmed-always lesion. bbox is [x1,y1,x2,y2] normalized to
+    1920×1080. On a later run, a detection matching (label + IoU) is captured to
+    the side panel instead of pausing the video. Same area-ratio guard as FP to
+    avoid near-full-frame boxes matching unrelated future detections."""
+    if len(bbox) < 4:
+        return False
+    w = max(0.0, float(bbox[2]) - float(bbox[0]))
+    h = max(0.0, float(bbox[3]) - float(bbox[1]))
+    area_ratio = (w * h) / (_FRAME_W * _FRAME_H)
+    if area_ratio <= 0.0 or area_ratio > _MAX_FP_AREA_RATIO:
+        logger.warning(
+            "save_confirmed_lesion rejected: bbox area ratio {:.2%} exceeds {:.0%} cap "
+            "(label={})", area_ratio, _MAX_FP_AREA_RATIO, label,
+        )
+        return False
+    try:
+        with _connect() as conn:
+            conn.execute(
+                """INSERT INTO confirmed_lesions
+                   (label, bbox_x1, bbox_y1, bbox_x2, bbox_y2, reported_at,
+                    session_id_source, frame_b64)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (label, float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3]),
+                 reported_at_ms, session_id_source, frame_b64),
+            )
+        return True
+    except sqlite3.Error as e:
+        logger.error("save_confirmed_lesion failed: {}", e)
+        return False
+
+
+def load_all_confirmed_lesions() -> list[dict]:
+    """Load every confirmed-always lesion as [{label, bbox}]. Called once per
+    WS connect and passed to the worker so 2nd+ runs auto-capture them."""
+    try:
+        with _connect() as conn:
+            rows = conn.execute(
+                "SELECT label, bbox_x1, bbox_y1, bbox_x2, bbox_y2 FROM confirmed_lesions"
+            ).fetchall()
+        return [{"label": r[0], "bbox": [r[1], r[2], r[3], r[4]]} for r in rows]
+    except sqlite3.Error as e:
+        logger.error("load_all_confirmed_lesions failed: {}", e)
+        return []
 
 
 # ── Session summaries (Phase B) ──────────────────────────────────────────────

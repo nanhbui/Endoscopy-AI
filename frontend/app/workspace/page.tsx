@@ -39,6 +39,8 @@ import { VideoSourceModal } from '@/components/video-source-modal';
 import { LesionReportCard } from '@/components/lesion-report-card';
 import { DisclaimerBanner } from '@/components/disclaimer';
 import { SessionSummaryPanel } from '@/components/session-summary-panel';
+import { ConfirmedCapturesPanel } from '@/components/confirmed-captures-panel';
+import { ZoomInspectModal } from '@/components/zoom-inspect-modal';
 
 import TextField from '@mui/material/TextField';
 import ToggleButton from '@mui/material/ToggleButton';
@@ -674,6 +676,12 @@ export default function Workspace() {
     quickConfirm,
     reportFalsePositive,
     recheck,
+    addConfirmedTrack,
+    addMutedTrack,
+    removeCapture,
+    recheckResult,
+    isRecheckModalOpen,
+    closeRecheckModal,
     sendSessionQA,
     lastError,
     dismissError,
@@ -700,6 +708,28 @@ export default function Workspace() {
   // True when a library video is prepared (video_id set) but analysis not yet started
   const [libraryReady, setLibraryReady] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
+
+  // Phase 02 — "Xác nhận luôn" / "Bỏ qua" rewires.
+  // If detection carries a valid StrongSORT track id (≥ 0), use the new track-
+  // based handlers so subsequent frames silently auto-capture (confirm) or
+  // get dropped (mute). When trackId is missing (legacy BE) or -1 (recheck
+  // origin, no tracker context), fall back to the legacy per-detection action.
+  const handleQuickConfirmTracked = useCallback(() => {
+    if (currentDetection?.trackId !== undefined && currentDetection.trackId >= 0) {
+      addConfirmedTrack(currentDetection.trackId);
+    } else {
+      quickConfirm();
+    }
+  }, [currentDetection, addConfirmedTrack, quickConfirm]);
+
+  const handleIgnoreTracked = useCallback(() => {
+    if (currentDetection?.trackId !== undefined && currentDetection.trackId >= 0) {
+      addMutedTrack(currentDetection.trackId);
+    } else {
+      ignoreDetection();
+    }
+  }, [currentDetection, addMutedTrack, ignoreDetection]);
+
   const [transcriptLog, setTranscriptLog] = useState<{ text: string; ts: number }[]>([]);
   const transcriptEndRef = useRef<HTMLDivElement>(null);
   const [isNavigating, setIsNavigating] = useState(false);
@@ -1138,7 +1168,7 @@ export default function Workspace() {
                   <VideoContainer>
                     <LiveStreamPanel source={liveSource} pipelineState={pipelineState} />
                     {pipelineState === 'PAUSED_WAITING_INPUT' && currentDetection && (
-                      <DetectionBar detection={currentDetection} llmInsight={llmInsight} voiceSupported={voiceSupported} isVoiceListening={isVoiceListening} onExplain={explainMore} onIgnore={ignoreDetection} onConfirm={confirmDetection} onQuickConfirm={quickConfirm} onReportFalsePositive={reportFalsePositive} onRecheck={() => recheck(0.4)} />
+                      <DetectionBar detection={currentDetection} llmInsight={llmInsight} voiceSupported={voiceSupported} isVoiceListening={isVoiceListening} onExplain={explainMore} onIgnore={handleIgnoreTracked} onConfirm={confirmDetection} onQuickConfirm={handleQuickConfirmTracked} onReportFalsePositive={reportFalsePositive} onRecheck={() => recheck(0.4)} />
                     )}
                   </VideoContainer>
                 ) : libraryReady && !videoUrl && pipelineState === 'IDLE' ? (
@@ -1160,7 +1190,7 @@ export default function Workspace() {
                       </Box>
                     )}
                     {pipelineState === 'PAUSED_WAITING_INPUT' && currentDetection && (
-                      <DetectionBar detection={currentDetection} llmInsight={llmInsight} voiceSupported={voiceSupported} isVoiceListening={isVoiceListening} onExplain={explainMore} onIgnore={ignoreDetection} onConfirm={confirmDetection} onQuickConfirm={quickConfirm} onReportFalsePositive={reportFalsePositive} onRecheck={() => recheck(0.4)} />
+                      <DetectionBar detection={currentDetection} llmInsight={llmInsight} voiceSupported={voiceSupported} isVoiceListening={isVoiceListening} onExplain={explainMore} onIgnore={handleIgnoreTracked} onConfirm={confirmDetection} onQuickConfirm={handleQuickConfirmTracked} onReportFalsePositive={reportFalsePositive} onRecheck={() => recheck(0.4)} />
                     )}
                     {currentDetection && (() => {
                       const _c = bboxColorFor(currentDetection.label);
@@ -1233,7 +1263,7 @@ export default function Workspace() {
                       </Box>
                     )}
                     {pipelineState === 'PAUSED_WAITING_INPUT' && currentDetection && (
-                      <DetectionBar detection={currentDetection} llmInsight={llmInsight} voiceSupported={voiceSupported} isVoiceListening={isVoiceListening} onExplain={explainMore} onIgnore={ignoreDetection} onConfirm={confirmDetection} onQuickConfirm={quickConfirm} onReportFalsePositive={reportFalsePositive} onRecheck={() => recheck(0.4)} />
+                      <DetectionBar detection={currentDetection} llmInsight={llmInsight} voiceSupported={voiceSupported} isVoiceListening={isVoiceListening} onExplain={explainMore} onIgnore={handleIgnoreTracked} onConfirm={confirmDetection} onQuickConfirm={handleQuickConfirmTracked} onReportFalsePositive={reportFalsePositive} onRecheck={() => recheck(0.4)} />
                     )}
 
                     {/* AI bbox overlay on top of video */}
@@ -1271,6 +1301,15 @@ export default function Workspace() {
                 )}
               </Box>
             </Box>
+
+            {/* Phase 02 — silent captures from "Xác nhận luôn" tracks. Hidden when empty. */}
+            {currentSession?.captures?.length ? (
+              <ConfirmedCapturesPanel
+                captures={currentSession.captures}
+                videoRef={videoRef}
+                onRemove={removeCapture}
+              />
+            ) : null}
 
             {/* ── Voice / Whisper Transcript Panel ──────────────────────────── */}
             <Box
@@ -1692,6 +1731,14 @@ export default function Workspace() {
         onClose={() => setIsSourceModalOpen(false)}
         onUploadAndConnect={handleUploadAndConnect}
         onLibrarySelect={handleLibrarySelectFromModal}
+      />
+
+      {/* Phase 05 — opens on RECHECK_RESULT after click "Kiểm tra lại". */}
+      <ZoomInspectModal
+        open={isRecheckModalOpen}
+        payload={recheckResult}
+        videoRef={videoRef}
+        onClose={closeRecheckModal}
       />
     </Box>
   );

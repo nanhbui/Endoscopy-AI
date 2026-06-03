@@ -57,9 +57,24 @@ Thumbs.db
 *_backup*
 *.bak
 .env
+.env.local
+*.env.local
+
+# Deployment runtime (per-host, not source)
+Caddyfile
 
 .claude
 sample_code/
+
+# LaTeX thesis (local only — do not push to remote)
+GRADUATION_THESIS_TEMPLATE__ENG_VER_/
+share/
+*.aux
+*.toc
+*.lof
+*.lot
+*.out
+*.synctex.gz
 
 # SQLite — runtime DB files, never commit
 *.db-shm
@@ -68,3 +83,4 @@ src/backend/api/data/endoscopy.db
 new-theme/
 .speckit/
 .specify/
+plans/
