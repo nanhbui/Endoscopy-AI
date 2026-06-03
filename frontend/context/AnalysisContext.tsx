@@ -314,14 +314,30 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
   const detectionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const llmTypingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Hydrate from localStorage on mount.
+  // Hydrate from localStorage on mount. `hydratedRef` gates persistence so we
+  // NEVER write before the initial load completes — otherwise the empty initial
+  // state could clobber the stored sessions (e.g. under React StrictMode's
+  // double-mount in dev).
+  const hydratedRef = useRef(false);
   useEffect(() => {
     setSessions(loadSessions());
+    hydratedRef.current = true;
   }, []);
 
-  // Persist sessions on every change.
+  // Persist sessions — DEBOUNCED. saveSessions() does a synchronous JSON
+  // stringify + localStorage.setItem of the whole session list; running it on
+  // every state change (e.g. each CONFIRMED_CAPTURE / streaming token) blocks
+  // the main thread and makes the video stutter. Coalesce bursts into one write
+  // ~800ms after the last change. No unmount-flush (it risked writing an empty
+  // list during StrictMode mount churn); losing <800ms on a hard close is fine.
+  const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
-    saveSessions(sessions);
+    if (!hydratedRef.current) return;            // never persist pre-hydration
+    if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
+    persistTimerRef.current = setTimeout(() => saveSessions(sessions), 800);
+    return () => {
+      if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
+    };
   }, [sessions]);
 
   const clearMockTimers = useCallback(() => {

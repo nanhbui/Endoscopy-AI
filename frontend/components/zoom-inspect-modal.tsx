@@ -20,14 +20,14 @@ import Box from '@mui/material/Box';
 import Dialog from '@mui/material/Dialog';
 import Typography from '@mui/material/Typography';
 import IconButton from '@mui/material/IconButton';
-import Slider from '@mui/material/Slider';
 import type { RecheckResultPayload } from '@/context/AnalysisContext';
 
 interface Props {
   open: boolean;
   payload: RecheckResultPayload | null;
-  /** Workspace video element — used for ±5s scrub seek. */
-  videoRef: RefObject<HTMLVideoElement | null>;
+  /** Workspace video element. Kept for API compatibility with the caller;
+   *  no longer used since the ±5s scrubber was removed. */
+  videoRef?: RefObject<HTMLVideoElement | null>;
   onClose: () => void;
 }
 
@@ -35,15 +35,13 @@ interface Props {
 const FRAME_W = 1920;
 const FRAME_H = 1080;
 
-export function ZoomInspectModal({ open, payload, videoRef, onClose }: Props) {
+export function ZoomInspectModal({ open, payload, onClose }: Props) {
   const [focusedIdx, setFocusedIdx] = useState(0);
-  const [scrubSec, setScrubSec] = useState(0);
 
-  // Reset focus + scrubber when a fresh payload arrives.
+  // Reset focus when a fresh payload arrives.
   useEffect(() => {
     if (!payload) return;
     setFocusedIdx(0);
-    setScrubSec(payload.timestampSec);
   }, [payload]);
 
   // ESC + arrow keys
@@ -76,13 +74,6 @@ export function ZoomInspectModal({ open, payload, videoRef, onClose }: Props) {
   }, [focused]);
 
   if (!payload) return null;
-
-  const seekTo = (sec: number) => {
-    const v = videoRef.current;
-    if (v && Number.isFinite(sec)) {
-      try { v.currentTime = sec; } catch { /* video may be unloaded */ }
-    }
-  };
 
   const frameSrc = payload.frameB64Full ? `data:image/jpeg;base64,${payload.frameB64Full}` : null;
 
@@ -184,27 +175,11 @@ export function ZoomInspectModal({ open, payload, videoRef, onClose }: Props) {
         </Box>
       </Box>
 
-      {/* Footer — ±5s scrubber */}
+      {/* Footer — hint only (the ±5s scrubber was removed: it seeked the hidden
+          workspace video behind the modal and the static frame didn't update,
+          so it had no visible effect). */}
       <Box sx={{ px: 3, py: 1.5, borderTop: '1px solid #E2EAE8', backgroundColor: '#F8FAFB' }}>
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-          <Typography variant="caption" sx={{ color: 'text.secondary', fontFamily: 'monospace', minWidth: 64 }}>
-            -5.0s
-          </Typography>
-          <Slider
-            value={scrubSec}
-            min={Math.max(0, payload.timestampSec - 5)}
-            max={payload.timestampSec + 5}
-            step={0.5}
-            marks={[{ value: payload.timestampSec, label: 'hiện tại' }]}
-            onChange={(_, v) => setScrubSec(Array.isArray(v) ? v[0] : v)}
-            onChangeCommitted={(_, v) => seekTo(Array.isArray(v) ? v[0] : v)}
-            sx={{ flex: 1, color: '#006064' }}
-          />
-          <Typography variant="caption" sx={{ color: 'text.secondary', fontFamily: 'monospace', minWidth: 64, textAlign: 'right' }}>
-            +5.0s
-          </Typography>
-        </Box>
-        <Typography variant="caption" sx={{ color: 'text.disabled', fontSize: '0.7rem', display: 'block', mt: 0.5 }}>
+        <Typography variant="caption" sx={{ color: 'text.disabled', fontSize: '0.7rem', display: 'block' }}>
           Đóng modal rồi quyết định (Xác nhận luôn / Báo sai / Bỏ qua) ở thanh dưới video.
         </Typography>
       </Box>
