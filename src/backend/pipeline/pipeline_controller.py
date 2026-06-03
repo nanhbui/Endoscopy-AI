@@ -129,7 +129,8 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                      gstshark_enabled: bool = False,
                      gstshark_plugin_path: str = "",
                      gstshark_log_dir: str = "/tmp/gst-shark",
-                     gstshark_tracers: str = "framerate;proctime;interlatency") -> None:
+                     gstshark_tracers: str = "framerate;proctime;interlatency",
+                     confirmed_lesions: list = None) -> None:
     """Runs in isolated subprocess: GStreamer decode + YOLO inference + StrongSORT tracking.
 
     Sends detection/state events to result_q.
@@ -552,20 +553,26 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
     # detections and drift backend ahead of frontend.
     _last_detection_pts_ns: Optional[int] = None
 
-    # Phase 02 — per-session track state. Set by FE via ACTION_CONFIRM_TRACK
-    # (Xác nhận luôn) / ACTION_MUTE_TRACK (Bỏ qua). Worker-local, cleared on
-    # subprocess respawn — there is no cross-session persistence by design.
-    #  - confirmed_track_ids: emit CONFIRMED_CAPTURE every CAPTURE_INTERVAL_MS,
-    #    never pause.
-    #  - muted_track_ids:     fully silent; no events, no pause.
-    confirmed_track_ids: set[int] = set()
+    # Phase 02 — "Xác nhận luôn" (confirmed-always) + in-session mute.
+    #  - _confirmed_lesions: [{label, bbox(1920x1080)}]. Loaded from DB at spawn
+    #    (so it works on the 2nd+ run of a video) and appended live during this
+    #    run via the CONFIRM_LESION command. A detection matching one of these
+    #    (same label + IoU >= _CONFIRM_IOU) NEVER pauses; it emits exactly ONE
+    #    CONFIRMED_CAPTURE the first time each track id appears (once per
+    #    appearance — NOT a fixed cadence, so no main-thread flood on the FE).
+    #    When a track is lost and reappears, StrongSORT assigns a new id → a
+    #    fresh capture, which is the intended "1 per appearance" behaviour.
+    #  - muted_track_ids: in-session "Bỏ qua" — silently dropped, no pause.
+    _confirmed_lesions: list = list(confirmed_lesions or [])
     muted_track_ids: set[int] = set()
-    last_capture_ms: dict[int, int] = {}
-    CAPTURE_INTERVAL_MS = int(_os.environ.get("ENDOSCOPY_CAPTURE_INTERVAL_MS", "2000"))
-    # Bookkeeping: prune stale throttle entries every N frames to bound memory
-    # on hours-long live sessions where many tracks come and go.
-    _PRUNE_EVERY_FRAMES = 1000
-    _PRUNE_STALE_MS = 300_000  # 5 min
+    captured_track_ids: set[int] = set()
+    _CONFIRM_IOU = float(_os.environ.get("ENDOSCOPY_CONFIRM_IOU", "0.5"))
+
+    def _matches_confirmed(_label: str, _bbox: list) -> bool:
+        for _cl in _confirmed_lesions:
+            if _cl.get("label") == _label and _iou(_cl.get("bbox", []), _bbox) >= _CONFIRM_IOU:
+                return True
+        return False
 
     try:
         while True:
@@ -588,13 +595,17 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                         data = _json.loads(parts[2])
                         _ignored.append({"fi": fi, "bbox": data["bbox"]})
                     paused = False
-                elif cmd.startswith("CONFIRM_TRACK:"):
-                    # Phase 02 — register a track id as "confirmed luôn".
-                    # Subsequent frames carrying this id emit CONFIRMED_CAPTURE
-                    # at CAPTURE_INTERVAL_MS cadence and never pause.
+                elif cmd.startswith("CONFIRM_LESION:"):
+                    # Phase 02 — register a lesion (label + bbox) as "confirmed
+                    # luôn". Matching detections from now on auto-capture instead
+                    # of pausing. The server also persists it to the DB so it
+                    # applies to future runs of this video.
                     try:
-                        confirmed_track_ids.add(int(cmd.split(":", 1)[1]))
-                    except ValueError:
+                        _cl = _json.loads(cmd.split(":", 1)[1])
+                        if _cl.get("label") and len(_cl.get("bbox", [])) >= 4:
+                            _confirmed_lesions.append({"label": _cl["label"], "bbox": _cl["bbox"]})
+                            print(f"[Worker] CONFIRM_LESION registered: {_cl['label']}", flush=True)
+                    except (ValueError, KeyError):
                         pass
                 elif cmd.startswith("MUTE_TRACK:"):
                     # Phase 02 — register a track id as session-muted.
@@ -941,24 +952,24 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                             xyxy[3] / _fh_full * 1080,
                         ]
 
-                        # ── Phase 02: per-track session-state shortcuts ──────
-                        # Muted track → silently drop (no events, no pause).
+                        # ── Phase 02: confirmed-always / muted shortcuts ──────
+                        # Muted track (in-session "Bỏ qua") → silently drop.
                         if track_id in muted_track_ids:
                             continue
-                        # Confirmed track → emit CONFIRMED_CAPTURE at fixed
-                        # cadence per track id; never pause. The doctor
-                        # already validated this lesion at first detection.
-                        if track_id in confirmed_track_ids:
-                            _now_ms = int(time.monotonic() * 1000)
-                            _last_ms = last_capture_ms.get(track_id, 0)
-                            if _now_ms - _last_ms >= CAPTURE_INTERVAL_MS:
+                        # Confirmed-always lesion (DB- or session-registered) →
+                        # never pause; emit ONE CONFIRMED_CAPTURE per appearance
+                        # (per track id). No fixed cadence → no FE main-thread
+                        # flood. A lost-then-reappearing lesion gets a new track
+                        # id from StrongSORT → a fresh capture, as intended.
+                        if _matches_confirmed(label, xyxy_norm):
+                            if int(track_id) not in captured_track_ids:
                                 _cap_bbox_thumb_pct = {
                                     "x":     (max(_vx, xyxy[0]) - _vx) / _vfw * 100,
                                     "y":     (max(_vy, xyxy[1]) - _vy) / _vfh * 100,
                                     "width":  (min(_vx + _vfw, xyxy[2]) - max(_vx, xyxy[0])) / _vfw * 100,
                                     "height": (min(_vy + _vfh, xyxy[3]) - max(_vy, xyxy[1])) / _vfh * 100,
                                 }
-                                _cap_data = {
+                                result_q.put({"event": "CONFIRMED_CAPTURE", "data": {
                                     "frame_index": frame_index,
                                     "timestamp_ms": timestamp_ms,
                                     "lesion": {
@@ -969,9 +980,8 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                                         "track_id": int(track_id),
                                     },
                                     "frame_b64": _crop_b64(frame, xyxy),
-                                }
-                                result_q.put({"event": "CONFIRMED_CAPTURE", "data": _cap_data})
-                                last_capture_ms[track_id] = _now_ms
+                                }})
+                                captured_track_ids.add(int(track_id))
                                 print(f"[Worker] CONFIRMED_CAPTURE track_id={track_id} {label} ts_ms={timestamp_ms}", flush=True)
                             continue
 
@@ -1028,12 +1038,6 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                     print(f"[Worker] YOLO/tracker error frame {frame_index}: {exc}", flush=True)
 
             frame_index += 1
-            # Phase 02 — prune stale capture-cadence entries every N frames to
-            # bound memory on hours-long live sessions.
-            if last_capture_ms and frame_index % _PRUNE_EVERY_FRAMES == 0:
-                _cut_ms = int(time.monotonic() * 1000) - _PRUNE_STALE_MS
-                for _stale_id in [tid for tid, ts in last_capture_ms.items() if ts < _cut_ms]:
-                    last_capture_ms.pop(_stale_id, None)
 
     except Exception as exc:
         import traceback
@@ -1083,8 +1087,12 @@ class PipelineController:
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
 
-    def start(self, video_path: Path) -> None:
-        """Spawn subprocess and start bridge thread."""
+    def start(self, video_path: Path, confirmed_lesions: list | None = None) -> None:
+        """Spawn subprocess and start bridge thread.
+
+        confirmed_lesions: [{label, bbox(1920x1080)}] loaded from the DB so that
+        "Xác nhận luôn" lesions from a previous run auto-capture (no pause) on
+        this run."""
         if self._proc and self._proc.is_alive():
             return
 
@@ -1109,7 +1117,8 @@ class PipelineController:
                   str(REID_WEIGHTS),
                   CLASS_CONF_THRESHOLDS,
                   _shark_now, _GSTSHARK_PLUGIN_PATH,
-                  _GSTSHARK_LOG_DIR, _GSTSHARK_TRACERS),
+                  _GSTSHARK_LOG_DIR, _GSTSHARK_TRACERS,
+                  confirmed_lesions or []),
             daemon=True,
         )
         self._proc.start()
