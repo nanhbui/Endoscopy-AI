@@ -167,44 +167,17 @@ function DetectionModal({
                   const _c = (/ung thư|ung thu/i.test(det.label) ? '#C44E52'
                             : /loét|loet/i.test(det.label)       ? '#55A868'
                             :                                       '#DD8452');
-                  const _flip = det.bbox.y < 6;
-                  const _rgba = (a: number) => {
-                    const r = parseInt(_c.slice(1,3),16), g = parseInt(_c.slice(3,5),16), b = parseInt(_c.slice(5,7),16);
-                    return `rgba(${r},${g},${b},${a})`;
-                  };
+                  // The thumbnail (frame_b64) already has the backend yellow box at
+                  // the correct position; show only a label badge, not a second box.
                   return (
-                    <>
-                      <Box sx={{
-                        position: 'absolute',
-                        left: `${det.bbox.x}%`, top: `${det.bbox.y}%`,
-                        width: `${det.bbox.width}%`, height: `${det.bbox.height}%`,
-                        borderStyle: 'solid', borderWidth: '3px', borderColor: _c,
-                        backgroundColor: _rgba(0.12),
-                        borderRadius: '6px',
-                        pointerEvents: 'none',
-                      }} />
-                      <Box sx={{
-                        position: 'absolute',
-                        left: `${det.bbox.x}%`,
-                        ...(_flip
-                          ? { top: `calc(${det.bbox.y + det.bbox.height}% + 4px)` }
-                          : { top: `calc(${det.bbox.y}% - 30px)` }),
-                        display: 'inline-flex', alignItems: 'center', gap: 0.6,
-                        px: 1.1, py: 0.45, borderRadius: '7px',
-                        backgroundColor: _c, color: '#fff',
-                        boxShadow: '0 2px 8px rgba(0,0,0,0.4)',
-                        pointerEvents: 'none',
-                      }}>
-                        <Zap size={10} />
-                        <Typography sx={{ fontSize: '0.7rem', fontWeight: 700, whiteSpace: 'nowrap' }}>
-                          {det.label}
-                        </Typography>
-                        <Box sx={{ width: 1, height: 10, backgroundColor: 'rgba(255,255,255,0.45)' }} />
-                        <Typography sx={{ fontSize: '0.7rem', fontWeight: 600, opacity: 0.9 }}>
-                          {(det.confidence * 100).toFixed(0)}%
+                    <Box sx={{ position: 'absolute', top: 10, left: 0, right: 0, display: 'flex', justifyContent: 'center', pointerEvents: 'none' }}>
+                      <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.6, px: 1.25, py: 0.45, borderRadius: '999px', backgroundColor: _c, color: '#fff', boxShadow: '0 2px 8px rgba(0,0,0,0.4)' }}>
+                        <Zap size={11} />
+                        <Typography sx={{ fontSize: '0.72rem', fontWeight: 700, whiteSpace: 'nowrap' }}>
+                          {det.label} · {(det.confidence * 100).toFixed(0)}%
                         </Typography>
                       </Box>
-                    </>
+                    </Box>
                   );
                 })()}
               </Box>

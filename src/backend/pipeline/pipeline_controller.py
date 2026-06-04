@@ -511,11 +511,11 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
         return None
 
     def _crop_b64(frame: np.ndarray, bbox: list) -> Optional[str]:
-        """Build the detection thumbnail (frame_b64) — viewport crop with a
-           yellow reference rectangle drawn directly on the image (in the same
-           coordinate space as the crop). The frontend overlays its own styled
-           orange rectangle on top using viewport-relative coords from the
-           detection event so the two align."""
+        """Build the detection thumbnail (frame_b64) — viewport crop with the
+           YELLOW reference rectangle marking the lesion (drawn in the crop's own
+           pixel coords, so it is always correctly placed). The frontend no longer
+           draws a box overlay on the thumbnail (only a label badge), so this
+           yellow box is the single detection box."""
         try:
             _vx, _vy, _vw, _vh = _detect_viewport(frame)
             out = frame[_vy:_vy+_vh, _vx:_vx+_vw].copy()

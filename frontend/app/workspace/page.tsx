@@ -1084,34 +1084,19 @@ export default function Workspace() {
                     {pipelineState === 'PAUSED_WAITING_INPUT' && currentDetection && (
                       <DetectionBar detection={currentDetection} llmInsight={llmInsight} voiceSupported={voiceSupported} isVoiceListening={isVoiceListening} onExplain={explainMore} onIgnore={handleIgnoreTracked} onConfirm={confirmDetection} onQuickConfirm={handleQuickConfirmTracked} onReportFalsePositive={reportFalsePositive} onRecheck={() => recheck(0.4)} />
                     )}
-                    {currentDetection && (() => {
-                      const _c = bboxColorFor(currentDetection.label);
-                      const _flip = currentDetection.bbox.y < 6;
-                      return (
-                        <BboxOverlay
-                          initial={{ opacity: 0, scale: 0.94 }}
-                          animate={{ opacity: 1, scale: 1 }}
-                          transition={{ duration: 0.2 }}
-                          sx={{
-                            zIndex: 2,
-                            left: `${currentDetection.bbox.x}%`,
-                            top: `${currentDetection.bbox.y}%`,
-                            width: `${currentDetection.bbox.width}%`,
-                            height: `${currentDetection.bbox.height}%`,
-                            borderColor: _c,
-                            backgroundColor: rgba(_c, 0.12),
-                          }}
-                        >
-                          <DetectionLabelChip
-                            label={currentDetection.label}
-                            confidence={currentDetection.confidence}
-                            timestamp={fmtTimestamp(currentDetection.timestamp)}
-                            color={_c}
-                            flipBelow={_flip}
-                          />
-                        </BboxOverlay>
-                      );
-                    })()}
+                    {/* Thumbnail (frame_b64) already has the backend yellow box at the
+                        correct position — so we only add a label badge here, NOT a
+                        second box overlay (that caused a misaligned double box). */}
+                    {currentDetection && (
+                      <Box sx={{ position: 'absolute', top: 12, left: 0, right: 0, zIndex: 2, display: 'flex', justifyContent: 'center', pointerEvents: 'none' }}>
+                        <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.75, px: 1.5, py: 0.5, borderRadius: '999px', backgroundColor: rgba(bboxColorFor(currentDetection.label), 0.95), color: '#fff', boxShadow: '0 2px 10px rgba(0,0,0,0.3)' }}>
+                          <Box sx={{ width: 7, height: 7, borderRadius: '50%', backgroundColor: '#fff' }} />
+                          <Typography sx={{ fontSize: '0.78rem', fontWeight: 700 }}>
+                            {currentDetection.label} · {(currentDetection.confidence * 100).toFixed(0)}%
+                          </Typography>
+                        </Box>
+                      </Box>
+                    )}
                   </VideoContainer>
                 ) : videoUrl ? (
                   // Real video player with detection overlay — controls disabled so the user
