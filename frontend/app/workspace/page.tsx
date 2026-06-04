@@ -365,10 +365,13 @@ function SessionReportModal({ detections, onClose, onRestart, onGoReport, isNavi
                   <>
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img src={`data:image/jpeg;base64,${det.frame_b64}`} alt="frame" style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }} />
-                    <Box sx={{ position: 'absolute', left: `${det.bbox.x}%`, top: `${det.bbox.y}%`, width: `${det.bbox.width}%`, height: `${det.bbox.height}%`, border: '2px solid #F59E0B', borderRadius: '4px', boxShadow: '0 0 0 1px rgba(0,0,0,0.6)', pointerEvents: 'none' }} />
-                    <Box sx={{ position: 'absolute', left: `${det.bbox.x}%`, top: `calc(${det.bbox.y}% - 26px)`, display: 'flex', alignItems: 'center', gap: 0.5, px: 1, py: 0.3, borderRadius: '5px', backgroundColor: 'rgba(0,0,0,0.7)', border: '1px solid rgba(245,158,11,0.4)', pointerEvents: 'none' }}>
-                      <Zap size={9} color="#F59E0B" />
-                      <Typography sx={{ fontSize: '0.65rem', fontWeight: 700, color: '#FCD34D', whiteSpace: 'nowrap' }}>{det.label}</Typography>
+                    {/* Thumbnail already has the backend yellow box at the correct
+                        position — only a label badge here, NOT a second box overlay. */}
+                    <Box sx={{ position: 'absolute', top: 10, left: 0, right: 0, display: 'flex', justifyContent: 'center', pointerEvents: 'none' }}>
+                      <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5, px: 1.1, py: 0.4, borderRadius: '999px', backgroundColor: 'rgba(0,0,0,0.72)', border: '1px solid rgba(245,158,11,0.5)' }}>
+                        <Zap size={10} color="#F59E0B" />
+                        <Typography sx={{ fontSize: '0.7rem', fontWeight: 700, color: '#FCD34D', whiteSpace: 'nowrap' }}>{det.label} · {(det.confidence * 100).toFixed(0)}%</Typography>
+                      </Box>
                     </Box>
                   </>
                 ) : (
