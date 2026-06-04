@@ -151,6 +151,76 @@ def init_db() -> None:
         logger.error("init_db failed: {}", e)
 
 
+# ── Durability: backup + self-heal so report history is never lost ────────────
+
+_BACKUP_DIR = _DB_PATH.parent / "backups"
+
+
+def _row_count(conn: sqlite3.Connection) -> int:
+    """Total persisted rows that represent session history (reports + summaries)."""
+    try:
+        r = conn.execute("SELECT COUNT(*) FROM lesion_reports").fetchone()[0]
+        s = conn.execute("SELECT COUNT(*) FROM session_summaries").fetchone()[0]
+        return int(r) + int(s)
+    except sqlite3.Error:
+        return 0
+
+
+def restore_db_if_empty() -> bool:
+    """If the live DB has no session history but a non-empty backup exists,
+    restore the newest backup. Self-heals an accidental wipe of the live file.
+    MUST run at startup BEFORE any writes. Returns True if a restore happened."""
+    try:
+        with _connect() as conn:
+            if _row_count(conn) > 0:
+                return False
+        if not _BACKUP_DIR.exists():
+            return False
+        for bak in sorted(_BACKUP_DIR.glob("endoscopy-*.db"), reverse=True):
+            try:
+                with sqlite3.connect(bak) as src:
+                    if _row_count(src) <= 0:
+                        continue
+                # Live DB is empty; restore this non-empty backup over it.
+                with sqlite3.connect(bak) as src, _connect() as dst:
+                    src.backup(dst)
+                logger.warning("DB was empty — restored history from backup {}", bak.name)
+                return True
+            except sqlite3.Error:
+                continue
+        return False
+    except Exception as e:  # pragma: no cover - best effort
+        logger.error("restore_db_if_empty failed: {}", e)
+        return False
+
+
+def backup_db(keep: int = 15) -> Optional[Path]:
+    """Snapshot the DB to data/backups/ (WAL-safe online backup) so report
+    history survives an accidental wipe of the live file. Skips empty DBs so we
+    don't evict good snapshots. Keeps the newest `keep` backups. The backups dir
+    lives under data/ which is excluded from rsync — it stays on the server."""
+    try:
+        if not _DB_PATH.exists():
+            return None
+        with _connect() as conn:
+            if _row_count(conn) <= 0:
+                return None
+        _BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        from datetime import datetime, timezone
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        dest = _BACKUP_DIR / f"endoscopy-{stamp}.db"
+        with _connect() as src, sqlite3.connect(dest) as dst:
+            src.backup(dst)
+        backups = sorted(_BACKUP_DIR.glob("endoscopy-*.db"))
+        for old in backups[:-keep]:
+            old.unlink(missing_ok=True)
+        logger.info("DB backup written: {}", dest.name)
+        return dest
+    except Exception as e:  # pragma: no cover - best effort
+        logger.error("backup_db failed: {}", e)
+        return None
+
+
 def save_lesion_report(session_id: str, frame_index: int, report: dict,
                        model: str, generated_at_ms: int) -> bool:
     """Persist one structured lesion report. Returns True on success.

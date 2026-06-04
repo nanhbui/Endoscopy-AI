@@ -66,7 +66,8 @@ from llm_prompts import (                                              # noqa: E
     build_lesion_user_message,
 )
 from db import (                                                       # noqa: E402
-    init_db, save_lesion_report, get_lesion_reports_for_session,
+    init_db, restore_db_if_empty, backup_db,
+    save_lesion_report, get_lesion_reports_for_session,
     save_false_positive, load_all_false_positives, matches_false_positive,
     save_confirmed_lesion, load_all_confirmed_lesions,
     list_all_sessions,
@@ -245,6 +246,10 @@ app.include_router(voice_router)
 # first lesion report can be saved without a cold-start race. init_db is
 # idempotent (CREATE IF NOT EXISTS).
 init_db()
+# Durability: recover history if the live DB was wiped, then snapshot the good
+# state. Backups live under data/ (excluded from rsync) so they stay on-server.
+restore_db_if_empty()
+backup_db()
 
 # ── In-memory session registry ───────────────────────────────────────────────
 # video_id → { controller, video_path, confirmed_detections, library_id }
