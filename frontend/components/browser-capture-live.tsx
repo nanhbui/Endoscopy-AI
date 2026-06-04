@@ -204,7 +204,7 @@ export function BrowserCaptureLive() {
               sx={{ flex: '1 1 220px', minWidth: 200, px: 1.5, py: 1, borderRadius: '10px', border: '1px solid #CBD5D3', fontSize: '0.85rem', backgroundColor: '#fff', color: 'text.primary' }}
             >
               {devices.map((d, i) => (
-                <option key={d.deviceId || i} value={d.deviceId}>
+                <option key={`${d.deviceId}-${i}`} value={d.deviceId}>
                   {d.label || `Thiết bị ${i + 1}`}
                 </option>
               ))}
