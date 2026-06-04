@@ -132,7 +132,7 @@ export function BrowserCaptureLive() {
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
       {/* Video surface + overlay */}
-      <Box sx={{ aspectRatio: '16 / 9', width: '100%', borderRadius: '16px', backgroundColor: '#0D1117', position: 'relative', overflow: 'hidden' }}>
+      <Box sx={{ aspectRatio: '16 / 9', width: '100%', borderRadius: '16px', backgroundColor: '#0D1117', position: 'relative', overflow: 'hidden', border: '1px solid #1c2530', boxShadow: '0 6px 24px rgba(13,27,42,0.10)' }}>
         <video
           ref={videoRef}
           muted
@@ -173,6 +173,14 @@ export function BrowserCaptureLive() {
             {aiOn ? 'AI ĐANG CHẠY' : previewing ? 'MIRROR' : 'OFFLINE'}
           </Typography>
         </Box>
+
+        {/* detection count (AI on) */}
+        {aiOn && (
+          <Box sx={{ position: 'absolute', top: 12, right: 12, zIndex: 2, display: 'inline-flex', alignItems: 'center', gap: 0.5, px: 1.1, py: 0.4, borderRadius: '6px', backgroundColor: 'rgba(0,96,100,0.95)', color: '#fff' }}>
+            <Cpu size={11} />
+            <Typography sx={{ fontSize: '0.7rem', fontWeight: 800 }}>{boxes.length} vùng</Typography>
+          </Box>
+        )}
       </Box>
 
       <canvas ref={canvasRef} style={{ display: 'none' }} />

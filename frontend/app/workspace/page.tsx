@@ -1101,7 +1101,9 @@ export default function Workspace() {
         <Grid container spacing={3}>
 
           {/* ── Video Panel ────────────────────────────────────────────────── */}
-          <Grid size={{ xs: 12, lg: 8 }}>
+          {/* Live (Trực tiếp) uses a self-contained, full-width layout — no file
+              upload chrome, no right-hand analysis column, no voice panel. */}
+          <Grid size={{ xs: 12, lg: sourceMode === 'live' ? 12 : 8 }}>
             <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, height: '100%' }}>
             <Box
               sx={{
@@ -1168,7 +1170,7 @@ export default function Workspace() {
                       Xóa
                     </MuiButton>
                   )}
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1.5, py: 0.5, borderRadius: '20px', backgroundColor: statusConfig.bg, flexShrink: 0 }}>
+                  <Box sx={{ display: sourceMode === 'live' ? 'none' : 'flex', alignItems: 'center', gap: 1, px: 1.5, py: 0.5, borderRadius: '20px', backgroundColor: statusConfig.bg, flexShrink: 0 }}>
                     <StatusDot color={statusConfig.color} />
                     <Typography variant="caption" sx={{ fontWeight: 600, color: statusConfig.textColor, whiteSpace: 'nowrap' }}>
                       {statusConfig.text}
@@ -1331,6 +1333,7 @@ export default function Workspace() {
                 border: '1px solid #E2EAE8',
                 boxShadow: '0 2px 12px rgba(13,27,42,0.06)',
                 overflow: 'hidden',
+                display: sourceMode === 'live' ? 'none' : undefined,
               }}
             >
               <Box sx={{ px: 2.5, py: 1.25, borderBottom: '1px solid #E2EAE8', display: 'flex', flexDirection: 'column', gap: 1, backgroundColor: '#F8FAFB' }}>
@@ -1393,7 +1396,7 @@ export default function Workspace() {
           </Grid>
 
           {/* ── Control Panel ───────────────────────────────────────────────── */}
-          <Grid size={{ xs: 12, lg: 4 }}>
+          <Grid size={{ xs: 12, lg: 4 }} sx={{ display: sourceMode === 'live' ? 'none' : undefined }}>
             <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2.5, height: '100%' }}>
 
               {/* Upload / Playback controls */}
