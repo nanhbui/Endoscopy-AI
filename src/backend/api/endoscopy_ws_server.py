@@ -784,6 +784,27 @@ def stream_live_mjpeg(video_id: str):
         _gen(), media_type="multipart/x-mixed-replace; boundary=frame")
 
 
+@app.websocket("/ws/live-detect/{video_id}")
+async def ws_live_detect(websocket: WebSocket, video_id: str):
+    """Browser-pushed live detection (Trực tuyến). The browser captures the HDMI
+    device / screen, shows it locally, and — only after 'Bắt đầu AI' — streams
+    JPEG frames here. We run YOLO and reply with boxes (1920×1080 normalized).
+    One reply per frame → natural backpressure; the client sends the next frame
+    after each result, so a slow GPU never builds a backlog."""
+    await websocket.accept()
+    from live_detect import detect_jpeg
+    logger.info("Live-detect WS connected: {}", video_id)
+    try:
+        while True:
+            data = await websocket.receive_bytes()
+            boxes = await asyncio.to_thread(detect_jpeg, data)
+            await websocket.send_json({"boxes": boxes})
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.warning("Live-detect WS closed ({}): {}", video_id, e)
+
+
 @app.get("/session/{video_id}/detections")
 async def get_detections(video_id: str):
     """Return confirmed detections for the report page."""

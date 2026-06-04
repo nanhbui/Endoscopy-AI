@@ -40,6 +40,7 @@ import { LesionReportCard } from '@/components/lesion-report-card';
 import { DisclaimerBanner } from '@/components/disclaimer';
 import { SessionSummaryPanel } from '@/components/session-summary-panel';
 import { ConfirmedCapturesPanel } from '@/components/confirmed-captures-panel';
+import { BrowserCaptureLive } from '@/components/browser-capture-live';
 import { ZoomInspectModal } from '@/components/zoom-inspect-modal';
 
 import TextField from '@mui/material/TextField';
@@ -1152,7 +1153,7 @@ export default function Workspace() {
                     )
                   ) : (
                     <Typography variant="caption" color="textSecondary">
-                      {isConnected ? `Đang kết nối: ${liveSource}` : 'Nhập địa chỉ RTSP hoặc thiết bị V4L2'}
+                      Trực tuyến — nhận màn hình từ máy khác qua cục capture HDMI
                     </Typography>
                   )}
                 </Box>
@@ -1178,15 +1179,10 @@ export default function Workspace() {
 
               {/* Video content area */}
               <Box sx={{ p: 1.5 }}>
-                {sourceMode === 'live' && !isConnected ? (
-                  <LiveInputZone value={liveSource} onChange={setLiveSource} onConnect={handleLiveConnect} isConnecting={isLiveConnecting} />
-                ) : sourceMode === 'live' && isConnected ? (
-                  <VideoContainer>
-                    <LiveStreamPanel source={liveSource} pipelineState={pipelineState} videoId={videoId} />
-                    {pipelineState === 'PAUSED_WAITING_INPUT' && currentDetection && (
-                      <DetectionBar detection={currentDetection} llmInsight={llmInsight} voiceSupported={voiceSupported} isVoiceListening={isVoiceListening} onExplain={explainMore} onIgnore={handleIgnoreTracked} onConfirm={confirmDetection} onQuickConfirm={handleQuickConfirmTracked} onReportFalsePositive={reportFalsePositive} onRecheck={() => recheck(0.4)} />
-                    )}
-                  </VideoContainer>
+                {sourceMode === 'live' ? (
+                  /* Trực tuyến — browser captures the HDMI device locally (mirror),
+                     detection runs on-demand via /ws/live-detect. Fully self-contained. */
+                  <BrowserCaptureLive />
                 ) : libraryReady && !videoUrl && pipelineState === 'IDLE' ? (
                   /* Library selected but videoUrl not ready yet (fetch in-flight) */
                   <LibraryReadyPanel onReselect={() => setIsSourceModalOpen(true)} />
