@@ -411,6 +411,39 @@ def load_all_confirmed_lesions() -> list[dict]:
         return []
 
 
+def _delete_matching(table: str, label: str, bbox: list[float],
+                     iou_threshold: float = 0.5) -> int:
+    """Delete rows in `table` whose (label + bbox IoU) match. Used to keep
+    confirmed_lesions and false_positives MUTUALLY EXCLUSIVE — the latest doctor
+    action wins (reporting a lesion false removes any prior 'confirm always', and
+    confirming always removes any prior 'false')."""
+    if len(bbox) < 4 or table not in ("confirmed_lesions", "false_positives"):
+        return 0
+    try:
+        with _connect() as conn:
+            rows = conn.execute(
+                f"SELECT id, bbox_x1, bbox_y1, bbox_x2, bbox_y2 FROM {table} WHERE label = ?",
+                (label,),
+            ).fetchall()
+            ids = [r[0] for r in rows if _iou([r[1], r[2], r[3], r[4]], bbox) >= iou_threshold]
+            for _id in ids:
+                conn.execute(f"DELETE FROM {table} WHERE id = ?", (_id,))
+        return len(ids)
+    except sqlite3.Error as e:
+        logger.error("_delete_matching({}) failed: {}", table, e)
+        return 0
+
+
+def delete_confirmed_lesions_matching(label: str, bbox: list[float]) -> int:
+    """Remove confirmed-always lesions matching (label + IoU). Called on 'Báo sai'."""
+    return _delete_matching("confirmed_lesions", label, bbox)
+
+
+def delete_false_positives_matching(label: str, bbox: list[float]) -> int:
+    """Remove false-positives matching (label + IoU). Called on 'Xác nhận luôn'."""
+    return _delete_matching("false_positives", label, bbox)
+
+
 # ── Session history (DB-backed report list) ──────────────────────────────────
 
 def list_all_sessions() -> list[dict]:

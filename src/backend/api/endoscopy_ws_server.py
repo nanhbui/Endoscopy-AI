@@ -70,6 +70,7 @@ from db import (                                                       # noqa: E
     save_lesion_report, get_lesion_reports_for_session,
     save_false_positive, load_all_false_positives, matches_false_positive,
     save_confirmed_lesion, load_all_confirmed_lesions,
+    delete_confirmed_lesions_matching, delete_false_positives_matching,
     list_all_sessions,
     save_session_summary, get_session_summary,
     append_qa_message, get_qa_history,
@@ -1056,6 +1057,21 @@ async def ws_analysis(websocket: WebSocket, video_id: str):
                     ctrl.send_action("ACTION_IGNORE")
                     continue  # don't forward to FE
 
+            # "Báo sai" overrides "Xác nhận luôn": a confirmed-capture whose region
+            # the user has reported as a false-positive must NOT show in the
+            # "Đã xác nhận luôn" panel. The worker matches confirmed_lesions but
+            # doesn't know the FP list, so we filter it here.
+            if evt["event"] == "CONFIRMED_CAPTURE":
+                lesion = evt["data"].get("lesion", {})
+                if matches_false_positive(
+                    lesion.get("label", ""),
+                    list(lesion.get("bbox", [])),
+                    sess.get("false_positives", []),
+                ):
+                    logger.info("Skip confirmed-capture matching a reported false-positive: {}",
+                                lesion.get("label"))
+                    continue  # don't forward to FE
+
             try:
                 async with _ws_lock:
                     await websocket.send_json(evt)
@@ -1141,6 +1157,11 @@ async def ws_analysis(websocket: WebSocket, video_id: str):
                         )
                         if ok:
                             sess["confirmed_lesions"].append({"label": label, "bbox": bbox})
+                            # "Xác nhận luôn" overrides a prior "Báo sai" on the same
+                            # region — drop any matching false-positive so it stops
+                            # being auto-skipped, then refresh the in-session list.
+                            if delete_false_positives_matching(label, bbox):
+                                sess["false_positives"] = load_all_false_positives()
                         if ctrl._cmd_q:
                             ctrl._cmd_q.put("CONFIRM_LESION:" + json.dumps(
                                 {"label": label, "bbox": bbox}))
@@ -1188,6 +1209,12 @@ async def ws_analysis(websocket: WebSocket, video_id: str):
                         )
                         if ok:
                             sess["false_positives"].append({"label": label, "bbox": bbox})
+                            # "Báo sai" overrides a prior "Xác nhận luôn" on the same
+                            # region — remove any matching confirmed-always lesion so
+                            # it no longer auto-captures into the "Đã xác nhận luôn"
+                            # panel (this run and future runs).
+                            if delete_confirmed_lesions_matching(label, bbox):
+                                sess["confirmed_lesions"] = load_all_confirmed_lesions()
                             logger.info(
                                 "False-positive persisted: {} bbox={} (now {} total)",
                                 label, [round(v, 1) for v in bbox],
