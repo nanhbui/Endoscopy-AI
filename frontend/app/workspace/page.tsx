@@ -11,7 +11,6 @@ import {
   Clock,
   FileVideo,
   Flag,
-  MapPin,
   Mic,
   MicOff,
   Play,
@@ -38,15 +37,13 @@ import { useVoiceControl } from '@/hooks/use-voice-control';
 import { VideoSourceModal } from '@/components/video-source-modal';
 import { LesionReportCard } from '@/components/lesion-report-card';
 import { DisclaimerBanner } from '@/components/disclaimer';
-import { SessionSummaryPanel } from '@/components/session-summary-panel';
 import { ConfirmedCapturesPanel } from '@/components/confirmed-captures-panel';
 import { BrowserCaptureLive } from '@/components/browser-capture-live';
 import { ZoomInspectModal } from '@/components/zoom-inspect-modal';
 
-import TextField from '@mui/material/TextField';
 import ToggleButton from '@mui/material/ToggleButton';
 import ToggleButtonGroup from '@mui/material/ToggleButtonGroup';
-import { Radio, Wifi } from 'lucide-react';
+import { Wifi } from 'lucide-react';
 
 import Box from '@mui/material/Box';
 import Grid from '@mui/material/Grid';
@@ -162,66 +159,6 @@ function StatusDot({ color }: { color: string }) {
   );
 }
 
-// ── Live stream input zone ───────────────────────────────────────────────────
-
-interface LiveInputZoneProps {
-  value: string;
-  onChange: (v: string) => void;
-  onConnect: () => void;
-  isConnecting: boolean;
-}
-
-function LiveInputZone({ value, onChange, onConnect, isConnecting }: LiveInputZoneProps) {
-  return (
-    <Box
-      sx={{
-        aspectRatio: '16 / 9',
-        width: '100%',
-        borderRadius: '16px',
-        border: '2px dashed #C8D8D6',
-        backgroundColor: '#FAFCFB',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: 2.5,
-        px: { xs: 3, md: 8 },
-      }}
-    >
-      <Box sx={{ width: 56, height: 56, borderRadius: '16px', backgroundColor: 'rgba(0,96,100,0.08)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#006064' }}>
-        <Wifi size={28} />
-      </Box>
-      <Box sx={{ width: '100%', maxWidth: 420, textAlign: 'center' }}>
-        <Typography variant="subtitle2" sx={{ fontWeight: 700, color: 'text.primary', mb: 0.5 }}>
-          Kết nối nguồn video trực tiếp
-        </Typography>
-        <Typography variant="caption" color="textSecondary" sx={{ display: 'block', mb: 2 }}>
-          Nhập địa chỉ RTSP hoặc đường dẫn thiết bị V4L2
-        </Typography>
-        <TextField
-          fullWidth
-          size="small"
-          placeholder="rtsp://192.168.1.x:554/stream  hoặc  /dev/video0"
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter' && value.trim()) onConnect(); }}
-          sx={{ mb: 1.5, '& .MuiOutlinedInput-root': { borderRadius: '10px' } }}
-        />
-        <MuiButton
-          variant="contained"
-          fullWidth
-          disabled={!value.trim() || isConnecting}
-          onClick={onConnect}
-          startIcon={isConnecting ? <CircularProgress size={14} sx={{ color: 'inherit' }} /> : <Radio size={16} />}
-          sx={{ borderRadius: '10px', py: 1.25, fontWeight: 700 }}
-        >
-          {isConnecting ? 'Đang kết nối…' : 'Kết nối & Bắt đầu'}
-        </MuiButton>
-      </Box>
-    </Box>
-  );
-}
-
 // ── Video picker trigger zone (opens modal) ──────────────────────────────────
 
 function VideoPickerTriggerZone({ onClick }: { onClick: () => void }) {
@@ -295,47 +232,6 @@ function LibraryReadyPanel({ onReselect }: { onReselect: () => void }) {
         <Typography sx={{ fontSize: '0.72rem', color: 'rgba(255,255,255,0.35)' }}>
           Nhấn &quot;Bắt đầu phân tích AI&quot; · Nhấn vào đây để chọn video khác
         </Typography>
-      </Box>
-    </Box>
-  );
-}
-
-// ── Live stream connected panel ──────────────────────────────────────────────
-
-function LiveStreamPanel({ source, pipelineState, videoId }: { source: string; pipelineState: string; videoId: string | null }) {
-  const isActive = pipelineState === 'PLAYING' || pipelineState === 'PAUSED_WAITING_INPUT' || pipelineState === 'PROCESSING_LLM';
-  // Show the live MJPEG stream (captured screen + server-drawn detection boxes)
-  // once analysis is running. The backend is the only reader of the capture
-  // device; the browser just consumes JPEGs, so there is no device contention.
-  const showStream = isActive && !!videoId;
-  return (
-    <Box sx={{ aspectRatio: '16 / 9', width: '100%', borderRadius: '16px', backgroundColor: '#0D1117', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 2, position: 'relative', overflow: 'hidden' }}>
-      {showStream ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={`${API_BASE}/live/${videoId}/mjpeg`}
-          alt="Luồng trực tiếp"
-          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', backgroundColor: '#0D1117' }}
-        />
-      ) : (
-        <>
-          {/* subtle grid bg */}
-          <Box sx={{ position: 'absolute', inset: 0, backgroundImage: 'radial-gradient(circle, rgba(0,96,100,0.08) 1px, transparent 1px)', backgroundSize: '28px 28px', pointerEvents: 'none' }} />
-          <Radio size={36} color="rgba(0,132,143,0.5)" />
-          <Box sx={{ textAlign: 'center', zIndex: 1 }}>
-            <Typography sx={{ fontSize: '0.8rem', fontWeight: 600, color: 'rgba(255,255,255,0.55)', mb: 0.5 }}>
-              {isActive ? 'Đang kết nối luồng trực tiếp…' : 'Chưa kết nối'}
-            </Typography>
-            <Typography sx={{ fontSize: '0.7rem', color: 'rgba(255,255,255,0.3)', fontFamily: 'monospace', maxWidth: 360, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {source}
-            </Typography>
-          </Box>
-        </>
-      )}
-      {/* LIVE / OFFLINE badge always on top */}
-      <Box sx={{ position: 'absolute', top: 12, left: 12, zIndex: 2, display: 'flex', alignItems: 'center', gap: 0.75, px: 1.25, py: 0.4, borderRadius: '6px', backgroundColor: isActive ? 'rgba(220,38,38,0.85)' : 'rgba(100,100,100,0.6)', backdropFilter: 'blur(6px)' }}>
-        <Box sx={{ width: 7, height: 7, borderRadius: '50%', backgroundColor: '#fff', animation: isActive ? 'pulse 1.5s infinite' : 'none', '@keyframes pulse': { '0%,100%': { opacity: 1 }, '50%': { opacity: 0.35 } } }} />
-        <Typography sx={{ fontSize: '0.68rem', fontWeight: 700, color: '#fff', letterSpacing: '0.06em' }}>{isActive ? 'LIVE' : 'OFFLINE'}</Typography>
       </Box>
     </Box>
   );
@@ -699,13 +595,10 @@ export default function Workspace() {
     recheckResult,
     isRecheckModalOpen,
     closeRecheckModal,
-    sendSessionQA,
     lastError,
     dismissError,
     uploadOnly,
     prepareFromLibrary,
-    connectLive,
-    selectFromLibrary,
     resetAnalysis,
   } = useAnalysis();
 
@@ -715,8 +608,6 @@ export default function Workspace() {
   // Source mode
   const [sourceMode, setSourceMode] = useState<'video' | 'live'>('video');
   const [isSourceModalOpen, setIsSourceModalOpen] = useState(false);
-  const [liveSource, setLiveSource] = useState('');
-  const [isLiveConnecting, setIsLiveConnecting] = useState(false);
 
   // Local video state (object URL for <video> preview)
   const [videoFile, setVideoFile] = useState<File | null>(null);
@@ -868,19 +759,6 @@ export default function Workspace() {
     setLibraryReady(false);
   }, [uploadOnly]);
 
-  const handleLiveConnect = useCallback(async () => {
-    if (!liveSource.trim()) return;
-    setIsLiveConnecting(true);
-    try {
-      await connectLive(liveSource.trim());
-      if (voiceSupported) startListening();
-    } catch (err) {
-      console.warn('[workspace] live connect failed:', err);
-    } finally {
-      setIsLiveConnecting(false);
-    }
-  }, [liveSource, connectLive, voiceSupported, startListening]);
-
   const handleStop = useCallback(() => {
     stopListening();
     if (videoRef.current) { videoRef.current.pause(); videoRef.current.currentTime = 0; }
@@ -972,7 +850,7 @@ export default function Workspace() {
               {videoFile?.name ?? (libraryReady
                 ? 'Video từ thư viện'
                 : sourceMode === 'live'
-                  ? (isConnected ? `Live: ${liveSource}` : 'Live stream — chờ kết nối')
+                  ? 'Trực tiếp — màn hình từ máy khác'
                   : 'Chưa chọn video')}
             </Typography>
           </Box>
