@@ -805,6 +805,43 @@ async def ws_live_detect(websocket: WebSocket, video_id: str):
         logger.warning("Live-detect WS closed ({}): {}", video_id, e)
 
 
+@app.post("/live/explain")
+async def live_explain(request: Request, label: str = "", conf: float = 0.0):
+    """On-demand VLM lesion report for live (Trực tiếp) mode. Body = JPEG frame
+    (the captured lesion/screen). Returns the structured LesionReport JSON, reusing
+    the exact same prompt + schema as the file path so the report looks identical."""
+    import base64 as _b64
+    raw = await request.body()
+    if not raw:
+        raise HTTPException(status_code=400, detail="empty frame")
+    _label = label or "Tổn thương"
+    client = _get_llm_client()
+    if client is None:
+        return {"report": _mock_lesion_report(_label, conf, 0, 0)}
+    frame_b64 = _b64.b64encode(raw).decode()
+    messages = [
+        {"role": "system", "content": LESION_REPORT_PROMPT},
+        {"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{frame_b64}", "detail": "low"}},
+            {"type": "text", "text": build_lesion_user_message(_label, conf, 0, 0)},
+        ]},
+    ]
+    response_format = {"type": "json_schema",
+                       "json_schema": {"name": "endoscopy_lesion_report", "schema": LESION_REPORT_SCHEMA}}
+    try:
+        completion = await asyncio.wait_for(
+            client.chat.completions.create(
+                model=_llm_model_name("vision"), messages=messages,
+                response_format=response_format, max_tokens=1500),
+            timeout=LLM_CALL_TIMEOUT_SEC)
+        report = json.loads(completion.choices[0].message.content or "{}")
+        return {"report": report}
+    except Exception as e:
+        code, friendly = _classify_llm_error(e)
+        logger.warning("live_explain failed [{}]: {}", code, e)
+        raise HTTPException(status_code=503, detail=friendly)
+
+
 @app.get("/session/{video_id}/detections")
 async def get_detections(video_id: str):
     """Return confirmed detections for the report page."""

@@ -16,8 +16,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
-import { Radio, Cpu, Square, Video as VideoIcon } from 'lucide-react';
-import { WS_BASE } from '@/lib/ws-client';
+import CircularProgress from '@mui/material/CircularProgress';
+import { Radio, Cpu, Square, Video as VideoIcon, Sparkles, X } from 'lucide-react';
+import { WS_BASE, API_BASE, type LesionReport } from '@/lib/ws-client';
+import { LesionReportCard } from '@/components/lesion-report-card';
 
 interface LiveBox { label: string; confidence: number; bbox: [number, number, number, number]; }
 
@@ -47,6 +49,10 @@ export function BrowserCaptureLive() {
   const [aiOn, setAiOn] = useState(false);
   const [boxes, setBoxes] = useState<LiveBox[]>([]);
   const [err, setErr] = useState('');
+  // On-demand LLM report (Giải thích)
+  const [report, setReport] = useState<LesionReport | null>(null);
+  const [explaining, setExplaining] = useState(false);
+  const [reportErr, setReportErr] = useState('');
 
   const refreshDevices = useCallback(async () => {
     try {
@@ -121,6 +127,34 @@ export function BrowserCaptureLive() {
       }, SEND_INTERVAL_MS);
     };
   }, [previewing]);
+
+  // Giải thích — snapshot the current frame + top detection, ask the VLM for a
+  // structured report. Does not interrupt the mirror/detection loop.
+  const explainNow = useCallback(async () => {
+    const v = videoRef.current, c = canvasRef.current;
+    if (!v || !c || !v.videoWidth) return;
+    const top = boxes[0];
+    setExplaining(true);
+    setReportErr('');
+    setReport(null);
+    try {
+      const cw = 1280;
+      const ch = Math.round((cw * v.videoHeight) / v.videoWidth) || Math.round(cw * 9 / 16);
+      c.width = cw; c.height = ch;
+      c.getContext('2d')?.drawImage(v, 0, 0, cw, ch);
+      const blob: Blob | null = await new Promise((res) => c.toBlob(res, 'image/jpeg', 0.85));
+      if (!blob) throw new Error('grab failed');
+      const qs = new URLSearchParams({ label: top?.label ?? 'Tổn thương', conf: String(top?.confidence ?? 0) });
+      const r = await fetch(`${API_BASE}/live/explain?${qs.toString()}`, { method: 'POST', body: blob });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+      const data = await r.json();
+      setReport(data.report ?? null);
+    } catch (e) {
+      setReportErr(e instanceof Error ? e.message : 'Giải thích thất bại');
+    } finally {
+      setExplaining(false);
+    }
+  }, [boxes]);
 
   // Cleanup on unmount.
   useEffect(() => () => {
@@ -218,13 +252,53 @@ export function BrowserCaptureLive() {
                 <Square size={15} /> Dừng AI
               </Box>
             )}
+            {aiOn && (
+              <Box component="button"
+                onClick={explainNow}
+                disabled={explaining || boxes.length === 0}
+                sx={{ ...btnSx('#0277BD'),
+                  opacity: (explaining || boxes.length === 0) ? 0.5 : 1,
+                  cursor: (explaining || boxes.length === 0) ? 'not-allowed' : 'pointer' }}
+              >
+                {explaining
+                  ? <CircularProgress size={15} sx={{ color: '#fff' }} />
+                  : <Sparkles size={15} />} Giải thích
+              </Box>
+            )}
           </>
         )}
       </Box>
       <Typography sx={{ fontSize: '0.72rem', color: 'text.disabled' }}>
         Cục capture HDMI cắm vào máy này; trình duyệt nhận như một “camera”. Màn hình máy kia hiển thị
-        liên tục (mirror); chỉ khi bấm <b>Bắt đầu AI</b> mới chạy mô hình phát hiện.
+        liên tục (mirror); chỉ khi bấm <b>Bắt đầu AI</b> mới chạy mô hình phát hiện. Bấm <b>Giải thích</b>
+        để AI mô tả tổn thương đang thấy.
       </Typography>
+
+      {/* On-demand LLM report */}
+      {(report || explaining || reportErr) && (
+        <Box sx={{ borderRadius: '14px', border: '1px solid #E2EAE8', backgroundColor: '#fff', overflow: 'hidden' }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', px: 2, py: 1.25, borderBottom: '1px solid #EEF2F1', backgroundColor: '#F8FAFB' }}>
+            <Typography sx={{ fontWeight: 700, fontSize: '0.85rem', display: 'inline-flex', alignItems: 'center', gap: 0.75 }}>
+              <Sparkles size={14} color="#0277BD" /> Báo cáo AI
+            </Typography>
+            <Box component="button" onClick={() => { setReport(null); setReportErr(''); }}
+              sx={{ border: 'none', background: 'transparent', cursor: 'pointer', color: '#6E7C7B', display: 'inline-flex' }}>
+              <X size={16} />
+            </Box>
+          </Box>
+          <Box sx={{ p: 2 }}>
+            {explaining ? (
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, color: 'text.secondary' }}>
+                <CircularProgress size={18} /> <Typography sx={{ fontSize: '0.85rem' }}>Đang tạo báo cáo…</Typography>
+              </Box>
+            ) : reportErr ? (
+              <Typography sx={{ color: '#DC2626', fontSize: '0.85rem' }}>{reportErr}</Typography>
+            ) : report ? (
+              <LesionReportCard report={report} />
+            ) : null}
+          </Box>
+        </Box>
+      )}
     </Box>
   );
 }
