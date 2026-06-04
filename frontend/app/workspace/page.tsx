@@ -941,10 +941,19 @@ export default function Workspace() {
               resetPipeline();
             }}
             onRestart={() => {
+              // "Phân tích lại": replay the SAME video of this session. resetPipeline
+              // unbinds the current session + disconnects the WS but keeps videoId
+              // (and videoUrl) intact, so we reconnect to the same session and play
+              // from the start instead of losing the video.
               stopListening();
               setTranscriptLog([]);
-              if (videoRef.current) { videoRef.current.pause(); videoRef.current.currentTime = 0; }
               resetPipeline();
+              if (videoRef.current) { videoRef.current.pause(); videoRef.current.currentTime = 0; }
+              setTimeout(() => {
+                startMockAnalysis();          // connectWs(videoId) — videoId unchanged
+                videoRef.current?.play().catch(() => {});
+                if (voiceSupported) startListening();
+              }, 60);
             }}
             onGoReport={() => {
               setIsNavigating(true);
