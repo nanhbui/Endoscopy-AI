@@ -130,7 +130,8 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                      gstshark_plugin_path: str = "",
                      gstshark_log_dir: str = "/tmp/gst-shark",
                      gstshark_tracers: str = "framerate;proctime;interlatency",
-                     confirmed_lesions: list = None) -> None:
+                     confirmed_lesions: list = None,
+                     live_q: "_mp.Queue" = None) -> None:
     """Runs in isolated subprocess: GStreamer decode + YOLO inference + StrongSORT tracking.
 
     Sends detection/state events to result_q.
@@ -337,8 +338,12 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
             f"rtph264depay ! h264parse ! {_h264dec} ! {_QUEUE} ! {_SCALE} ! {_SINK_TAIL}"
         )
     elif _src.startswith("/dev/video"):
+        # HDMI→USB capture dongles (cheap UVC grabbers, MS2109/MS2130, etc.)
+        # usually output MJPEG, not raw — decodebin transparently inserts jpegdec
+        # for MJPEG or passes through raw (YUYV). videoconvert normalises the
+        # format before videoscale. Works regardless of the specific dongle.
         pipeline_str = (
-            f'v4l2src device="{_src}" ! {_QUEUE} ! {_SCALE} ! {_SINK_TAIL}'
+            f'v4l2src device="{_src}" ! decodebin ! videoconvert ! {_QUEUE} ! {_SCALE} ! {_SINK_TAIL}'
         )
     else:
         is_live = False
@@ -573,6 +578,47 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
             if _cl.get("label") == _label and _iou(_cl.get("bbox", []), _bbox) >= _CONFIRM_IOU:
                 return True
         return False
+
+    # ── Live-mode display (Trực tuyến) ───────────────────────────────────────
+    # Push annotated JPEG frames to live_q so the /live/{id}/mjpeg endpoint can
+    # stream the captured screen + detection boxes to the browser. Boxes are
+    # kept (decayed) for a few frames so they persist between detection cycles
+    # (detection runs every FRAME_STEP frames, not every frame).
+    _live_boxes: list = []           # [(x1,y1,x2,y2,label,conf)] in full-frame coords
+    _live_boxes_ttl: int = 0
+    _LIVE_BOX_TTL = 12               # frames to keep drawing a box after last seen
+    _LIVE_EMIT_STEP = 2              # emit every Nth frame (≈12-15 fps from 25-30)
+
+    def _put_live(_frame, _boxes) -> None:
+        if live_q is None:
+            return
+        try:
+            out = _frame.copy()
+            for (_lx1, _ly1, _lx2, _ly2, _llab, _lconf) in _boxes:
+                _ll = _llab.lower()
+                _col = (82, 84, 196) if ("ung thư" in _ll or "ung thu" in _ll) else \
+                       (104, 168, 85) if ("loét" in _ll or "loet" in _ll) else (82, 132, 221)
+                cv2.rectangle(out, (int(_lx1), int(_ly1)), (int(_lx2), int(_ly2)), _col, 2)
+                cv2.putText(out, f"{_llab} {int(_lconf * 100)}%",
+                            (int(_lx1), max(12, int(_ly1) - 6)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, _col, 1, cv2.LINE_AA)
+            ok, _jpg = cv2.imencode(".jpg", out, [cv2.IMWRITE_JPEG_QUALITY, 75])
+            if not ok:
+                return
+            _b = _jpg.tobytes()
+            try:
+                live_q.put_nowait(_b)
+            except Exception:
+                try:
+                    live_q.get_nowait()      # drop oldest, keep latest
+                except Exception:
+                    pass
+                try:
+                    live_q.put_nowait(_b)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     try:
         while True:
@@ -838,6 +884,15 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                       f"lag={_lag:+.2f}s  {_arrow}  (frame {frame_index}, paused_total={_total_pause_secs:.1f}s)",
                       flush=True)
                 _last_log_wall = _now_wall
+            # Live mode: stream the (annotated) frame to the MJPEG endpoint every
+            # _LIVE_EMIT_STEP frames. Decay the overlay boxes so they fade if the
+            # lesion leaves view rather than sticking forever.
+            if is_live and live_q is not None and frame_index % _LIVE_EMIT_STEP == 0:
+                if _live_boxes_ttl <= 0:
+                    _live_boxes = []
+                _put_live(frame, _live_boxes)
+                _live_boxes_ttl -= 1
+
             if model is not None and frame_index % FRAME_STEP == 0 and _is_diagnostic_frame(frame, frame_index):
                 try:
                     # Run inference on FULL frame (matches sample-code behaviour
@@ -895,6 +950,25 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                     # the first one — earlier code broke on first iter, which often
                     # picked a noisy low-conf box and dropped the better detection.
                     sorted_tracks = sorted(track_boxes, key=lambda t: float(t[5]), reverse=True)
+
+                    # Live mode (Trực tuyến): overlay ALL surviving boxes on the
+                    # MJPEG feed and skip the file-mode pause/report flow — a live
+                    # feed cannot be paused. The file (upload) path below is
+                    # untouched.
+                    if is_live:
+                        _lb = []
+                        for _t in sorted_tracks:
+                            _tx1, _ty1, _tx2, _ty2 = float(_t[0]), float(_t[1]), float(_t[2]), float(_t[3])
+                            _tconf = float(_t[5]); _tcls = int(_t[6])
+                            _tlabel = _clean_label(model_names.get(_tcls, f"class_{_tcls}"))
+                            _tthr = (class_conf_thresholds or {}).get(_tlabel)
+                            if _tthr is not None and _tconf < _tthr:
+                                continue
+                            _lb.append((_tx1, _ty1, _tx2, _ty2, _tlabel, _tconf))
+                        _live_boxes = _lb
+                        _live_boxes_ttl = _LIVE_BOX_TTL
+                        frame_index += 1
+                        continue
 
                     for trk in sorted_tracks:
                         # bbox is in full-frame coords (inference now runs on full frame)
@@ -1078,6 +1152,7 @@ class PipelineController:
         # IPC queues and subprocess
         self._result_q: Optional["_mp.Queue[dict]"] = None
         self._cmd_q: Optional["_mp.Queue[str]"] = None
+        self._live_q: Optional["_mp.Queue[bytes]"] = None   # MJPEG frames (live mode)
         self._proc: Optional[_mp.Process] = None
         self._bridge_thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -1107,6 +1182,9 @@ class PipelineController:
 
         self._result_q = _mp_ctx.Queue()
         self._cmd_q = _mp_ctx.Queue()
+        # Live-mode MJPEG frames (annotated). Small bounded queue: the worker
+        # drops the oldest frame when full so the stream stays near-realtime.
+        self._live_q = _mp_ctx.Queue(maxsize=2)
         # Re-read GstShark flag at spawn time so toggling .env + uvicorn auto-reload
         # picks up the new value without requiring a full process restart.
         _shark_now = _os.environ.get("ENABLE_GSTSHARK_PROFILING", "false").lower() == "true"
@@ -1118,7 +1196,7 @@ class PipelineController:
                   CLASS_CONF_THRESHOLDS,
                   _shark_now, _GSTSHARK_PLUGIN_PATH,
                   _GSTSHARK_LOG_DIR, _GSTSHARK_TRACERS,
-                  confirmed_lesions or []),
+                  confirmed_lesions or [], self._live_q),
             daemon=True,
         )
         self._proc.start()

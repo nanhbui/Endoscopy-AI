@@ -301,24 +301,40 @@ function LibraryReadyPanel({ onReselect }: { onReselect: () => void }) {
 
 // ── Live stream connected panel ──────────────────────────────────────────────
 
-function LiveStreamPanel({ source, pipelineState }: { source: string; pipelineState: string }) {
+function LiveStreamPanel({ source, pipelineState, videoId }: { source: string; pipelineState: string; videoId: string | null }) {
   const isActive = pipelineState === 'PLAYING' || pipelineState === 'PAUSED_WAITING_INPUT' || pipelineState === 'PROCESSING_LLM';
+  // Show the live MJPEG stream (captured screen + server-drawn detection boxes)
+  // once analysis is running. The backend is the only reader of the capture
+  // device; the browser just consumes JPEGs, so there is no device contention.
+  const showStream = isActive && !!videoId;
   return (
     <Box sx={{ aspectRatio: '16 / 9', width: '100%', borderRadius: '16px', backgroundColor: '#0D1117', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 2, position: 'relative', overflow: 'hidden' }}>
-      {/* subtle grid bg */}
-      <Box sx={{ position: 'absolute', inset: 0, backgroundImage: 'radial-gradient(circle, rgba(0,96,100,0.08) 1px, transparent 1px)', backgroundSize: '28px 28px', pointerEvents: 'none' }} />
-      <Box sx={{ position: 'absolute', top: 12, left: 12, display: 'flex', alignItems: 'center', gap: 0.75, px: 1.25, py: 0.4, borderRadius: '6px', backgroundColor: isActive ? 'rgba(220,38,38,0.85)' : 'rgba(100,100,100,0.6)', backdropFilter: 'blur(6px)' }}>
+      {showStream ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={`${API_BASE}/live/${videoId}/mjpeg`}
+          alt="Luồng trực tiếp"
+          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', backgroundColor: '#0D1117' }}
+        />
+      ) : (
+        <>
+          {/* subtle grid bg */}
+          <Box sx={{ position: 'absolute', inset: 0, backgroundImage: 'radial-gradient(circle, rgba(0,96,100,0.08) 1px, transparent 1px)', backgroundSize: '28px 28px', pointerEvents: 'none' }} />
+          <Radio size={36} color="rgba(0,132,143,0.5)" />
+          <Box sx={{ textAlign: 'center', zIndex: 1 }}>
+            <Typography sx={{ fontSize: '0.8rem', fontWeight: 600, color: 'rgba(255,255,255,0.55)', mb: 0.5 }}>
+              {isActive ? 'Đang kết nối luồng trực tiếp…' : 'Chưa kết nối'}
+            </Typography>
+            <Typography sx={{ fontSize: '0.7rem', color: 'rgba(255,255,255,0.3)', fontFamily: 'monospace', maxWidth: 360, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {source}
+            </Typography>
+          </Box>
+        </>
+      )}
+      {/* LIVE / OFFLINE badge always on top */}
+      <Box sx={{ position: 'absolute', top: 12, left: 12, zIndex: 2, display: 'flex', alignItems: 'center', gap: 0.75, px: 1.25, py: 0.4, borderRadius: '6px', backgroundColor: isActive ? 'rgba(220,38,38,0.85)' : 'rgba(100,100,100,0.6)', backdropFilter: 'blur(6px)' }}>
         <Box sx={{ width: 7, height: 7, borderRadius: '50%', backgroundColor: '#fff', animation: isActive ? 'pulse 1.5s infinite' : 'none', '@keyframes pulse': { '0%,100%': { opacity: 1 }, '50%': { opacity: 0.35 } } }} />
         <Typography sx={{ fontSize: '0.68rem', fontWeight: 700, color: '#fff', letterSpacing: '0.06em' }}>{isActive ? 'LIVE' : 'OFFLINE'}</Typography>
-      </Box>
-      <Radio size={36} color="rgba(0,132,143,0.5)" />
-      <Box sx={{ textAlign: 'center', zIndex: 1 }}>
-        <Typography sx={{ fontSize: '0.8rem', fontWeight: 600, color: 'rgba(255,255,255,0.55)', mb: 0.5 }}>
-          {isActive ? 'Đang phân tích luồng trực tiếp' : 'Chưa kết nối'}
-        </Typography>
-        <Typography sx={{ fontSize: '0.7rem', color: 'rgba(255,255,255,0.3)', fontFamily: 'monospace', maxWidth: 360, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {source}
-        </Typography>
       </Box>
     </Box>
   );
@@ -1166,7 +1182,7 @@ export default function Workspace() {
                   <LiveInputZone value={liveSource} onChange={setLiveSource} onConnect={handleLiveConnect} isConnecting={isLiveConnecting} />
                 ) : sourceMode === 'live' && isConnected ? (
                   <VideoContainer>
-                    <LiveStreamPanel source={liveSource} pipelineState={pipelineState} />
+                    <LiveStreamPanel source={liveSource} pipelineState={pipelineState} videoId={videoId} />
                     {pipelineState === 'PAUSED_WAITING_INPUT' && currentDetection && (
                       <DetectionBar detection={currentDetection} llmInsight={llmInsight} voiceSupported={voiceSupported} isVoiceListening={isVoiceListening} onExplain={explainMore} onIgnore={handleIgnoreTracked} onConfirm={confirmDetection} onQuickConfirm={handleQuickConfirmTracked} onReportFalsePositive={reportFalsePositive} onRecheck={() => recheck(0.4)} />
                     )}

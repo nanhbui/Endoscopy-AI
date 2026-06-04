@@ -757,6 +757,33 @@ async def list_sessions():
     return {"sessions": list_all_sessions()}
 
 
+@app.get("/live/{video_id}/mjpeg")
+def stream_live_mjpeg(video_id: str):
+    """Live-mode (Trực tuyến) video: stream the captured + annotated frames from
+    the worker's live queue to the browser as multipart MJPEG. The worker is the
+    sole reader of the V4L2/RTSP device; the browser only consumes JPEGs here, so
+    there is no device contention. Sync def → runs in a threadpool (blocking get
+    is fine)."""
+    from fastapi.responses import StreamingResponse
+    sess = _sessions.get(video_id)
+    ctrl = sess.get("controller") if sess else None
+    live_q = getattr(ctrl, "_live_q", None) if ctrl else None
+    if live_q is None:
+        raise HTTPException(status_code=404, detail="No live stream for this session")
+
+    def _gen():
+        while True:
+            try:
+                jpg = live_q.get(timeout=10)
+            except Exception:
+                break
+            yield (b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                   + str(len(jpg)).encode() + b"\r\n\r\n" + jpg + b"\r\n")
+
+    return StreamingResponse(
+        _gen(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+
 @app.get("/session/{video_id}/detections")
 async def get_detections(video_id: str):
     """Return confirmed detections for the report page."""
