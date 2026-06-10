@@ -252,28 +252,55 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
     except Exception as exc:
         print(f"[Worker] YOLO load/warm-up failed: {exc}", flush=True)
 
-    # ── StrongSORT tracker ────────────────────────────────────────────────
+    # ── Tracker (StrongSORT / UTR-Track) ──────────────────────────────────
+    # ENDOSCOPY_TRACKER selects the tracker; the .update(dets, frame) API is
+    # identical for all of them so nothing else in the loop changes:
+    #   strongsort (default) → boxmot StrongSort + OSNet x0.25 (current setup)
+    #   xysr                 → UTR-Track StrongSortXYSR (XYSR Kalman) + OSNet-DCN
+    #   tlukf | utrtrack     → UTR-Track UTRTrack (TLUKF, virtual-trajectory on
+    #                          detection gaps — tuned for endoscopy)
+    # For xysr/tlukf, install UTR-Track's boxmot fork and point ENDOSCOPY_REID at
+    # osnet_dcn_x0_5_endocv.pt (the OSNet-DCN endoscopy ReID weights).
     tracker = None
+    _tracker_kind = _os.environ.get("ENDOSCOPY_TRACKER", "strongsort").lower()
     try:
         import torch as _torch
-        from boxmot.trackers.strongsort.strongsort import StrongSort
-        _reid_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), reid_weights_str) if reid_weights_str and not _os.path.isabs(reid_weights_str) else reid_weights_str
         if reid_weights_str and _os.path.exists(reid_weights_str):
             _device = _torch.device("cuda:0" if _torch.cuda.is_available() else "cpu")
-            tracker = StrongSort(
-                reid_weights=_os.path.abspath(reid_weights_str),
-                device=_device,
-                half=_torch.cuda.is_available(),
-                n_init=1,          # confirm track after 1 hit
-                max_age=300,       # keep lost track alive for 300 frames (scope can leave FOV)
-                max_iou_dist=0.85, # relaxed vs original 0.7; scope moves but different lesions rarely overlap
-                max_cos_dist=0.4,  # relaxed: appearance changes under scope lighting
-            )
-            print(f"[Worker] StrongSORT tracker ON ({_device})", flush=True)
+            _reid_abs = _os.path.abspath(reid_weights_str)
+            if _tracker_kind in ("tlukf", "utrtrack"):
+                from boxmot import UTRTrack
+                tracker = UTRTrack(
+                    reid_weights=Path(_reid_abs), device=_device, half=False,
+                    max_cos_dist=0.9, max_iou_dist=0.9, max_age=500,
+                    n_init=1, ema_alpha=0.95, mc_lambda=0.98, per_class=False,
+                )
+                print(f"[Worker] UTR-Track (TLUKF) tracker ON ({_device}) reid={_reid_abs}", flush=True)
+            elif _tracker_kind == "xysr":
+                from boxmot import StrongSortXYSR
+                tracker = StrongSortXYSR(
+                    Path(_reid_abs), _device, fp16=False,
+                    max_dist=0.95, max_iou_dist=0.95, max_age=300, half=False, per_class=False,
+                )
+                print(f"[Worker] StrongSortXYSR tracker ON ({_device}) reid={_reid_abs}", flush=True)
+            else:
+                from boxmot.trackers.strongsort.strongsort import StrongSort
+                tracker = StrongSort(
+                    reid_weights=_reid_abs,
+                    device=_device,
+                    half=_torch.cuda.is_available(),
+                    n_init=1,          # confirm track after 1 hit
+                    max_age=300,       # keep lost track alive for 300 frames (scope can leave FOV)
+                    max_iou_dist=0.85, # relaxed vs original 0.7; scope moves but different lesions rarely overlap
+                    max_cos_dist=0.4,  # relaxed: appearance changes under scope lighting
+                )
+                print(f"[Worker] StrongSORT tracker ON ({_device})", flush=True)
         else:
             print(f"[Worker] ReID weights not found ({reid_weights_str}), tracker disabled", flush=True)
     except Exception as _te:
-        print(f"[Worker] StrongSORT init failed: {_te} — falling back to no tracker", flush=True)
+        import traceback as _tb
+        print(f"[Worker] Tracker init failed (kind={_tracker_kind}): {_te} — no tracker", flush=True)
+        _tb.print_exc()
 
     # Spatial-temporal dedup: suppress same lesion area within a time window.
     # Track-ID-based dedup was fragile: max_age=300 causes the tracker to
