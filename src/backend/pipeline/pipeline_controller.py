@@ -26,74 +26,6 @@ _GSTSHARK_LOG_DIR = _os.environ.get("GSTSHARK_LOG_DIR", "/tmp/gst-shark")
 # Tracers to activate — framerate, proctime, interlatency, queuelevel, cpuusage
 _GSTSHARK_TRACERS = _os.environ.get("GSTSHARK_TRACERS", "framerate;proctime;interlatency")
 
-
-# ── Pipeline topology graph (hand-authored DOT) ───────────────────────────────
-# Gst.debug_bin_to_dot_data() is cluttered and, before a session runs, INCOMPLETE
-# (qtdemux's dynamic pads don't negotiate without real data, so the chain is cut
-# off after the demuxer). This builds a clean, accurate DOT of the SAME element
-# chain the worker constructs — readable + always complete. Used by the worker
-# (real session) and the WS server startup (representative graph).
-def build_pipeline_dot(source: str = "file",
-                       decoder: str = "avdec_h264",
-                       parser: "str | None" = "h264parse",
-                       scaled: bool = False) -> str:
-    src = (source or "file").lower()
-    if src == "rtsp":
-        stages = [
-            ("src", "rtspsrc\\nlatency=200", "", "source"),
-            ("depay", "rtph264depay", "application/x-rtp", ""),
-            ("parse", parser or "h264parse", "video/x-h264", ""),
-            ("dec", decoder, "video/x-h264", "decoder"),
-            ("queue", "queue\\n(back-pressure)", "video/x-raw", ""),
-        ]
-        if scaled:
-            stages.append(("scale", "videoscale → 640w\\nvideoconvert", "video/x-raw", ""))
-    elif src == "v4l2":
-        stages = [
-            ("src", "v4l2src\\n(HDMI capture)", "", "source"),
-            ("dec", "decodebin", "image/jpeg | video/x-raw", "decoder"),
-            ("conv", "videoconvert", "video/x-raw", ""),
-            ("queue", "queue\\n(back-pressure)", "video/x-raw", ""),
-        ]
-        if scaled:
-            stages.append(("scale", "videoscale → 640w\\nvideoconvert", "video/x-raw", ""))
-    else:  # file
-        stages = [
-            ("src", "filesrc\\nlocation=video.mp4", "", "source"),
-            ("demux", "qtdemux", "video/quicktime", ""),
-        ]
-        if parser:
-            stages.append(("parse", parser, "video/x-h264", ""))
-        stages.append(("dec", decoder, "video/x-h264 (parsed)" if parser else "encoded", "decoder"))
-        stages.append(("conv", "videoconvert", "video/x-raw", ""))
-        stages.append(("queue", "queue\\nmax-buffers=4\\n(back-pressure)", "video/x-raw", ""))
-        if scaled:
-            stages.append(("scale", "videoscale → 640w\\nvideoconvert", "video/x-raw", ""))
-    stages.append(("sink", "appsink name=sink\\nsync=true · max-buffers=2 · drop=true", "video/x-raw", "sink"))
-
-    fill = {"source": "#EEF2F2", "decoder": "#E6F2F2", "sink": "#E6F2F2", "": "#FFFFFF"}
-    border = {"source": "#6E7C7B", "decoder": "#00838F", "sink": "#00838F", "": "#A6B3B2"}
-    lines = [
-        "digraph endoscopy_pipeline {",
-        "  rankdir=LR;",
-        '  bgcolor="transparent";',
-        "  pad=0.3; nodesep=0.4; ranksep=0.5;",
-        '  node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=11];',
-        '  edge [fontname="Helvetica", fontsize=8, color="#6E7C7B", fontcolor="#8A9795", arrowsize=0.7];',
-    ]
-    for sid, label, _caps, kind in stages:
-        lines.append(f'  "{sid}" [label="{label}", fillcolor="{fill[kind]}", color="{border[kind]}"];')
-    for i in range(len(stages) - 1):
-        caps = stages[i + 1][2]
-        lbl = f' [label="{caps}"]' if caps else ""
-        lines.append(f'  "{stages[i][0]}" -> "{stages[i + 1][0]}"{lbl};')
-    lines.append('  "yolo" [label="Python worker\\nYOLOv8 + StrongSORT / UTR-Track\\n(pull-based inference)", '
-                 'shape=note, style=filled, fillcolor="#FCEFE6", color="#DD8452"];')
-    lines.append('  "sink" -> "yolo" [label="appsink.pull_sample()", style=dashed, color="#DD8452", fontcolor="#DD8452"];')
-    lines.append("}")
-    return "\n".join(lines)
-
-
 # ── Default YOLO model path ──────────────────────────────────────────────────
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -465,22 +397,7 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
     _dot_dir = _os.environ.get("GST_DEBUG_DUMP_DOT_DIR", "/tmp/gst-dot")
     _os.makedirs(_dot_dir, exist_ok=True)
     try:
-        # Clean, accurate DOT matching the real session pipeline (decoder/source
-        # derived from what was actually built), instead of GStreamer's cluttered
-        # auto-dump. Keeps the dashboard graph readable + complete.
-        if _src.startswith(("rtsp://", "rtp://", "rtmp://")):
-            _dot_src, _dot_dec, _dot_parse, _dot_scaled = "rtsp", _h264dec, "h264parse", True
-        elif _src.startswith("/dev/video"):
-            _dot_src, _dot_dec, _dot_parse, _dot_scaled = "v4l2", "decodebin", None, True
-        elif "avdec_h265" in pipeline_str:
-            _dot_src, _dot_dec, _dot_parse, _dot_scaled = "file", "avdec_h265", "h265parse", False
-        elif "avdec_mpeg4" in pipeline_str:
-            _dot_src, _dot_dec, _dot_parse, _dot_scaled = "file", "avdec_mpeg4", None, False
-        elif "decodebin" in pipeline_str:
-            _dot_src, _dot_dec, _dot_parse, _dot_scaled = "file", "decodebin", None, False
-        else:
-            _dot_src, _dot_dec, _dot_parse, _dot_scaled = "file", "avdec_h264", "h264parse", False
-        _dot_data = build_pipeline_dot(_dot_src, _dot_dec, _dot_parse, _dot_scaled)
+        _dot_data = Gst.debug_bin_to_dot_data(gst_pipeline, Gst.DebugGraphDetails.ALL)
         _dot_path = _os.path.join(_dot_dir, "endoscopy_pipeline.dot")
         with open(_dot_path, "w") as _f:
             _f.write(_dot_data)

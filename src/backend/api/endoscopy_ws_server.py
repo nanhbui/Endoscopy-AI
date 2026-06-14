@@ -55,7 +55,7 @@ _REPO_ROOT = _HERE.parents[3]
 _PIPELINE_DIR = Path(os.getenv("PIPELINE_DIR", str(_HERE.parents[1] / "pipeline")))
 sys.path.insert(0, str(_PIPELINE_DIR))
 
-from pipeline_controller import PipelineController, PipelineState, build_pipeline_dot   # noqa: E402
+from pipeline_controller import PipelineController, PipelineState   # noqa: E402
 from video_library import VideoLibrary                               # noqa: E402
 from video_proxy import (                                            # noqa: E402
     playback_path, ensure_proxy_async, remove_proxy,
@@ -181,21 +181,75 @@ _DOT_DIR = Path(os.getenv("GST_DEBUG_DUMP_DOT_DIR", "/tmp/gst-dot"))
 _DOT_FILE = _DOT_DIR / "endoscopy_pipeline.dot"
 
 
-def _generate_pipeline_dot() -> None:
-    """Write the representative pipeline DOT shown before the first session.
+def _find_sample_video() -> "str | None":
+    """Pick any real .mp4 to preroll for the representative graph. Dynamic-pad
+    demuxers (qtdemux) only negotiate pads with real data, so /dev/null yields
+    an incomplete graph — a real sample gives the full native topology."""
+    import glob
+    for root in (UPLOAD_DIR, LIBRARY_DIR, _REPO_ROOT / "data" / "lab"):
+        vids = sorted(glob.glob(str(Path(root) / "*.mp4")))
+        if vids:
+            return vids[0]
+    return None
 
-    Uses the shared hand-authored builder (build_pipeline_dot) so the graph is
-    clean + complete — the previous Gst.parse_launch("filesrc location=/dev/null
-    ! qtdemux ! …") approach produced an INCOMPLETE graph because qtdemux's
-    dynamic pads never negotiate without real data, cutting the chain off after
-    the demuxer. The worker overwrites this file with the real per-session
-    pipeline (correct source/decoder) once a session starts.
+
+def _generate_pipeline_dot() -> None:
+    """Write the pipeline DOT shown before the first session, using GStreamer's
+    NATIVE Gst.debug_bin_to_dot_data() so the dashboard graph is the real
+    library output (matches the worker's per-session dump + the thesis figure).
+
+    We preroll a REAL sample video to PAUSED so qtdemux's dynamic pads negotiate
+    and the FULL chain is captured (the old /dev/null source produced a graph
+    cut off right after the demuxer). The worker overwrites this file with the
+    real per-session pipeline once a session starts.
     """
     try:
+        sample = _find_sample_video()
+        if not sample:
+            logger.warning("Pipeline DOT: no sample .mp4 found — skipping representative graph "
+                           "(it will be generated from the first real session)")
+            return
+
+        # Probe codec to mirror the worker's decoder choice (avoids NVMM buffers).
+        codec = "h264"
+        try:
+            pr = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream=codec_name", "-of",
+                 "default=noprint_wrappers=1:nokey=1", sample],
+                capture_output=True, text=True, timeout=10,
+            )
+            codec = pr.stdout.strip() or "h264"
+        except Exception:
+            pass
+
+        if codec == "h264":
+            chain = "qtdemux ! h264parse ! avdec_h264 ! videoconvert"
+        elif codec == "hevc":
+            chain = "qtdemux ! h265parse ! avdec_h265 ! videoconvert"
+        elif codec == "mpeg4":
+            chain = "qtdemux ! avdec_mpeg4 ! videoconvert"
+        else:
+            chain = "decodebin ! videoconvert"
+
+        import gi
+        gi.require_version("Gst", "1.0")
+        from gi.repository import Gst
+        Gst.init(None)
+        pipeline_str = (
+            f'filesrc location="{sample}" ! {chain}'
+            " ! queue max-size-buffers=4 max-size-time=0 max-size-bytes=0"
+            " ! appsink name=sink sync=true max-buffers=2 drop=true"
+        )
+        pipe = Gst.parse_launch(pipeline_str)
+        pipe.set_state(Gst.State.PAUSED)
+        pipe.get_state(3 * Gst.SECOND)  # wait for preroll → pads + caps negotiated
         _DOT_DIR.mkdir(parents=True, exist_ok=True)
-        # Canonical file-source H.264 path (the common upload case).
-        _DOT_FILE.write_text(build_pipeline_dot("file", "avdec_h264", "h264parse", scaled=False))
-        logger.info("Pipeline DOT graph written → {} (representative file-source)", _DOT_FILE)
+        dot_data = Gst.debug_bin_to_dot_data(pipe, Gst.DebugGraphDetails.ALL)
+        _DOT_FILE.write_text(dot_data)
+        pipe.set_state(Gst.State.NULL)
+        logger.info("Pipeline DOT graph written → {} (native, prerolled {} [{}])",
+                    _DOT_FILE, Path(sample).name, codec)
     except Exception as exc:
         logger.warning("Could not generate pipeline DOT: {}", exc)
 
