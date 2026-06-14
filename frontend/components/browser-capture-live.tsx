@@ -19,6 +19,7 @@ import Typography from '@mui/material/Typography';
 import CircularProgress from '@mui/material/CircularProgress';
 import { Radio, Cpu, Square, Video as VideoIcon, Sparkles, X } from 'lucide-react';
 import { WS_BASE, API_BASE, type LesionReport } from '@/lib/ws-client';
+import { labelToColor as colorFor } from '@/lib/lesion-colors';
 import { LesionReportCard } from '@/components/lesion-report-card';
 
 interface LiveBox { label: string; confidence: number; bbox: [number, number, number, number]; }
@@ -27,13 +28,6 @@ const FRAME_W = 1920;
 const FRAME_H = 1080;
 const SEND_INTERVAL_MS = 200;   // grab cadence (~5 fps to backend)
 const GRAB_WIDTH = 960;          // downscale frames sent to backend
-
-function colorFor(label: string): string {
-  const l = label.toLowerCase();
-  if (l.includes('ung thư') || l.includes('ung thu')) return '#C44E52';
-  if (l.includes('loét') || l.includes('loet')) return '#55A868';
-  return '#DD8452';
-}
 
 export function BrowserCaptureLive() {
   const videoRef = useRef<HTMLVideoElement>(null);

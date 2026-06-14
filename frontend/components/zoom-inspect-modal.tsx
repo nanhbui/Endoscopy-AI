@@ -41,6 +41,7 @@ export function ZoomInspectModal({ open, payload, onClose }: Props) {
   // Reset focus when a fresh payload arrives.
   useEffect(() => {
     if (!payload) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset focus when a new payload arrives
     setFocusedIdx(0);
   }, [payload]);
 

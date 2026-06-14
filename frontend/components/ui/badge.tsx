@@ -1,19 +1,16 @@
 import React from 'react';
-import MuiChip from '@mui/material/Chip';
+import MuiChip, { ChipProps as MuiChipProps } from '@mui/material/Chip';
 
-export interface BadgeProps {
+export interface BadgeProps extends Omit<MuiChipProps, 'variant' | 'children'> {
   variant?: 'default' | 'secondary' | 'destructive' | 'outline' | 'ghost' | 'link';
   children?: React.ReactNode;
   label?: React.ReactNode;
-  [key: string]: any;
 }
 
 export const Badge = React.forwardRef<HTMLDivElement, BadgeProps>(
   ({ variant = 'default', children, label, ...props }, ref) => {
     const getMuiVariant = (v: BadgeProps['variant']) => {
       switch (v) {
-        case 'default':
-          return 'filled' as const;
         case 'outline':
           return 'outlined' as const;
         default:

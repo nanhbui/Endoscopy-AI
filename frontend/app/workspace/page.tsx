@@ -32,6 +32,7 @@ import Divider from '@mui/material/Divider';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { API_BASE } from '@/lib/ws-client';
+import { labelToColor as bboxColorFor, rgba } from '@/lib/lesion-colors';
 import { useAnalysis, type Detection, type DetectionStatus } from '@/context/AnalysisContext';
 import { useVoiceControl } from '@/hooks/use-voice-control';
 import { VideoSourceModal } from '@/components/video-source-modal';
@@ -72,23 +73,9 @@ const VideoContainer = styled(Box)(() => ({
 //   shape: RoundedRect, rounded_rect_radius_ratio: 0.05
 //   line_width: 3, fill_alpha: 30/255 (≈12 %), boxed_description: true
 //
-// Color is severity-aware so doctors can scan for cancers at a glance:
-//   - Cancer (Ung thư …)  → red  #C44E52   (Seaborn deep[3])
-//   - Inflammation (Viêm) → orange #DD8452 (Seaborn deep[1])
-//   - Ulcer (Loét)        → green #55A868 (Seaborn deep[2])
-
-function bboxColorFor(label: string): string {
-  if (/ung thư|ung thu/i.test(label)) return '#C44E52';
-  if (/loét|loet/i.test(label))       return '#55A868';
-  return '#DD8452';  // viêm + default
-}
-
-function rgba(hex: string, alpha: number): string {
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  return `rgba(${r},${g},${b},${alpha})`;
-}
+// Severity-aware bbox color (cancer=red / inflam=orange / ulcer=green) and the
+// hex→rgba helper now live in lib/lesion-colors — imported above as
+// bboxColorFor + rgba so doctors see one consistent palette across pages.
 
 const BboxOverlay = styled(MotionBox)(() => ({
   position: 'absolute',
@@ -333,6 +320,7 @@ function SessionReportModal({ detections, onClose, onRestart, onGoReport, isNavi
                   {/* Thumbnail */}
                   <Box sx={{ width: 52, height: 40, borderRadius: '7px', overflow: 'hidden', flexShrink: 0, backgroundColor: '#0D1117', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                     {d.frame_b64
+                      // eslint-disable-next-line @next/next/no-img-element -- base64 data URI, next/image adds no value
                       ? <img src={`data:image/jpeg;base64,${d.frame_b64}`} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                       : <ScanSearch size={14} color="rgba(255,255,255,0.2)" />}
                   </Box>
@@ -1208,7 +1196,8 @@ export default function Workspace() {
                 border: '1px solid #E2EAE8',
                 boxShadow: '0 2px 12px rgba(13,27,42,0.06)',
                 overflow: 'hidden',
-                display: sourceMode === 'live' ? 'none' : undefined,
+                // Hidden when live, or when voice commands are disabled via flag.
+                display: (sourceMode === 'live' || !voiceSupported) ? 'none' : undefined,
               }}
             >
               <Box sx={{ px: 2.5, py: 1.25, borderBottom: '1px solid #E2EAE8', display: 'flex', flexDirection: 'column', gap: 1, backgroundColor: '#F8FAFB' }}>

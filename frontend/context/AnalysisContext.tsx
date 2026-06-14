@@ -228,6 +228,11 @@ const FRAME_H = 1080;
 const STORAGE_KEY = "gastroeye:sessions:v1";
 const MAX_SESSIONS = 10;
 
+// Demo/offline mock is OFF by default so fabricated detections + LLM text never
+// leak into real sessions (and persisted history). Enable explicitly with
+// NEXT_PUBLIC_ENABLE_MOCK=1 only for UI demos without a backend.
+const MOCK_ENABLED = process.env.NEXT_PUBLIC_ENABLE_MOCK === "1";
+
 function toDetection(d: DetectionData): Detection {
   const [x1, y1, x2, y2] = d.lesion.bbox;
   return {
@@ -667,6 +672,8 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       connectWs(videoId);
       return;
     }
+    // No real video + mock disabled → do nothing rather than inject fake data.
+    if (!MOCK_ENABLED) return;
     clearMockTimers();
     setPipelineState("PLAYING");
     setCurrentDetection(null);
@@ -723,6 +730,8 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       wsRef.current.send({ action: "ACTION_EXPLAIN" });
       return;
     }
+    // Offline demo only — never fabricate LLM analysis in real (no-WS) sessions.
+    if (!MOCK_ENABLED) return;
     clearMockTimers();
     setIsListeningVoice(true);
     llmInsightRef.current = ""; setLlmInsight("");

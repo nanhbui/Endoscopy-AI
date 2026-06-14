@@ -12,6 +12,11 @@ import { API_BASE } from "@/lib/ws-client";
 
 export type VoiceIntent = "BO_QUA" | "GIAI_THICH" | "XAC_NHAN" | "UNKNOWN";
 
+// Feature flag — voice commands (faster-whisper / Web Speech + keyword intent)
+// are HIDDEN by default while accuracy is being reworked. Set
+// NEXT_PUBLIC_VOICE_ENABLED=true to re-enable the mic UI and auto-activation.
+const VOICE_ENABLED = process.env.NEXT_PUBLIC_VOICE_ENABLED === "true";
+
 interface UseVoiceControlOptions {
   onIntent: (intent: VoiceIntent, transcript: string) => void;
 }
@@ -87,7 +92,9 @@ export function useVoiceControl({ onIntent }: UseVoiceControlOptions) {
   const rafRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const onIntentRef = useRef(onIntent);
-  onIntentRef.current = onIntent;
+  // Keep the latest callback without re-subscribing recognition. Updating the
+  // ref in an effect (not during render) satisfies react-hooks/refs.
+  useEffect(() => { onIntentRef.current = onIntent; });
   // Track how many chars of the current interim we've already acted on.
   // Resets to 0 when Chrome finalises the result (new utterance slot).
   const lastFiredEndRef = useRef<number>(0);
@@ -98,7 +105,9 @@ export function useVoiceControl({ onIntent }: UseVoiceControlOptions) {
     console.log("[VoiceControl] window.SpeechRecognition:", !!(window as any).SpeechRecognition);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     console.log("[VoiceControl] window.webkitSpeechRecognition:", !!(window as any).webkitSpeechRecognition);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- feature detection needs window, only available after mount (SSR-safe)
     setSupported(
+      VOICE_ENABLED &&
       typeof window !== "undefined" &&
       ("SpeechRecognition" in window || "webkitSpeechRecognition" in window),
     );

@@ -38,6 +38,9 @@ export function PipelineGraphSection() {
   const scale = useRef(1);
   const offset = useRef({ x: 0, y: 0 });
   const drag = useRef<{ startX: number; startY: number; ox: number; oy: number } | null>(null);
+  // Mirror the drag ref into state purely for the cursor — reading drag.current
+  // during render is impure (react-hooks/refs); state is the render-safe source.
+  const [grabbing, setGrabbing] = useState(false);
 
   // Apply current transform to the inner div
   const applyTransform = useCallback(() => {
@@ -77,6 +80,7 @@ export function PipelineGraphSection() {
   // Drag pan
   const onMouseDown = useCallback((e: React.MouseEvent) => {
     drag.current = { startX: e.clientX, startY: e.clientY, ox: offset.current.x, oy: offset.current.y };
+    setGrabbing(true);
   }, []);
 
   const onMouseMove = useCallback((e: React.MouseEvent) => {
@@ -88,7 +92,7 @@ export function PipelineGraphSection() {
     applyTransform();
   }, [applyTransform]);
 
-  const onMouseUp = useCallback(() => { drag.current = null; }, []);
+  const onMouseUp = useCallback(() => { drag.current = null; setGrabbing(false); }, []);
 
   // Attach non-passive wheel listener so preventDefault works
   useEffect(() => {
@@ -119,6 +123,7 @@ export function PipelineGraphSection() {
     }
   };
 
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- mount-time fetch; load() shows the spinner then resolves async
   useEffect(() => { load(); }, []);
 
   return (
@@ -261,7 +266,7 @@ export function PipelineGraphSection() {
               sx={{
                 width: '100%',
                 height: 420,
-                cursor: drag.current ? 'grabbing' : 'grab',
+                cursor: grabbing ? 'grabbing' : 'grab',
                 userSelect: 'none',
                 overflow: 'hidden',
               }}

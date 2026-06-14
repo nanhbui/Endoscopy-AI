@@ -223,7 +223,7 @@ export function VideoLibraryPanel({ onSelect, showUploadButton = true, sx }: Vid
                 Thư viện trống
               </Typography>
               <Typography variant="caption" color="textDisabled">
-                Nhấn "Tải lên mới" để thêm video đầu tiên vào thư viện.
+                Nhấn “Tải lên mới” để thêm video đầu tiên vào thư viện.
               </Typography>
             </Box>
           </Box>

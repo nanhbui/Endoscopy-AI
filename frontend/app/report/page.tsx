@@ -10,6 +10,8 @@ import {
 } from 'lucide-react';
 import { useAnalysis, type Detection, type DetectionStatus, type Session } from '@/context/AnalysisContext';
 import { listDbSessions, type DbSessionRow } from '@/lib/ws-client';
+import { labelToColor } from '@/lib/lesion-colors';
+import { fmtDateTime as fmtDate, fmtClock as fmtTs } from '@/lib/format';
 import { SessionSummaryPanel } from '@/components/session-summary-panel';
 
 /** Map a DB-backed session row to the UI Session shape. DB rows have no frame
@@ -64,22 +66,6 @@ function getSeverity(confidence: number) {
   if (confidence >= SEVERITY_THRESHOLDS.medium)
     return { label: 'Trung bình', color: '#D97706', bg: 'rgba(245,158,11,0.12)', light: 'rgba(245,158,11,0.06)' };
   return { label: 'Nhẹ', color: '#059669', bg: 'rgba(5,150,105,0.1)', light: 'rgba(5,150,105,0.05)' };
-}
-
-function fmtTs(seconds: number): string {
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return m > 0 ? `${m} phút ${String(s).padStart(2, '0')} giây` : `${s} giây`;
-}
-
-function fmtDate(ms: number): string {
-  const d = new Date(ms);
-  const dd = String(d.getDate()).padStart(2, '0');
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const yyyy = d.getFullYear();
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mi = String(d.getMinutes()).padStart(2, '0');
-  return `${dd}/${mm}/${yyyy} ${hh}:${mi}`;
 }
 
 function trimName(name: string, max = 42): string {
@@ -164,9 +150,7 @@ function DetectionModal({
                   style={{ display: 'block', maxWidth: '100%', maxHeight: '80vh', width: 'auto', height: 'auto' }}
                 />
                 {(() => {
-                  const _c = (/ung thư|ung thu/i.test(det.label) ? '#C44E52'
-                            : /loét|loet/i.test(det.label)       ? '#55A868'
-                            :                                       '#DD8452');
+                  const _c = labelToColor(det.label);
                   // The thumbnail (frame_b64) already has the backend yellow box at
                   // the correct position; show only a label badge, not a second box.
                   return (

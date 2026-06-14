@@ -1,6 +1,5 @@
 'use client';
 
-import type { Metadata } from "next";
 import { Inter, JetBrains_Mono } from "next/font/google";
 // Load design tokens as a side-effect — Next.js bundles this CSS file with
 // the app shell. Importing from globals.css via @import sometimes drops the
