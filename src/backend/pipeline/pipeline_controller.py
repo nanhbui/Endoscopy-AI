@@ -303,8 +303,6 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
         _tb.print_exc()
 
     # Spatial-temporal dedup: suppress same lesion area within a time window.
-    # Track-ID-based dedup was fragile: max_age=300 causes the tracker to
-    # re-associate returning lesions with old IDs, silently skipping them.
     _DEDUP_WINDOW_MS = int(_os.environ.get("DEDUP_WINDOW_MS", "10000"))  # 10 s
     _DEDUP_IOU = 0.25  # ≥25% overlap = same region
     _reported_history: list[dict] = []  # {ts_ms, bbox (1920×1080 norm), label}
@@ -314,6 +312,24 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
             if ts_ms - r["ts_ms"] < _DEDUP_WINDOW_MS and r["label"] == label and _iou(r["bbox"], bbox) >= _DEDUP_IOU:
                 return True
         return False
+
+    # Track-ID dedup: report each track exactly once for the whole session.
+    # This is the real fix for "scope shifts a bit → the SAME lesion gets
+    # re-detected and pauses again". It only works with a ReID strong enough to
+    # re-associate a lesion to its original ID after the scope leaves and
+    # returns — that is exactly what the UTR-Track family + OSNet-DCN endoscopy
+    # ReID provides. Plain StrongSORT's generic ReID re-associates poorly, so
+    # for it we stay on spatial-temporal dedup (track_id dedup there would
+    # wrongly merge distinct lesions OR skip genuine new ones). "auto" enables
+    # it for the UTR-Track trackers only; override with DEDUP_BY_TRACK_ID=0/1.
+    _dtid = _os.environ.get("DEDUP_BY_TRACK_ID", "auto").lower()
+    if _dtid == "auto":
+        _dedup_by_track_id = tracker is not None and _tracker_kind in ("tlukf", "utrtrack", "xysr")
+    else:
+        _dedup_by_track_id = _dtid in ("1", "true", "yes", "on")
+    reported_track_ids: set[int] = set()
+    print(f"[Worker] Dedup mode: {'track_id' if _dedup_by_track_id else 'spatial-temporal'} "
+          f"(tracker={_tracker_kind})", flush=True)
 
     # ── GStreamer pipeline ────────────────────────────────────────────────
     try:
@@ -1106,8 +1122,14 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                                 print(f"[Worker] CONFIRMED_CAPTURE track_id={track_id} {label} ts_ms={timestamp_ms}", flush=True)
                             continue
 
-                        # Spatial-temporal dedup
-                        if _is_recently_reported(timestamp_ms, xyxy_norm, label):
+                        # Track-ID dedup (UTR-Track + OSNet-DCN ReID): a lesion
+                        # already reported keeps its ID when the scope drifts off
+                        # and back, so suppress its repeat appearances entirely.
+                        if _dedup_by_track_id:
+                            if track_id in reported_track_ids:
+                                continue
+                        # Spatial-temporal dedup (fallback / StrongSORT mode)
+                        elif _is_recently_reported(timestamp_ms, xyxy_norm, label):
                             continue
 
                         print(f"[Worker] Detection track_id={track_id} {label} conf={det_conf:.2f} bbox={[round(v,1) for v in xyxy]}", flush=True)
@@ -1138,6 +1160,7 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                             "frame_b64": thumbnail_b64,
                         }
                         _reported_history.append({"ts_ms": timestamp_ms, "bbox": xyxy_norm, "label": label})
+                        reported_track_ids.add(int(track_id))
                         confirmed.append(det_data)
                         result_q.put({"event": "DETECTION_FOUND", "data": det_data})
                         paused = True
