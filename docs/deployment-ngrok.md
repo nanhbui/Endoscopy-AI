@@ -69,7 +69,7 @@ pkill -f 'uvicorn endoscopy'; pkill -f next-server; pkill caddy; pkill ngrok
 
 ```caddy
 :8080 {
-    @backend path /ws/* /analytics/* /stream/* /upload* /library /library/* /sessions/* /session/* /pipeline/* /voice/* /health /health/*
+    @backend path /ws/* /analytics/* /stream/* /upload* /library /library/* /sessions/* /session/* /pipeline/* /voice/* /health /health/* /config /config/* /system/* /memory/*
     reverse_proxy @backend 127.0.0.1:8001
     reverse_proxy 127.0.0.1:3000
 }
