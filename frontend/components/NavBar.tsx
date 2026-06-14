@@ -11,7 +11,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
-  Microscope, Gauge, ScanLine, ScrollText, BarChart3, Settings,
+  Microscope, Gauge, ScanLine, ScrollText, BarChart3, BookOpen, Settings,
 } from 'lucide-react';
 import { AiHealthBadge } from '@/components/ai-health-badge';
 
@@ -22,6 +22,9 @@ const navItems = [
   // Replaces the empty /train placeholder — /analytics wires SQLite aggregates
   // (KPIs + charts + false-positive review) into a single dashboard page.
   { href: '/analytics', label: 'Thống kê',  icon: BarChart3 },
+  // Static intro/usage guide for doctors + thesis reviewers. Pure content
+  // page (no backend), sits right after Thống kê.
+  { href: '/docs',      label: 'Tài liệu',  icon: BookOpen },
 ];
 
 export default function NavBar() {
