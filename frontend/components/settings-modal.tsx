@@ -11,6 +11,7 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   X, SlidersHorizontal, Cpu, Brain, Save, RotateCcw, Trash2, CheckCircle2,
 } from 'lucide-react';
@@ -87,9 +88,12 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
     loadStatus();
   }, [loadStatus]);
 
-  if (!open) return null;
+  // Render via portal to <body> so the fixed overlay isn't trapped by the
+  // navbar's backdrop-filter (which creates a containing block for fixed
+  // descendants → modal would be clipped to the 64px header).
+  if (!open || typeof document === 'undefined') return null;
 
-  return (
+  return createPortal(
     <div
       onClick={onClose}
       style={{
@@ -188,7 +192,8 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
           </section>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
