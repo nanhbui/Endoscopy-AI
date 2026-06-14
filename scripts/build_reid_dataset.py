@@ -62,8 +62,11 @@ def main():
     except Exception:
         pass
 
-    vids = (sorted(glob.glob(os.path.join(args.videos, "*.mp4")))
-            if os.path.isdir(args.videos) else [args.videos])
+    if os.path.isdir(args.videos):
+        vids = sorted(v for v in glob.glob(os.path.join(args.videos, "*.mp4"))
+                      if not v.endswith("_proxy.mp4"))   # skip the low-res playback proxies
+    else:
+        vids = [args.videos]
     if not vids:
         raise SystemExit(f"No videos found under {args.videos}")
 
