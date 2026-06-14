@@ -328,8 +328,28 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
     else:
         _dedup_by_track_id = _dtid in ("1", "true", "yes", "on")
     reported_track_ids: set[int] = set()
+
+    # Per-label dedup for DIFFUSE / frame-level diagnoses (e.g. "Viêm dạ dày
+    # HP", "Viêm thực quản"). These are not focal lesions: as the scope pans,
+    # YOLO fires on many different mucosa patches — each genuinely a different
+    # image region at a different location/scale, so the tracker (correctly)
+    # gives each a NEW id and ReID cannot merge them. Reporting every patch
+    # floods the doctor with the same diagnosis over and over. So for these we
+    # report ONCE per session (dedup by label). Focal lesions (ung thư, loét,
+    # polyp) stay per-instance — two cancer sites must be two reports.
+    # Matched by keyword substring on the cleaned label; override the keyword
+    # list with ENDOSCOPY_DIFFUSE_KEYWORDS (comma-separated, "" disables).
+    _diffuse_kw = [k.strip().lower()
+                   for k in _os.environ.get("ENDOSCOPY_DIFFUSE_KEYWORDS", "viêm").split(",")
+                   if k.strip()]
+    reported_diffuse_labels: set[str] = set()
+
+    def _is_diffuse(_label: str) -> bool:
+        _l = _label.lower()
+        return any(k in _l for k in _diffuse_kw)
+
     print(f"[Worker] Dedup mode: {'track_id' if _dedup_by_track_id else 'spatial-temporal'} "
-          f"(tracker={_tracker_kind})", flush=True)
+          f"(tracker={_tracker_kind}) diffuse_once={_diffuse_kw}", flush=True)
 
     # ── GStreamer pipeline ────────────────────────────────────────────────
     try:
@@ -1122,10 +1142,17 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                                 print(f"[Worker] CONFIRMED_CAPTURE track_id={track_id} {label} ts_ms={timestamp_ms}", flush=True)
                             continue
 
-                        # Track-ID dedup (UTR-Track + OSNet-DCN ReID): a lesion
-                        # already reported keeps its ID when the scope drifts off
-                        # and back, so suppress its repeat appearances entirely.
-                        if _dedup_by_track_id:
+                        # Diffuse-diagnosis dedup: report once per session per
+                        # label (HP gastritis / esophagitis fire on many patches
+                        # with a new track id each time — neither track_id nor
+                        # ReID can collapse them, so collapse by label).
+                        if _is_diffuse(label):
+                            if label in reported_diffuse_labels:
+                                continue
+                        # Track-ID dedup (UTR-Track + OSNet-DCN ReID): a focal
+                        # lesion already reported keeps its ID when the scope
+                        # drifts off and back, so suppress its repeat appearances.
+                        elif _dedup_by_track_id:
                             if track_id in reported_track_ids:
                                 continue
                         # Spatial-temporal dedup (fallback / StrongSORT mode)
@@ -1161,6 +1188,8 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                         }
                         _reported_history.append({"ts_ms": timestamp_ms, "bbox": xyxy_norm, "label": label})
                         reported_track_ids.add(int(track_id))
+                        if _is_diffuse(label):
+                            reported_diffuse_labels.add(label)
                         confirmed.append(det_data)
                         result_q.put({"event": "DETECTION_FOUND", "data": det_data})
                         paused = True
