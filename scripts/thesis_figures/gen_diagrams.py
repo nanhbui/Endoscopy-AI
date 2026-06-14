@@ -316,6 +316,139 @@ def fig_lora():
     render_dot("fig_6_1_lora", body)
 
 
+# ── Dual-modality (video + audio) system architecture ───────────────────────────
+def fig_dual_modality():
+    body = (
+        'rankdir=LR; nodesep=0.4; ranksep=0.7;\n'
+        'node [shape=box, style="rounded,filled", fontsize=10];\n'
+        'cam [label="Endoscopy camera /\\nvideo source", fillcolor="#fffde7", color="#b8860b"];\n'
+        'mic [label="Microphone", fillcolor="#fffde7", color="#b8860b"];\n'
+        'gst [label="GStreamer\\ndecode", fillcolor="#e8f5e9", color="#2e7d32"];\n'
+        'yolo [label="YOLOv8 +\\nStrongSORT", fillcolor="#e8f5e9", color="#2e7d32"];\n'
+        'asr [label="ASR\\n(Web Speech /\\nfaster-whisper)", fillcolor="#e3f2fd", color="#1565c0"];\n'
+        'intent [label="Intent classifier\\n(keyword / LLM)", fillcolor="#e3f2fd", color="#1565c0"];\n'
+        'ctrl [label="Central controller\\n(FSM / pipeline)", shape=box, style="filled", fillcolor="#fff3e0", color="#e08a2c", penwidth=2];\n'
+        'vlm [label="VLM report\\n(GPT-4o / Qwen2.5-VL)", fillcolor="#eef3fb", color="#2c5fa8"];\n'
+        'ui [label="Frontend UI", fillcolor="#eef3fb", color="#2c5fa8"];\n'
+        'db [label="SQLite", shape=cylinder, fillcolor="#f5f5f5", color="#888"];\n'
+        'cam -> gst [label="video"]; gst -> yolo [label="frames"]; yolo -> ctrl [label="detections"];\n'
+        'mic -> asr [label="audio"]; asr -> intent [label="transcript"]; intent -> ctrl [label="voice intent"];\n'
+        'ctrl -> vlm [label="explain"]; vlm -> ctrl [style=dashed];\n'
+        'ctrl -> ui [dir=both, label="events / actions"];\n'
+        'ctrl -> db;\n'
+    )
+    render_dot("fig_3_8_dual_modality", body)
+
+
+# ── Physical hardware / deployment ──────────────────────────────────────────────
+def fig_hardware():
+    body = (
+        'rankdir=LR; nodesep=0.5; ranksep=0.8;\n'
+        'node [shape=box, style="rounded,filled", fillcolor="#eef3fb", color="#2c5fa8", fontsize=10];\n'
+        'scope [label="Endoscopy tower\\n+ scope\\n(video output)", fillcolor="#fffde7", color="#b8860b"];\n'
+        'cap [label="Local capture host\\n(USB capture card,\\nH.264 encoder)"];\n'
+        'gpu [label="GPU workstation\\nRTX 4080 SUPER\\n(backend + YOLO + VLM)", fillcolor="#e8f5e9", color="#2e7d32"];\n'
+        'clin [label="Clinician workstation\\n(browser UI + microphone)", fillcolor="#e3f2fd", color="#1565c0"];\n'
+        'scope -> cap [label="HDMI / SDI cable"];\n'
+        'cap -> gpu [label="RTP/H.264 over\\nUDP (WireGuard VPN)"];\n'
+        'clin -> gpu [dir=both, label="WebSocket / HTTPS\\n(Caddy + ngrok);\\nvoice via Web Speech API"];\n'
+    )
+    render_dot("fig_4_19_hardware", body)
+
+
+# ── Clinical session activity / user flow ───────────────────────────────────────
+def fig_userflow():
+    body = (
+        'rankdir=TB; nodesep=0.35; ranksep=0.45;\n'
+        'node [shape=box, style="rounded,filled", fillcolor="#eef3fb", color="#2c5fa8", fontsize=10];\n'
+        'start [label="Start", shape=ellipse, fillcolor="#fffde7", color="#b8860b"];\n'
+        'src [label="Choose source\\n(upload / library / live)"];\n'
+        'play [label="Play + real-time detection"];\n'
+        'dec [label="Lesion detected\\n& passes filters?", shape=diamond, fillcolor="#fff3e0", color="#e08a2c"];\n'
+        'pause [label="Auto-pause + show finding\\n(record PTS)"];\n'
+        'choice [label="Physician decision\\n(touch / voice)", shape=diamond, fillcolor="#fff3e0", color="#e08a2c"];\n'
+        'explain [label="Explain ->\\nstreaming VLM report"];\n'
+        'confirm [label="Confirm\\n(save / auto-capture)", fillcolor="#e8f5e9", color="#2e7d32"];\n'
+        'ignore [label="Ignore /\\nreport false positive", fillcolor="#fdeaea", color="#c0392b"];\n'
+        'recheck [label="Re-check\\n(lower threshold)"];\n'
+        'resume [label="Resume\\n(accurate seek)"];\n'
+        'eos [label="Video ended?", shape=diamond, fillcolor="#fff3e0", color="#e08a2c"];\n'
+        'summary [label="Session summary"];\n'
+        'qa [label="Q&A chatbot"];\n'
+        'export [label="Export PDF"];\n'
+        'end [label="End", shape=ellipse, fillcolor="#fffde7", color="#b8860b"];\n'
+        'start -> src -> play -> dec;\n'
+        'dec -> play [label="no", style=dashed];\n'
+        'dec -> pause [label="yes"];\n'
+        'pause -> choice;\n'
+        'choice -> explain [label="explain"]; explain -> choice [style=dashed];\n'
+        'choice -> recheck [label="re-check"]; recheck -> choice [style=dashed];\n'
+        'choice -> confirm [label="confirm"]; choice -> ignore [label="ignore / FP"];\n'
+        'confirm -> resume; ignore -> resume; resume -> eos;\n'
+        'eos -> play [label="no", style=dashed];\n'
+        'eos -> summary [label="yes"]; summary -> qa -> export -> end;\n'
+    )
+    render_dot("fig_3_7_userflow", body)
+
+
+# ── Frontend sitemap ────────────────────────────────────────────────────────────
+def fig_sitemap():
+    body = (
+        'rankdir=TB; nodesep=0.4; ranksep=0.55;\n'
+        'node [shape=box, style="rounded,filled", fillcolor="#eef3fb", color="#2c5fa8", fontsize=10];\n'
+        'app [label="Web application\\n(Next.js, port 3000)", fillcolor="#e3f2fd", color="#1565c0"];\n'
+        'dash [label="Dashboard  /\\nkey metrics, recent sessions"];\n'
+        'work [label="Workspace  /workspace\\nlive video + overlay, voice,\\naction bar, lesion report"];\n'
+        'rep [label="Report  /report\\nsummary, chatbot, PDF export"];\n'
+        'ana [label="Analytics  /analytics\\ncharts, false-positive review"];\n'
+        'docs [label="Docs  /docs\\nusage guide"];\n'
+        'app -> dash; app -> work; app -> rep; app -> ana; app -> docs;\n'
+    )
+    render_dot("fig_4_18_sitemap", body)
+
+
+# ── Project schedule (Gantt) ────────────────────────────────────────────────────
+def fig_gantt():
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
+    # (task, start_week, duration_weeks, phase-colour-key)
+    tasks = [
+        ("Literature review", 0, 4, 0),
+        ("Requirements & use-case modelling", 3, 3, 0),
+        ("Dataset prep + YOLOv8 training", 5, 7, 1),
+        ("GStreamer decode pipeline", 10, 4, 1),
+        ("Subprocess isolation + IPC", 13, 3, 1),
+        ("Detection filtering + de-duplication", 15, 4, 1),
+        ("FSM + WebSocket protocol", 17, 4, 2),
+        ("Vietnamese voice control", 20, 3, 2),
+        ("VLM reporting + chatbot", 22, 4, 2),
+        ("Frontend (dashboard/workspace/...)", 18, 9, 2),
+        ("Persistence + analytics", 24, 4, 2),
+        ("Deployment + benchmarking", 27, 3, 3),
+        ("Evaluation + thesis writing", 28, 4, 3),
+    ]
+    colours = ["#1565c0", "#2e7d32", "#2c5fa8", "#e08a2c"]
+    phase_lbl = ["Research", "Core pipeline", "Subsystems & UI", "Eval & deploy"]
+    fig, ax = plt.subplots(figsize=(10, 5))
+    for i, (name, s, d, c) in enumerate(tasks):
+        y = len(tasks) - i
+        ax.barh(y, d, left=s, height=0.6, color=colours[c], alpha=0.9, zorder=3)
+        ax.text(s + d + 0.2, y, name, va="center", fontsize=9)
+    ax.set_yticks([])
+    ax.set_xlabel("Project week")
+    ax.set_xlim(0, 46)
+    ax.set_ylim(0.3, len(tasks) + 0.7)
+    ax.grid(axis="x", ls=":", alpha=0.5, zorder=0)
+    ax.legend(handles=[Patch(color=colours[i], label=phase_lbl[i]) for i in range(4)],
+              loc="lower right", fontsize=8)
+    fig.tight_layout()
+    fig.savefig(OUT / "fig_gantt.pdf")
+    plt.close(fig)
+    print("  [plt] fig_gantt.pdf")
+
+
 # ── 4.0 Backend module / component diagram ──────────────────────────────────────
 def fig_modules():
     body = (
@@ -504,6 +637,46 @@ def fig_latency():
     print(f"  [plt] fig_5_2_latency_dist.pdf  (n={infer.size}, mean={mean:.2f}, p95={p95:.2f})")
 
 
+# ── 5.x Detector training curves (from checkpoint train_results) ────────────────
+def fig_training_curve():
+    if not Path(MODEL).exists():
+        print(f"  [skip] fig_training_curve: missing model {MODEL}")
+        return
+    try:
+        import torch
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception as e:
+        print(f"  [skip] fig_training_curve: {e}")
+        return
+    ck = torch.load(MODEL, map_location="cpu", weights_only=False)
+    tr = ck.get("train_results")
+    if not isinstance(tr, dict) or "epoch" not in tr:
+        print("  [skip] fig_training_curve: no train_results")
+        return
+    ep = tr["epoch"]
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.2))
+    for key, lab in [("train/box_loss", "box"), ("train/cls_loss", "cls"), ("train/dfl_loss", "dfl")]:
+        if key in tr:
+            ax1.plot(ep, tr[key], label=lab, lw=1.6)
+    ax1.set_xlabel("epoch"); ax1.set_ylabel("training loss")
+    ax1.legend(); ax1.grid(ls=":", alpha=0.5); ax1.set_title("Training losses")
+    for key, lab, st in [("metrics/mAP50(B)", "mAP@0.5", "-"),
+                          ("metrics/mAP50-95(B)", "mAP@0.5:0.95", "-"),
+                          ("metrics/precision(B)", "precision", "--"),
+                          ("metrics/recall(B)", "recall", "--")]:
+        if key in tr:
+            ax2.plot(ep, tr[key], label=lab, ls=st, lw=1.5)
+    ax2.set_xlabel("epoch"); ax2.set_ylabel("validation metric")
+    ax2.set_ylim(0, 1); ax2.legend(fontsize=8); ax2.grid(ls=":", alpha=0.5)
+    ax2.set_title("Validation precision / recall / mAP")
+    fig.tight_layout()
+    fig.savefig(OUT / "fig_5_9_training_curve.pdf")
+    plt.close(fig)
+    print(f"  [plt] fig_5_9_training_curve.pdf  ({len(ep)} epochs)")
+
+
 # ── 4.3 Viewport detection montage (cv2 on a real clinical frame) ───────────────
 def fig_viewport():
     if not Path(CLINICAL_FRAME).exists():
@@ -559,9 +732,10 @@ def main():
     fig_yolo(); fig_strongsort(); fig_gstreamer(); fig_usecase()
     fig_architecture(); fig_subprocess_ipc(); fig_fsm(); fig_er()
     fig_detection_flow(); fig_voice(); fig_vlm(); fig_deploy(); fig_lora()
-    fig_bench_method(); fig_capture(); fig_modules()
+    fig_bench_method(); fig_capture(); fig_modules(); fig_userflow(); fig_sitemap()
+    fig_dual_modality(); fig_hardware()
     print("Matplotlib figures:")
-    fig_ws_sequence(); fig_throughput(); fig_latency(); fig_viewport()
+    fig_ws_sequence(); fig_throughput(); fig_latency(); fig_viewport(); fig_training_curve(); fig_gantt()
     print("Done.")
 
 
