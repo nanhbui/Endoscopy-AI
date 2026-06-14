@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { motion as framMotion } from 'framer-motion';
 import {
   AlertTriangle,
@@ -33,7 +33,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { API_BASE } from '@/lib/ws-client';
 import { labelToColor as bboxColorFor, rgba } from '@/lib/lesion-colors';
-import { useAnalysis, type Detection, type DetectionStatus } from '@/context/AnalysisContext';
+import { useAnalysis, useLlmStream, type Detection, type DetectionStatus } from '@/context/AnalysisContext';
 import { useVoiceControl } from '@/hooks/use-voice-control';
 import { VideoSourceModal } from '@/components/video-source-modal';
 import { LesionReportCard } from '@/components/lesion-report-card';
@@ -456,7 +456,6 @@ function SessionReportModal({ detections, onClose, onRestart, onGoReport, isNavi
 
 interface DetectionBarProps {
   detection: Detection;
-  llmInsight: string;
   voiceSupported: boolean;
   isVoiceListening: boolean;
   onExplain: () => void;
@@ -484,11 +483,14 @@ function actionBtnSx(bg: string, hoverBg: string, text: string = '#000') {
   };
 }
 
-function DetectionBar({
-  detection, llmInsight, voiceSupported, isVoiceListening,
+const DetectionBar = memo(function DetectionBar({
+  detection, voiceSupported, isVoiceListening,
   onExplain, onIgnore, onConfirm,
   onQuickConfirm, onReportFalsePositive, onRecheck,
 }: DetectionBarProps) {
+  // Subscribe to the LLM stream here (leaf) so streamed tokens re-render only
+  // this bar, not the whole Workspace.
+  const { llmInsight } = useLlmStream();
   return (
     <Box sx={{ position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 4, px: 2, py: 1.25, backdropFilter: 'blur(14px)', backgroundColor: 'rgba(13,17,23,0.82)', borderTop: '1px solid rgba(245,158,11,0.25)', display: 'flex', alignItems: 'center', gap: 1 }}>
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, flex: 1, minWidth: 0 }}>
@@ -553,7 +555,213 @@ function DetectionBar({
       )}
     </Box>
   );
+});
+
+// ── Detection action buttons (right detail card) ─────────────────────────────
+// Memoized leaf: subscribes to the LLM stream itself so the post/pre-LLM button
+// switch re-renders here only, not the whole Workspace.
+
+interface DetectionActionsProps {
+  pipelineState: string;
+  onExplain: () => void;
+  onQuickConfirm: () => void;
+  onConfirm: () => void;
+  onIgnore: () => void;
+  onRecheck: () => void;
+  onReportFalsePositive: () => void;
 }
+
+const DetectionActions = memo(function DetectionActions({
+  pipelineState, onExplain, onQuickConfirm, onConfirm, onIgnore, onRecheck, onReportFalsePositive,
+}: DetectionActionsProps) {
+  const { llmInsight } = useLlmStream();
+  return (
+    <Box sx={{ px: 2.5, pb: 2, display: 'flex', flexDirection: 'column', gap: 1 }}>
+      {llmInsight ? (
+        <Box sx={{ display: 'flex', gap: 1 }}>
+          <MuiButton
+            variant="contained" fullWidth size="small" onClick={onConfirm}
+            sx={{ borderRadius: '8px', backgroundColor: '#16A34A', color: '#fff', fontWeight: 700, fontSize: '0.78rem', py: 0.85, boxShadow: '0 3px 10px rgba(22,163,74,0.3)', '&:hover': { backgroundColor: '#15803D' } }}
+          >
+            Xác nhận
+          </MuiButton>
+          <MuiButton
+            variant="outlined" fullWidth size="small" onClick={onIgnore}
+            sx={{ borderRadius: '8px', borderColor: 'rgba(146,64,14,0.3)', color: '#92400E', fontWeight: 700, fontSize: '0.78rem', py: 0.85, '&:hover': { backgroundColor: 'rgba(245,158,11,0.08)', borderColor: '#D97706' } }}
+          >
+            Bỏ qua
+          </MuiButton>
+        </Box>
+      ) : pipelineState === 'PROCESSING_LLM' ? (
+        <Box sx={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1, py: 0.85, color: '#0277BD' }}>
+          <CircularProgress size={14} thickness={5} sx={{ color: '#0277BD' }} />
+          <Typography sx={{ fontSize: '0.78rem', fontWeight: 600 }}>
+            LLM đang phân tích…
+          </Typography>
+        </Box>
+      ) : (
+        <>
+          <Box sx={{ display: 'flex', gap: 0.75 }}>
+            <MuiButton
+              variant="contained" fullWidth size="small" onClick={onExplain}
+              startIcon={<Sparkles size={13} />}
+              sx={{ borderRadius: '8px', backgroundColor: '#D97706', color: '#fff', fontWeight: 700, fontSize: '0.76rem', py: 0.75, boxShadow: '0 2px 8px rgba(217,119,6,0.25)', '&:hover': { backgroundColor: '#B45309' } }}
+            >
+              Giải thích
+            </MuiButton>
+            <MuiButton
+              variant="contained" fullWidth size="small" onClick={onQuickConfirm}
+              startIcon={<CheckCircle2 size={13} />}
+              sx={{ borderRadius: '8px', backgroundColor: '#16A34A', color: '#fff', fontWeight: 700, fontSize: '0.76rem', py: 0.75, boxShadow: '0 2px 8px rgba(22,163,74,0.25)', '&:hover': { backgroundColor: '#15803D' } }}
+            >
+              Xác nhận luôn
+            </MuiButton>
+          </Box>
+          <Box sx={{ display: 'flex', justifyContent: 'center', gap: 0.75 }}>
+            <Tooltip title="Kiểm tra lại — AI dò với ngưỡng thấp hơn" arrow>
+              <IconButton size="small" onClick={onRecheck}
+                aria-label="Kiểm tra lại với ngưỡng thấp hơn"
+                sx={{ color: '#7C3AED', border: '1px solid rgba(124,58,237,0.35)', borderRadius: '8px', p: 0.7, '&:hover': { backgroundColor: 'rgba(124,58,237,0.08)', borderColor: '#7C3AED' } }}>
+                <RefreshCw size={15} />
+              </IconButton>
+            </Tooltip>
+            <Tooltip title="Báo sai — lưu vào DB, các phiên sau auto-skip vùng này" arrow>
+              <IconButton size="small" onClick={onReportFalsePositive}
+                aria-label="Báo false positive (lưu lâu dài)"
+                sx={{ color: '#DC2626', border: '1px solid rgba(220,38,38,0.35)', borderRadius: '8px', p: 0.7, '&:hover': { backgroundColor: 'rgba(220,38,38,0.08)', borderColor: '#DC2626' } }}>
+                <Flag size={15} />
+              </IconButton>
+            </Tooltip>
+            <Tooltip title="Bỏ qua — chỉ session hiện tại" arrow>
+              <IconButton size="small" onClick={onIgnore}
+                aria-label="Bỏ qua detection trong session hiện tại"
+                sx={{ color: '#92400E', border: '1px solid rgba(146,64,14,0.3)', borderRadius: '8px', p: 0.7, '&:hover': { backgroundColor: 'rgba(245,158,11,0.08)', borderColor: '#D97706' } }}>
+                <X size={15} />
+              </IconButton>
+            </Tooltip>
+          </Box>
+        </>
+      )}
+    </Box>
+  );
+});
+
+// ── LLM Smart Log panel ──────────────────────────────────────────────────────
+// Memoized leaf subscribing to the LLM stream — streamed tokens (ReactMarkdown)
+// re-render only this panel.
+
+const LlmSmartLog = memo(function LlmSmartLog({ currentDetection }: { currentDetection: Detection | null }) {
+  const { llmInsight, isListeningVoice } = useLlmStream();
+  return (
+    <Box
+      sx={{
+        backgroundColor: 'background.paper',
+        borderRadius: '16px',
+        border: '1px solid #E2EAE8',
+        boxShadow: '0 2px 12px rgba(13,27,42,0.06)',
+        flex: 1,
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        minHeight: 200,
+      }}
+    >
+      <Box sx={{ px: 2.5, py: 2, borderBottom: '1px solid #E2EAE8', display: 'flex', alignItems: 'center', gap: 1.5, backgroundColor: '#F8FAFB' }}>
+        <Box sx={{ width: 30, height: 30, borderRadius: '8px', backgroundColor: 'rgba(0,96,100,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'primary.main' }}>
+          <Bot size={16} />
+        </Box>
+        <Box sx={{ flex: 1 }}>
+          <Typography variant="caption" sx={{ fontWeight: 700, color: 'text.primary', display: 'block' }}>
+            LLM Smart Log
+          </Typography>
+          <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: '0.7rem' }}>
+            Phân tích ngữ nghĩa theo thời gian thực
+          </Typography>
+        </Box>
+        {isListeningVoice && (
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, color: '#0277BD' }}>
+            <CircularProgress size={12} thickness={5} sx={{ color: '#0277BD' }} />
+            <Typography variant="caption" sx={{ fontWeight: 600, color: '#0277BD', fontSize: '0.7rem' }}>
+              Đang phân tích
+            </Typography>
+          </Box>
+        )}
+      </Box>
+
+      <Box sx={{ p: 2.5, flex: 1, overflowY: 'auto' }}>
+        {isListeningVoice && !llmInsight ? (
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.25 }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+              <CircularProgress size={14} thickness={5} sx={{ color: '#0277BD' }} />
+              <Typography variant="caption" sx={{ color: '#0277BD', fontWeight: 600 }}>
+                AI đang phân tích tổn thương…
+              </Typography>
+            </Box>
+            <Box sx={{ borderRadius: '10px', border: '1px solid #E2EAE8', overflow: 'hidden' }}>
+              <Box sx={{ height: 8, backgroundColor: 'rgba(0,96,100,0.15)' }} />
+              <Box sx={{ p: 1.5, display: 'flex', flexDirection: 'column', gap: 0.75 }}>
+                <SkeletonBar width="35%" height={10} />
+                <SkeletonBar width="75%" height={14} />
+                <SkeletonBar width="100%" height={4} />
+              </Box>
+            </Box>
+            {[0, 1, 2].map((i) => (
+              <Box key={i} sx={{ borderRadius: '8px', border: '1px solid #E2EAE8', p: 1 }}>
+                <SkeletonBar width="40%" height={10} />
+                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.4, mt: 0.75 }}>
+                  <SkeletonBar width="90%" height={8} />
+                  <SkeletonBar width="80%" height={8} />
+                  <SkeletonBar width="60%" height={8} />
+                </Box>
+              </Box>
+            ))}
+          </Box>
+        ) : currentDetection?.lesionReport ? (
+          <MotionBox initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.4 }}>
+            <DisclaimerBanner />
+            <LesionReportCard report={currentDetection.lesionReport} />
+          </MotionBox>
+        ) : llmInsight ? (
+          <MotionBox initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.4 }}>
+            <Box sx={{
+              fontSize: '0.875rem',
+              lineHeight: 1.75,
+              color: 'text.primary',
+              '& p': { margin: '0 0 10px' },
+              '& p:last-child': { marginBottom: 0 },
+              '& strong': { fontWeight: 700, color: '#004D40' },
+              '& p:has(strong:first-of-type)': {
+                borderLeft: '3px solid #00897B',
+                paddingLeft: '10px',
+                margin: '0 0 6px',
+                backgroundColor: 'rgba(0,137,123,0.04)',
+                borderRadius: '0 6px 6px 0',
+              },
+              '& ul, & ol': { paddingLeft: '1.1rem', margin: '4px 0 10px' },
+              '& li': { marginBottom: '4px', listStyleType: 'none', paddingLeft: 0 },
+              '& li input[type="checkbox"]': {
+                marginRight: '7px', accentColor: '#006064',
+                width: 14, height: 14, verticalAlign: 'middle',
+                cursor: 'default',
+              },
+              '& h1, & h2, & h3': { fontSize: '0.9rem', fontWeight: 700, color: '#004D40', margin: '10px 0 4px' },
+              '& code': { backgroundColor: 'rgba(0,96,100,0.1)', borderRadius: '4px', padding: '1px 5px', fontSize: '0.82rem' },
+            }}>
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{llmInsight}</ReactMarkdown>
+            </Box>
+          </MotionBox>
+        ) : (
+          <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', py: 4, gap: 1.5, color: 'text.disabled' }}>
+            <MicOff size={28} />
+            <Typography variant="caption" sx={{ textAlign: 'center', maxWidth: 180 }}>
+              Chưa có phân tích. Nhấn &quot;Giải thích thêm&quot; để kích hoạt.
+            </Typography>
+          </Box>
+        )}
+      </Box>
+    </Box>
+  );
+});
 
 // ── Main page ────────────────────────────────────────────────────────────────
 
@@ -566,9 +774,8 @@ export default function Workspace() {
     pipelineState,
     videoId,
     currentDetection,
-    isListeningVoice,
-    llmInsight,
     detections,
+    llmInsightRef,
     sessions,
     currentSessionId,
     startMockAnalysis,
@@ -709,8 +916,9 @@ export default function Workspace() {
   // Refs so onIntent callback always reads current state without stale closure
   const pipelineStateRef = useRef(pipelineState);
   pipelineStateRef.current = pipelineState;
-  const llmInsightRef = useRef(llmInsight);
-  llmInsightRef.current = llmInsight;
+  // llmInsightRef comes from the context (stable identity, mirrors the live
+  // stream value) so the voice "UNKNOWN → follow-up" check reads the current
+  // text without subscribing Workspace to per-token updates.
 
   const { isListening: isVoiceListening, audioLevel, supported: voiceSupported, micError, startListening, stopListening } =
     useVoiceControl({
@@ -1082,7 +1290,7 @@ export default function Workspace() {
                       </Box>
                     )}
                     {pipelineState === 'PAUSED_WAITING_INPUT' && currentDetection && (
-                      <DetectionBar detection={currentDetection} llmInsight={llmInsight} voiceSupported={voiceSupported} isVoiceListening={isVoiceListening} onExplain={explainMore} onIgnore={handleIgnoreTracked} onConfirm={confirmDetection} onQuickConfirm={handleQuickConfirmTracked} onReportFalsePositive={reportFalsePositive} onRecheck={() => recheck(0.4)} />
+                      <DetectionBar detection={currentDetection} voiceSupported={voiceSupported} isVoiceListening={isVoiceListening} onExplain={explainMore} onIgnore={handleIgnoreTracked} onConfirm={confirmDetection} onQuickConfirm={handleQuickConfirmTracked} onReportFalsePositive={reportFalsePositive} onRecheck={() => recheck(0.4)} />
                     )}
                     {/* Thumbnail (frame_b64) already has the backend yellow box at the
                         correct position — so we only add a label badge here, NOT a
@@ -1140,7 +1348,7 @@ export default function Workspace() {
                       </Box>
                     )}
                     {pipelineState === 'PAUSED_WAITING_INPUT' && currentDetection && (
-                      <DetectionBar detection={currentDetection} llmInsight={llmInsight} voiceSupported={voiceSupported} isVoiceListening={isVoiceListening} onExplain={explainMore} onIgnore={handleIgnoreTracked} onConfirm={confirmDetection} onQuickConfirm={handleQuickConfirmTracked} onReportFalsePositive={reportFalsePositive} onRecheck={() => recheck(0.4)} />
+                      <DetectionBar detection={currentDetection} voiceSupported={voiceSupported} isVoiceListening={isVoiceListening} onExplain={explainMore} onIgnore={handleIgnoreTracked} onConfirm={confirmDetection} onQuickConfirm={handleQuickConfirmTracked} onReportFalsePositive={reportFalsePositive} onRecheck={() => recheck(0.4)} />
                     )}
 
                     {/* AI bbox overlay on top of video */}
@@ -1408,198 +1616,21 @@ export default function Workspace() {
                     </Box>
                   </Box>
 
-                  {/* Action buttons.
-                      Column layout because pre-LLM state stacks 2 rows
-                      (primary CTAs + secondary icons). Post-LLM state uses
-                      a row inside (2 buttons), so the wrapping flex-column
-                      doesn't visually change the post-LLM look. */}
-                  <Box sx={{ px: 2.5, pb: 2, display: 'flex', flexDirection: 'column', gap: 1 }}>
-                    {llmInsight ? (
-                      <Box sx={{ display: 'flex', gap: 1 }}>
-                        <MuiButton
-                          variant="contained" fullWidth size="small" onClick={confirmDetection}
-                          sx={{ borderRadius: '8px', backgroundColor: '#16A34A', color: '#fff', fontWeight: 700, fontSize: '0.78rem', py: 0.85, boxShadow: '0 3px 10px rgba(22,163,74,0.3)', '&:hover': { backgroundColor: '#15803D' } }}
-                        >
-                          Xác nhận
-                        </MuiButton>
-                        <MuiButton
-                          variant="outlined" fullWidth size="small" onClick={ignoreDetection}
-                          sx={{ borderRadius: '8px', borderColor: 'rgba(146,64,14,0.3)', color: '#92400E', fontWeight: 700, fontSize: '0.78rem', py: 0.85, '&:hover': { backgroundColor: 'rgba(245,158,11,0.08)', borderColor: '#D97706' } }}
-                        >
-                          Bỏ qua
-                        </MuiButton>
-                      </Box>
-                    ) : pipelineState === 'PROCESSING_LLM' ? (
-                      <Box sx={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1, py: 0.85, color: '#0277BD' }}>
-                        <CircularProgress size={14} thickness={5} sx={{ color: '#0277BD' }} />
-                        <Typography sx={{ fontSize: '0.78rem', fontWeight: 600 }}>
-                          LLM đang phân tích…
-                        </Typography>
-                      </Box>
-                    ) : (
-                      // Phase D — pre-LLM. Row 1: 2 primary CTAs full-width.
-                      // Row 2: 3 icon tools centered. Column flex on the parent
-                      // makes them stack vertically.
-                      <>
-                        <Box sx={{ display: 'flex', gap: 0.75 }}>
-                          <MuiButton
-                            variant="contained" fullWidth size="small" onClick={explainMore}
-                            startIcon={<Sparkles size={13} />}
-                            sx={{ borderRadius: '8px', backgroundColor: '#D97706', color: '#fff', fontWeight: 700, fontSize: '0.76rem', py: 0.75, boxShadow: '0 2px 8px rgba(217,119,6,0.25)', '&:hover': { backgroundColor: '#B45309' } }}
-                          >
-                            Giải thích
-                          </MuiButton>
-                          <MuiButton
-                            variant="contained" fullWidth size="small" onClick={quickConfirm}
-                            startIcon={<CheckCircle2 size={13} />}
-                            sx={{ borderRadius: '8px', backgroundColor: '#16A34A', color: '#fff', fontWeight: 700, fontSize: '0.76rem', py: 0.75, boxShadow: '0 2px 8px rgba(22,163,74,0.25)', '&:hover': { backgroundColor: '#15803D' } }}
-                          >
-                            Xác nhận luôn
-                          </MuiButton>
-                        </Box>
-                        <Box sx={{ display: 'flex', justifyContent: 'center', gap: 0.75 }}>
-                          <Tooltip title="Kiểm tra lại — AI dò với ngưỡng thấp hơn" arrow>
-                            <IconButton size="small" onClick={() => recheck(0.4)}
-                              aria-label="Kiểm tra lại với ngưỡng thấp hơn"
-                              sx={{ color: '#7C3AED', border: '1px solid rgba(124,58,237,0.35)', borderRadius: '8px', p: 0.7, '&:hover': { backgroundColor: 'rgba(124,58,237,0.08)', borderColor: '#7C3AED' } }}>
-                              <RefreshCw size={15} />
-                            </IconButton>
-                          </Tooltip>
-                          <Tooltip title="Báo sai — lưu vào DB, các phiên sau auto-skip vùng này" arrow>
-                            <IconButton size="small" onClick={reportFalsePositive}
-                              aria-label="Báo false positive (lưu lâu dài)"
-                              sx={{ color: '#DC2626', border: '1px solid rgba(220,38,38,0.35)', borderRadius: '8px', p: 0.7, '&:hover': { backgroundColor: 'rgba(220,38,38,0.08)', borderColor: '#DC2626' } }}>
-                              <Flag size={15} />
-                            </IconButton>
-                          </Tooltip>
-                          <Tooltip title="Bỏ qua — chỉ session hiện tại" arrow>
-                            <IconButton size="small" onClick={ignoreDetection}
-                              aria-label="Bỏ qua detection trong session hiện tại"
-                              sx={{ color: '#92400E', border: '1px solid rgba(146,64,14,0.3)', borderRadius: '8px', p: 0.7, '&:hover': { backgroundColor: 'rgba(245,158,11,0.08)', borderColor: '#D97706' } }}>
-                              <X size={15} />
-                            </IconButton>
-                          </Tooltip>
-                        </Box>
-                      </>
-                    )}
-                  </Box>
+                  {/* Action buttons — memoized leaf (subscribes to LLM stream). */}
+                  <DetectionActions
+                    pipelineState={pipelineState}
+                    onExplain={explainMore}
+                    onQuickConfirm={quickConfirm}
+                    onConfirm={confirmDetection}
+                    onIgnore={ignoreDetection}
+                    onRecheck={() => recheck(0.4)}
+                    onReportFalsePositive={reportFalsePositive}
+                  />
                 </MotionBox>
               )}
 
-              {/* LLM Smart Log */}
-              <Box
-                sx={{
-                  backgroundColor: 'background.paper',
-                  borderRadius: '16px',
-                  border: '1px solid #E2EAE8',
-                  boxShadow: '0 2px 12px rgba(13,27,42,0.06)',
-                  flex: 1,
-                  display: 'flex',
-                  flexDirection: 'column',
-                  overflow: 'hidden',
-                  minHeight: 200,
-                }}
-              >
-                <Box sx={{ px: 2.5, py: 2, borderBottom: '1px solid #E2EAE8', display: 'flex', alignItems: 'center', gap: 1.5, backgroundColor: '#F8FAFB' }}>
-                  <Box sx={{ width: 30, height: 30, borderRadius: '8px', backgroundColor: 'rgba(0,96,100,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'primary.main' }}>
-                    <Bot size={16} />
-                  </Box>
-                  <Box sx={{ flex: 1 }}>
-                    <Typography variant="caption" sx={{ fontWeight: 700, color: 'text.primary', display: 'block' }}>
-                      LLM Smart Log
-                    </Typography>
-                    <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: '0.7rem' }}>
-                      Phân tích ngữ nghĩa theo thời gian thực
-                    </Typography>
-                  </Box>
-                  {isListeningVoice && (
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, color: '#0277BD' }}>
-                      <CircularProgress size={12} thickness={5} sx={{ color: '#0277BD' }} />
-                      <Typography variant="caption" sx={{ fontWeight: 600, color: '#0277BD', fontSize: '0.7rem' }}>
-                        Đang phân tích
-                      </Typography>
-                    </Box>
-                  )}
-                </Box>
-
-                <Box sx={{ p: 2.5, flex: 1, overflowY: 'auto' }}>
-                  {isListeningVoice && !llmInsight ? (
-                    // Phase C2 — skeleton instead of a single spinner. Gives
-                    // the doctor a sense of what's coming and feels less like
-                    // the page is frozen during the ~5s LLM call.
-                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.25 }}>
-                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                        <CircularProgress size={14} thickness={5} sx={{ color: '#0277BD' }} />
-                        <Typography variant="caption" sx={{ color: '#0277BD', fontWeight: 600 }}>
-                          AI đang phân tích tổn thương…
-                        </Typography>
-                      </Box>
-                      {/* Hero placeholder — severity stripe + title row */}
-                      <Box sx={{ borderRadius: '10px', border: '1px solid #E2EAE8', overflow: 'hidden' }}>
-                        <Box sx={{ height: 8, backgroundColor: 'rgba(0,96,100,0.15)' }} />
-                        <Box sx={{ p: 1.5, display: 'flex', flexDirection: 'column', gap: 0.75 }}>
-                          <SkeletonBar width="35%" height={10} />
-                          <SkeletonBar width="75%" height={14} />
-                          <SkeletonBar width="100%" height={4} />
-                        </Box>
-                      </Box>
-                      {/* 3 section placeholders matching LesionReportCard layout */}
-                      {[0, 1, 2].map((i) => (
-                        <Box key={i} sx={{ borderRadius: '8px', border: '1px solid #E2EAE8', p: 1 }}>
-                          <SkeletonBar width="40%" height={10} />
-                          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.4, mt: 0.75 }}>
-                            <SkeletonBar width="90%" height={8} />
-                            <SkeletonBar width="80%" height={8} />
-                            <SkeletonBar width="60%" height={8} />
-                          </Box>
-                        </Box>
-                      ))}
-                    </Box>
-                  ) : currentDetection?.lesionReport ? (
-                    <MotionBox initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.4 }}>
-                      <DisclaimerBanner />
-                      <LesionReportCard report={currentDetection.lesionReport} />
-                    </MotionBox>
-                  ) : llmInsight ? (
-                    <MotionBox initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.4 }}>
-                      <Box sx={{
-                        fontSize: '0.875rem',
-                        lineHeight: 1.75,
-                        color: 'text.primary',
-                        '& p': { margin: '0 0 10px' },
-                        '& p:last-child': { marginBottom: 0 },
-                        '& strong': { fontWeight: 700, color: '#004D40' },
-                        // Each **Bold:** line gets a subtle section divider
-                        '& p:has(strong:first-of-type)': {
-                          borderLeft: '3px solid #00897B',
-                          paddingLeft: '10px',
-                          margin: '0 0 6px',
-                          backgroundColor: 'rgba(0,137,123,0.04)',
-                          borderRadius: '0 6px 6px 0',
-                        },
-                        '& ul, & ol': { paddingLeft: '1.1rem', margin: '4px 0 10px' },
-                        '& li': { marginBottom: '4px', listStyleType: 'none', paddingLeft: 0 },
-                        '& li input[type="checkbox"]': {
-                          marginRight: '7px', accentColor: '#006064',
-                          width: 14, height: 14, verticalAlign: 'middle',
-                          cursor: 'default',
-                        },
-                        '& h1, & h2, & h3': { fontSize: '0.9rem', fontWeight: 700, color: '#004D40', margin: '10px 0 4px' },
-                        '& code': { backgroundColor: 'rgba(0,96,100,0.1)', borderRadius: '4px', padding: '1px 5px', fontSize: '0.82rem' },
-                      }}>
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{llmInsight}</ReactMarkdown>
-                      </Box>
-                    </MotionBox>
-                  ) : (
-                    <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', py: 4, gap: 1.5, color: 'text.disabled' }}>
-                      <MicOff size={28} />
-                      <Typography variant="caption" sx={{ textAlign: 'center', maxWidth: 180 }}>
-                        Chưa có phân tích. Nhấn &quot;Giải thích thêm&quot; để kích hoạt.
-                      </Typography>
-                    </Box>
-                  )}
-                </Box>
-              </Box>
+              {/* LLM Smart Log — memoized leaf (subscribes to LLM stream). */}
+              <LlmSmartLog currentDetection={currentDetection} />
             </Box>
           </Grid>
         </Grid>

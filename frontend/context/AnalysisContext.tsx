@@ -163,9 +163,12 @@ interface AnalysisContextType {
   // ── legacy UI compat props (alias to current session detections) ──
   isPlaying: boolean;
   currentDetection: Detection | null;
-  isListeningVoice: boolean;
-  llmInsight: string;
   detections: Detection[];
+  /** Live LLM stream value lives in a SEPARATE context (useLlmStream) so the
+   *  whole tree doesn't re-render on every streamed token. This stable ref
+   *  mirrors it for logic that needs the current value without subscribing
+   *  (e.g. the voice "UNKNOWN → follow-up" decision). */
+  llmInsightRef: { readonly current: string };
 
   // ── actions ──
   uploadOnly: (file: File, onProgress?: (pct: number) => void) => Promise<void>;
@@ -219,6 +222,15 @@ interface AnalysisContextType {
 }
 
 const AnalysisContext = createContext<AnalysisContextType | undefined>(undefined);
+
+// High-frequency LLM stream state lives in its own context so that streaming a
+// report token-by-token only re-renders the components that actually display it
+// (DetectionBar + the insight panel), not every useAnalysis() consumer.
+interface LlmStreamContextType {
+  llmInsight: string;
+  isListeningVoice: boolean;
+}
+const LlmStreamContext = createContext<LlmStreamContextType | undefined>(undefined);
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -992,9 +1004,8 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       currentSessionId,
       isPlaying,
       currentDetection,
-      isListeningVoice,
-      llmInsight,
       detections,
+      llmInsightRef,
       uploadOnly,
       uploadAndConnect,
       connectLive,
@@ -1029,7 +1040,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
     }),
     [
       isConnected, pipelineState, videoId, sessions, currentSessionId, isPlaying,
-      currentDetection, isListeningVoice, llmInsight, detections,
+      currentDetection, detections, llmInsightRef,
       uploadOnly, uploadAndConnect, connectLive, prepareFromLibrary, selectFromLibrary,
       startMockAnalysis, resetPipeline, ignoreDetection,
       explainMore, followUpChat, confirmDetection, resumePlayback,
@@ -1042,11 +1053,31 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
     ],
   );
 
-  return <AnalysisContext.Provider value={value}>{children}</AnalysisContext.Provider>;
+  // Separate value for the streaming context — only changes when the LLM text
+  // or the listening flag changes, isolating those frequent updates.
+  const llmValue = useMemo<LlmStreamContextType>(
+    () => ({ llmInsight, isListeningVoice }),
+    [llmInsight, isListeningVoice],
+  );
+
+  return (
+    <AnalysisContext.Provider value={value}>
+      <LlmStreamContext.Provider value={llmValue}>{children}</LlmStreamContext.Provider>
+    </AnalysisContext.Provider>
+  );
 }
 
 export function useAnalysis(): AnalysisContextType {
   const ctx = useContext(AnalysisContext);
   if (!ctx) throw new Error("useAnalysis must be used within AnalysisProvider");
+  return ctx;
+}
+
+/** Subscribe ONLY to the live LLM stream (llmInsight + isListeningVoice).
+ *  Use this in the leaf components that render the streaming text so token
+ *  updates don't re-render the whole workspace. */
+export function useLlmStream(): LlmStreamContextType {
+  const ctx = useContext(LlmStreamContext);
+  if (!ctx) throw new Error("useLlmStream must be used within AnalysisProvider");
   return ctx;
 }
