@@ -1071,6 +1071,15 @@ async def ws_analysis(websocket: WebSocket, video_id: str):
                     logger.info("Skip confirmed-capture matching a reported false-positive: {}",
                                 lesion.get("label"))
                     continue  # don't forward to FE
+                # Track quick-confirmed ("Xác nhận luôn") lesions per session so
+                # the EOS summary counts them — they never go through the
+                # explain → lesion_report flow that the summary normally reads.
+                sess.setdefault("confirmed_captures", []).append({
+                    "frame_index": evt["data"].get("frame_index"),
+                    "label": lesion.get("label", ""),
+                    "confidence": lesion.get("confidence"),
+                    "bbox": list(lesion.get("bbox", [])),
+                })
 
             try:
                 async with _ws_lock:
@@ -1657,14 +1666,18 @@ async def _stream_session_summary(websocket: WebSocket, sess: dict,
             await websocket.send_json(data)
 
     reports = get_lesion_reports_for_session(video_id)
-    if not reports:
+    quick_confirmed = sess.get("confirmed_captures", [])
+    if not reports and not quick_confirmed:
         logger.info("Session summary skipped: no reports for {}", video_id)
         await _send({"event": "SESSION_SUMMARY_DONE",
                      "data": {"summary": None, "reason": "no_reports"}})
         return
 
-    confirmed_count = len(sess.get("confirmed_detections", []))
-    ignored_count = max(0, len(reports) - confirmed_count)
+    # Quick-confirmed ("Xác nhận luôn") lesions never create a lesion_report, so
+    # fold them into the confirmed count + summary input explicitly.
+    paused_confirmed = len(sess.get("confirmed_detections", []))
+    confirmed_count = paused_confirmed + len(quick_confirmed)
+    ignored_count = max(0, len(reports) - paused_confirmed)
 
     client = _get_llm_client()
     if client is None:
@@ -1680,6 +1693,7 @@ async def _stream_session_summary(websocket: WebSocket, sess: dict,
         confirmed_count=confirmed_count,
         ignored_count=ignored_count,
         duration_seconds=0,  # TODO: track session start_ts to compute duration
+        quick_confirmed=quick_confirmed,
     )
 
     messages = [

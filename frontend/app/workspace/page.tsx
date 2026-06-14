@@ -1,6 +1,6 @@
 'use client';
 
-import { memo, useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { motion as framMotion } from 'framer-motion';
 import {
   AlertTriangle,
@@ -33,7 +33,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { API_BASE } from '@/lib/ws-client';
 import { labelToColor as bboxColorFor, rgba } from '@/lib/lesion-colors';
-import { useAnalysis, useLlmStream, type Detection, type DetectionStatus } from '@/context/AnalysisContext';
+import { useAnalysis, useLlmStream, sessionFindings, type Detection, type DetectionStatus } from '@/context/AnalysisContext';
 import { useVoiceControl } from '@/hooks/use-voice-control';
 import { VideoSourceModal } from '@/components/video-source-modal';
 import { LesionReportCard } from '@/components/lesion-report-card';
@@ -803,6 +803,13 @@ export default function Workspace() {
   // Phase B — pull the active session's Phase B state (summary + chat).
   const currentSession = sessions.find((s) => s.id === currentSessionId);
 
+  // End-of-session report findings = paused detections + quick-confirmed ("Xác
+  // nhận luôn") captures (shared helper, deduped by track id).
+  const eosReportItems = useMemo<Detection[]>(
+    () => sessionFindings({ detections, captures: currentSession?.captures }),
+    [detections, currentSession],
+  );
+
   // Source mode
   const [sourceMode, setSourceMode] = useState<'video' | 'live'>('video');
   const [isSourceModalOpen, setIsSourceModalOpen] = useState(false);
@@ -1129,7 +1136,7 @@ export default function Workspace() {
         {/* ── Session Report Modal (replaces the small EOS dialog) ── */}
         {pipelineState === 'EOS_SUMMARY' && (
           <SessionReportModal
-            detections={detections}
+            detections={eosReportItems}
             onClose={() => {
               stopListening();
               setTranscriptLog([]);

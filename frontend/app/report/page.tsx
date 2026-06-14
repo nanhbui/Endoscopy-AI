@@ -8,7 +8,7 @@ import {
   AlertTriangle, CheckCircle2, CircleX, Clock, Download, FileText,
   ScanSearch, Sparkles, Trash2, Video, X, Zap, Radio, FolderOpen, Upload, ChevronLeft,
 } from 'lucide-react';
-import { useAnalysis, type Detection, type DetectionStatus, type Session } from '@/context/AnalysisContext';
+import { useAnalysis, sessionFindings, type Detection, type DetectionStatus, type Session } from '@/context/AnalysisContext';
 import { listDbSessions, type DbSessionRow } from '@/lib/ws-client';
 import { labelToColor } from '@/lib/lesion-colors';
 import { fmtDateTime as fmtDate, fmtClock as fmtTs } from '@/lib/format';
@@ -648,7 +648,11 @@ export default function ReportPage() {
     const byId = new Map<string, Session>();
     for (const s of dbSessions) byId.set(s.id, s);
     for (const s of sessions) byId.set(s.id, s);   // local overrides DB (richer)
-    return [...byId.values()].sort((a, b) => b.startedAt - a.startedAt);
+    // Fold quick-confirmed ("Xác nhận luôn") captures into detections so cards,
+    // stats, the detail modal and PDF all include them.
+    return [...byId.values()]
+      .map((s) => ({ ...s, detections: sessionFindings(s) }))
+      .sort((a, b) => b.startedAt - a.startedAt);
   }, [dbSessions, sessions]);
 
   const openSession = useMemo(

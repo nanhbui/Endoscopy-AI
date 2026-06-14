@@ -15,7 +15,7 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { AlertTriangle, Printer, X } from 'lucide-react';
-import { useAnalysis, type Detection } from '@/context/AnalysisContext';
+import { useAnalysis, sessionFindings, type Detection } from '@/context/AnalysisContext';
 import { fmtDateTime as fmtDate, fmtClock as fmtTs } from '@/lib/format';
 
 // ── Severity → label/color mapping (kept inline to avoid component deps) ────
@@ -74,7 +74,9 @@ export default function PrintReportPage() {
   }
 
   const summary = session.summary;
-  const detections = session.detections;
+  // Include quick-confirmed ("Xác nhận luôn") captures in the PDF, not just
+  // paused detections.
+  const detections = sessionFindings(session);
   const sevTotals = detections.reduce(
     (acc, d) => {
       const k = (d.lesionReport?.conclusion?.severity ?? '—') as string;

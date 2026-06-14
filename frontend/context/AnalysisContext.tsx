@@ -245,6 +245,40 @@ const MAX_SESSIONS = 10;
 // NEXT_PUBLIC_ENABLE_MOCK=1 only for UI demos without a backend.
 const MOCK_ENABLED = process.env.NEXT_PUBLIC_ENABLE_MOCK === "1";
 
+// IoU threshold for matching an auto-capture against a just-reported "Báo sai"
+// region, so the confirmed-captures panel + report retract a lesion the doctor
+// rejected (otherwise a confirmed-luôn capture lingers after Báo sai).
+const CAPTURE_FP_IOU = 0.5;
+
+type Bbox = { x: number; y: number; width: number; height: number };
+function bboxIou(a: Bbox, b: Bbox): number {
+  const ix = Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x));
+  const iy = Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
+  const inter = ix * iy;
+  const union = a.width * a.height + b.width * b.height - inter;
+  return union > 0 ? inter / union : 0;
+}
+
+/** All findings for a session = paused detections + quick-confirmed ("Xác nhận
+ *  luôn") captures mapped to confirmed entries (deduped by track id). Shared by
+ *  the end-of-session report, the /report history and the PDF export so quick
+ *  confirms aren't dropped. */
+export function sessionFindings(s: { detections: Detection[]; captures?: CapturedDetection[] }): Detection[] {
+  const dets = s.detections ?? [];
+  const caps = (s.captures ?? [])
+    .filter((c) => !dets.some((d) => d.trackId != null && d.trackId >= 0 && d.trackId === c.trackId))
+    .map<Detection>((c) => ({
+      label: c.label,
+      confidence: c.confidence,
+      bbox: c.bbox,
+      timestamp: c.timestamp,
+      trackId: c.trackId,
+      frame_b64: c.frame_b64,
+      status: "confirmed",
+    }));
+  return [...dets, ...caps];
+}
+
 function toDetection(d: DetectionData): Detection {
   const [x1, y1, x2, y2] = d.lesion.bbox;
   return {
@@ -817,10 +851,21 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
   const reportFalsePositive = useCallback(() => {
     if (!wsRef.current) return;
     wsRef.current.send({ action: "ACTION_REPORT_FALSE_POSITIVE" });
-    updateCurrentSession((sess) => ({
-      ...sess,
-      detections: sess.detections.map((d, i) => (i === 0 ? { ...d, status: "ignored" } : d)),
-    }));
+    updateCurrentSession((sess) => {
+      const fp = sess.detections[0];
+      return {
+        ...sess,
+        detections: sess.detections.map((d, i) => (i === 0 ? { ...d, status: "ignored" } : d)),
+        // Retract any auto-capture overlapping the rejected region so a
+        // "Báo sai" lesion no longer lingers in the "Xác nhận luôn" panel
+        // (and is excluded from the end-of-session report).
+        captures: fp
+          ? (sess.captures ?? []).filter(
+              (c) => !(c.label === fp.label && bboxIou(c.bbox, fp.bbox) >= CAPTURE_FP_IOU),
+            )
+          : sess.captures,
+      };
+    });
     setPipelineState("PLAYING");
     setCurrentDetection(null);
     llmInsightRef.current = ""; setLlmInsight("");
