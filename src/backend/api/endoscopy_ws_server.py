@@ -71,6 +71,7 @@ from db import (                                                       # noqa: E
     save_false_positive, load_all_false_positives, matches_false_positive,
     save_confirmed_lesion, load_all_confirmed_lesions,
     delete_confirmed_lesions_matching, delete_false_positives_matching,
+    clear_false_positives, clear_confirmed_lesions, memory_counts,
     list_all_sessions,
     save_session_summary, get_session_summary,
     append_qa_message, get_qa_history,
@@ -99,6 +100,59 @@ LLM_MODEL_FOLLOWUP = os.getenv("OPENAI_MODEL_FOLLOWUP", "gpt-4o-mini")
 LLM_BACKEND     = os.getenv("LLM_BACKEND", "openai").lower()
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL", "qwen2.5vl:7b")
+
+# ── Runtime config (Settings panel) ───────────────────────────────────────────
+# Detection-sensitivity tunables that the (spawned) pipeline worker reads from
+# os.environ at module import. The worker is spawned per session, so updating
+# os.environ here makes the NEXT session pick up new values. Persisted to data/
+# so it survives restarts; loaded on startup before any session.
+_CONFIG_FILE = _REPO_ROOT / "data" / "runtime_config.json"
+# field → (env var, default) — matches pipeline_controller CONFIDENCE_THRESHOLD
+# + CLASS_CONF_THRESHOLDS.
+_CONFIG_FIELDS = {
+    "conf_global":   ("ENDOSCOPY_CONF", "0.5"),
+    "conf_viem_tq":  ("CONF_VIEM_TQ",   "0.60"),
+    "conf_viem_dd":  ("CONF_VIEM_DD",   "0.60"),
+    "conf_ut_tq":    ("CONF_UT_TQ",     "0.75"),
+    "conf_ut_dd":    ("CONF_UT_DD",     "0.75"),
+    "conf_loet_htt": ("CONF_LOET_HTT",  "0.60"),
+}
+
+
+def _current_config() -> dict:
+    out = {}
+    for k, (env, dflt) in _CONFIG_FIELDS.items():
+        try:
+            out[k] = round(float(os.environ.get(env, dflt)), 2)
+        except ValueError:
+            out[k] = float(dflt)
+    return out
+
+
+def _apply_config(cfg: dict) -> None:
+    for k, (env, _d) in _CONFIG_FIELDS.items():
+        if cfg.get(k) is not None:
+            os.environ[env] = str(cfg[k])
+
+
+def _load_runtime_config() -> None:
+    try:
+        if _CONFIG_FILE.exists():
+            _apply_config(json.loads(_CONFIG_FILE.read_text()))
+            logger.info("Loaded runtime config from {}", _CONFIG_FILE)
+    except Exception as exc:
+        logger.warning("Could not load runtime config: {}", exc)
+
+
+def _save_runtime_config() -> None:
+    try:
+        _CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _CONFIG_FILE.write_text(json.dumps(_current_config(), ensure_ascii=False, indent=2))
+    except Exception as exc:
+        logger.warning("Could not save runtime config: {}", exc)
+
+
+_load_runtime_config()
 
 # Phase C1 — hard timeout for any LLM completion call. Prevents the UI from
 # hanging indefinitely when Ollama is stuck / OOM / context overflow. 90s
@@ -344,6 +398,83 @@ _get_openai = _get_llm_client
 @app.get("/health")
 async def health():
     return {"status": "ok", "active_sessions": len(_sessions)}
+
+
+# ── Settings: config + system status + AI-memory management ───────────────────
+
+@app.get("/config")
+async def get_config():
+    """Current detection-sensitivity config (applied to the next session)."""
+    return {"config": _current_config()}
+
+
+@app.post("/config")
+async def update_config(payload: dict):
+    """Update detection thresholds. Confidence values clamped to [0.05, 0.95].
+    Applies to the NEXT analysis session (worker reads env on spawn)."""
+    clean: dict = {}
+    for k in _CONFIG_FIELDS:
+        if k in (payload or {}):
+            try:
+                clean[k] = round(min(0.95, max(0.05, float(payload[k]))), 2)
+            except (TypeError, ValueError):
+                pass
+    if not clean:
+        raise HTTPException(status_code=400, detail="No valid config fields")
+    _apply_config(clean)
+    _save_runtime_config()
+    logger.info("Runtime config updated: {}", clean)
+    return {"ok": True, "config": _current_config(), "applies": "next_session"}
+
+
+@app.post("/config/reset")
+async def reset_config():
+    """Restore default detection thresholds."""
+    for _k, (env, dflt) in _CONFIG_FIELDS.items():
+        os.environ[env] = dflt
+    _save_runtime_config()
+    return {"ok": True, "config": _current_config()}
+
+
+@app.get("/system/status")
+async def system_status():
+    """Read-only system snapshot for the Settings panel."""
+    gpu = None
+    try:
+        r = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,memory.total,memory.used",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            name, total, used = [x.strip() for x in r.stdout.strip().splitlines()[0].split(",")]
+            gpu = {"name": name, "vram_total_mb": int(float(total)), "vram_used_mb": int(float(used))}
+    except Exception:
+        pass
+    return {
+        "gpu": gpu,
+        "llm": {"backend": LLM_BACKEND, "model": _llm_model_name("vision")},
+        "tracker": "StrongSORT + OSNet (ReID)",
+        "model_file": os.environ.get("ENDOSCOPY_MODEL", "best_train6.pt").split("/")[-1],
+        "classes": ["Viêm thực quản", "Viêm dạ dày HP", "Ung thư thực quản",
+                    "Ung thư dạ dày", "Loét hoành tá tràng"],
+        "whisper_model": os.getenv("WHISPER_MODEL", "base"),
+        "memory": memory_counts(),
+        "active_sessions": len(_sessions),
+    }
+
+
+@app.post("/memory/reset")
+async def reset_memory(payload: dict | None = None):
+    """Clear learned memory: 'all' | 'false_positives' | 'confirmed_lesions'."""
+    which = (payload or {}).get("which", "all")
+    removed: dict = {}
+    if which in ("all", "false_positives"):
+        removed["false_positives"] = clear_false_positives()
+    if which in ("all", "confirmed_lesions"):
+        removed["confirmed_lesions"] = clear_confirmed_lesions()
+    logger.info("AI memory reset ({}): {}", which, removed)
+    return {"ok": True, "removed": removed}
 
 # Phase E (replaces /train) — analytics aggregates for the dashboard page.
 # Single endpoint returning everything the frontend page needs so we don't

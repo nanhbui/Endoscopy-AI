@@ -444,6 +444,41 @@ def delete_false_positives_matching(label: str, bbox: list[float]) -> int:
     return _delete_matching("false_positives", label, bbox)
 
 
+def _clear_table(table: str) -> int:
+    """Delete every row from a learned-memory table. Returns rows removed."""
+    try:
+        with _connect() as conn:
+            n = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            conn.execute(f"DELETE FROM {table}")
+            conn.commit()
+            return int(n)
+    except sqlite3.Error as e:
+        logger.error("clear {} failed: {}", table, e)
+        return 0
+
+
+def clear_false_positives() -> int:
+    """Wipe all 'Báo sai' entries (Settings → reset AI memory)."""
+    return _clear_table("false_positives")
+
+
+def clear_confirmed_lesions() -> int:
+    """Wipe all 'Xác nhận luôn' entries (Settings → reset AI memory)."""
+    return _clear_table("confirmed_lesions")
+
+
+def memory_counts() -> dict:
+    """Row counts of the learned-memory tables for the Settings/status panel."""
+    out = {"false_positives": 0, "confirmed_lesions": 0}
+    try:
+        with _connect() as conn:
+            for t in out:
+                out[t] = int(conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0])
+    except sqlite3.Error as e:
+        logger.error("memory_counts failed: {}", e)
+    return out
+
+
 # ── Session history (DB-backed report list) ──────────────────────────────────
 
 def list_all_sessions() -> list[dict]:
