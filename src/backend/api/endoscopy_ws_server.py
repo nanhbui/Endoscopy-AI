@@ -55,7 +55,7 @@ _REPO_ROOT = _HERE.parents[3]
 _PIPELINE_DIR = Path(os.getenv("PIPELINE_DIR", str(_HERE.parents[1] / "pipeline")))
 sys.path.insert(0, str(_PIPELINE_DIR))
 
-from pipeline_controller import PipelineController, PipelineState   # noqa: E402
+from pipeline_controller import PipelineController, PipelineState, build_pipeline_dot   # noqa: E402
 from video_library import VideoLibrary                               # noqa: E402
 from video_proxy import (                                            # noqa: E402
     playback_path, ensure_proxy_async, remove_proxy,
@@ -182,44 +182,19 @@ _DOT_FILE = _DOT_DIR / "endoscopy_pipeline.dot"
 
 
 def _generate_pipeline_dot() -> None:
-    """Build the canonical file-source pipeline, dump its DOT topology, then destroy it.
-    The topology is static (independent of video), so we only need to do this once.
+    """Write the representative pipeline DOT shown before the first session.
 
-    Kept in sync with pipeline_controller._pipeline_worker (commit `realtime sync
-    pipeline + UX polish`):
-      - sync=true on appsink so it paces to wall-clock (fixes the old
-        "48 frames then EOS" race where decoder raced ahead of Python)
-      - max-buffers=2 drop=true so realtime-lag never exceeds ~2 frames
-      - queue WITHOUT leaky (back-pressures decoder when YOLO is busy)
-      - explicit videoconvert before queue matches the worker layout
-
-    The worker overwrites this DOT file with the real per-session pipeline
-    once a session starts, so this representative graph only matters before
-    the first session.
+    Uses the shared hand-authored builder (build_pipeline_dot) so the graph is
+    clean + complete — the previous Gst.parse_launch("filesrc location=/dev/null
+    ! qtdemux ! …") approach produced an INCOMPLETE graph because qtdemux's
+    dynamic pads never negotiate without real data, cutting the chain off after
+    the demuxer. The worker overwrites this file with the real per-session
+    pipeline (correct source/decoder) once a session starts.
     """
     try:
-        import gi
-        gi.require_version("Gst", "1.0")
-        from gi.repository import Gst
-        Gst.init(None)
-
-        # Representative pipeline string (file source, CPU h264 path).
-        # Matches the .mp4 branch of _pipeline_worker line 362-364 + the
-        # _SINK_TAIL definition at line 311.
-        pipeline_str = (
-            "filesrc location=/dev/null"
-            " ! qtdemux"
-            " ! h264parse"
-            " ! avdec_h264"
-            " ! videoconvert"
-            " ! queue max-size-buffers=4 max-size-time=0 max-size-bytes=0"
-            " ! appsink name=sink sync=true max-buffers=2 drop=true"
-        )
-        pipe = Gst.parse_launch(pipeline_str)
         _DOT_DIR.mkdir(parents=True, exist_ok=True)
-        dot_data = Gst.debug_bin_to_dot_data(pipe, Gst.DebugGraphDetails.ALL)
-        _DOT_FILE.write_text(dot_data)
-        pipe.set_state(Gst.State.NULL)
+        # Canonical file-source H.264 path (the common upload case).
+        _DOT_FILE.write_text(build_pipeline_dot("file", "avdec_h264", "h264parse", scaled=False))
         logger.info("Pipeline DOT graph written → {} (representative file-source)", _DOT_FILE)
     except Exception as exc:
         logger.warning("Could not generate pipeline DOT: {}", exc)
