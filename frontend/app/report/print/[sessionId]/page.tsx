@@ -15,7 +15,8 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { AlertTriangle, Printer, X } from 'lucide-react';
-import { useAnalysis, type Detection } from '@/context/AnalysisContext';
+import { useAnalysis, sessionFindings, type Detection } from '@/context/AnalysisContext';
+import { fmtDateTime as fmtDate, fmtClock as fmtTs } from '@/lib/format';
 
 // ── Severity → label/color mapping (kept inline to avoid component deps) ────
 
@@ -32,19 +33,6 @@ const CATEGORY = {
   tai_kham:   'Tái khám',
 } as const;
 
-// Format helpers — kept local since this page is self-contained.
-function fmtDate(ms: number) {
-  return new Date(ms).toLocaleString('vi-VN', {
-    day: '2-digit', month: '2-digit', year: 'numeric',
-    hour: '2-digit', minute: '2-digit',
-  });
-}
-function fmtTs(secs: number) {
-  const m = Math.floor(secs / 60);
-  const s = Math.floor(secs % 60);
-  return m > 0 ? `${m} phút ${s} giây` : `${s} giây`;
-}
-
 // ── Page ────────────────────────────────────────────────────────────────────
 
 export default function PrintReportPage() {
@@ -56,6 +44,14 @@ export default function PrintReportPage() {
     [sessions, params.sessionId],
   );
   const didAutoPrintRef = useRef(false);
+  // Stamp the generation time AFTER mount, written imperatively into the footer
+  // node. Calling Date.now() during render is impure (react-hooks/purity) and
+  // mirroring it via setState would trip react-hooks/set-state-in-effect — a
+  // plain DOM write in an effect sidesteps both while staying SSR-safe.
+  useEffect(() => {
+    const el = document.getElementById('report-generated-at');
+    if (el) el.textContent = fmtDate(Date.now());
+  }, []);
 
   // Auto-open browser print dialog once data is hydrated. Single-fire guard
   // because StrictMode in dev mounts twice.
@@ -78,7 +74,9 @@ export default function PrintReportPage() {
   }
 
   const summary = session.summary;
-  const detections = session.detections;
+  // Include quick-confirmed ("Xác nhận luôn") captures in the PDF, not just
+  // paused detections.
+  const detections = sessionFindings(session);
   const sevTotals = detections.reduce(
     (acc, d) => {
       const k = (d.lesionReport?.conclusion?.severity ?? '—') as string;
@@ -244,7 +242,7 @@ export default function PrintReportPage() {
           Mọi quyết định lâm sàng (sinh thiết, điều trị) phải do bác sĩ phê duyệt.
         </div>
         <div className="generated">
-          Sinh ngày {fmtDate(Date.now())} · Powered by Qwen2.5-VL 7B
+          Sinh ngày <span id="report-generated-at">…</span> · Powered by Qwen2.5-VL 7B
         </div>
       </footer>
 

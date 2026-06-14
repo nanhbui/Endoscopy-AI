@@ -13,36 +13,12 @@ import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import {
   Activity, ArrowRight, Brain, ChevronRight, FileBarChart, Mic,
-  MessageSquareText, Play, Radio, ScanSearch, Sparkles, UploadCloud, Zap,
+  Play, Radio, ScanSearch, Sparkles, UploadCloud,
 } from 'lucide-react';
 import { useAnalysis } from '@/context/AnalysisContext';
 import { API_BASE } from '@/lib/ws-client';
+import { C, HERO_GRADIENT } from '@/lib/ui-tokens';
 import { PipelineGraphSection as GstPipelineGraph } from '@/components/pipeline-graph-section';
-
-// Hardcoded copies of the most-visible token values. Used directly in inline
-// styles where var(--token) resolution failed during initial migration (the
-// Tailwind v4 PostCSS pipeline sometimes drops nested @import). Keeps the
-// page rendering even if tokens.css briefly doesn't load.
-const HERO_GRADIENT = 'linear-gradient(135deg, #003A3D 0%, #006064 45%, #00838F 100%)';
-const C = {
-  teal600:   '#006064',
-  teal700:   '#004D50',
-  teal100:   '#C6E0E1',
-  neutral800: '#222B2A',
-  neutral700: '#36403F',
-  neutral600: '#4F5C5B',
-  neutral500: '#6E7C7B',
-  neutral400: '#9BA9A8',
-  neutral300: '#C9D4D3',
-  neutral200: '#E2EAE9',
-  neutral100: '#EEF2F2',
-  neutral50:  '#F7FAFA',
-  borderSubtle: '#E2EAE9',
-  bgSubtle:  '#F1F5F5',
-  bgPaper:   '#FFFFFF',
-  bgApp:     '#F7FAFA',
-  shadowSm:  '0 1px 2px rgba(13,27,42,0.04), 0 1px 1px rgba(13,27,42,0.03)',
-} as const;
 
 // ── KPI overview type — mirrors /analytics/overview when available ──────────
 // We tolerate the endpoint being missing (Phase E hasn't landed yet on this
@@ -55,12 +31,6 @@ interface OverviewResp {
     false_positives?: number;
   };
 }
-
-const SEV_COLOR: Record<string, string> = {
-  'thấp':       'var(--sev-ulcer)',
-  'trung bình': 'var(--sev-inflam)',
-  'cao':        'var(--sev-cancer)',
-};
 
 const SOURCE_LABEL: Record<string, { txt: string; icon: React.ReactNode }> = {
   upload:  { txt: 'Tải lên',    icon: <UploadCloud size={11} /> },
@@ -92,11 +62,17 @@ export default function Home() {
 
   // Derived from sessions[] — used when /analytics isn't available.
   const totalFindings = sessions.reduce((s, sess) => s + sess.detections.length, 0);
+  // Confirmed = detections the doctor accepted (confirmed or analyzed). A real,
+  // derivable figure — replaces the old hardcoded "91.4% accuracy" placeholder
+  // which was never sourced from the backend.
+  const totalConfirmed = sessions.reduce(
+    (s, sess) => s + sess.detections.filter((d) => d.status === 'confirmed' || d.status === 'analyzed').length,
+    0,
+  );
   const heroStats = {
     sessions: overview?.sessions ?? sessions.length,
     findings: overview?.findings ?? totalFindings,
-    // Accuracy is static — model performance metric, not derivable per-session.
-    accuracy: '91.4%',
+    confirmed: totalConfirmed,
   };
 
   const recentSessions = sessions.slice(0, 6);
@@ -147,7 +123,7 @@ export default function Home() {
 function Hero({
   stats, hasSessions,
 }: {
-  stats: { sessions: number; findings: number; accuracy: string };
+  stats: { sessions: number; findings: number; confirmed: number };
   hasSessions: boolean;
 }) {
   return (
@@ -261,7 +237,7 @@ function Hero({
               {[
                 { v: stats.sessions.toLocaleString(),  l: 'Phiên đã phân tích',  sub: sessionCountCopy(stats.sessions) },
                 { v: stats.findings.toLocaleString(), l: 'Tổn thương phát hiện', sub: 'theo dõi toàn bộ' },
-                { v: stats.accuracy,                  l: 'Độ chính xác mô hình', sub: 'YOLO v8 · 30 fps' },
+                { v: stats.confirmed.toLocaleString(), l: 'Tổn thương đã xác nhận', sub: 'bác sĩ đã duyệt' },
               ].map((s) => (
                 <div key={s.l} style={{ padding: '24px 20px', background: 'rgba(0,40,42,0.35)' }}>
                   <div

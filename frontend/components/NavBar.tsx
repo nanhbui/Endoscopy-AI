@@ -10,10 +10,12 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { useState } from 'react';
 import {
   Microscope, Gauge, ScanLine, ScrollText, BarChart3, BookOpen, Settings,
 } from 'lucide-react';
 import { AiHealthBadge } from '@/components/ai-health-badge';
+import { SettingsModal } from '@/components/settings-modal';
 
 const navItems = [
   { href: '/',          label: 'Dashboard', icon: Gauge },
@@ -29,6 +31,7 @@ const navItems = [
 
 export default function NavBar() {
   const pathname = usePathname();
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   return (
     <header
@@ -144,6 +147,7 @@ export default function NavBar() {
           <button
             aria-label="Cài đặt"
             type="button"
+            onClick={() => setSettingsOpen(true)}
             style={{
               width: 36, height: 36, borderRadius: 8,
               background: 'transparent', border: '1px solid var(--border-subtle)',
@@ -194,6 +198,8 @@ export default function NavBar() {
           .nav-right > [aria-label='Cài đặt'] { display: none !important; }
         }
       `}</style>
+
+      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </header>
   );
 }

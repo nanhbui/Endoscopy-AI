@@ -498,7 +498,8 @@ def build_session_qa_messages(summary: dict | None, reports: list[dict],
 def build_session_summary_input(reports: list[dict],
                                  confirmed_count: int = 0,
                                  ignored_count: int = 0,
-                                 duration_seconds: int = 0) -> str:
+                                 duration_seconds: int = 0,
+                                 quick_confirmed: list[dict] | None = None) -> str:
     """Format the list of per-detection lesion reports as the user-side input.
 
     The model receives a compact text dump of every report (no images — those
@@ -511,9 +512,10 @@ def build_session_summary_input(reports: list[dict],
     has {frame_index, report (full LesionReport dict), generated_at, model,
     label, severity}.
     """
+    qc = quick_confirmed or []
     lines = [
         f"## Thống kê phiên",
-        f"- Tổng số finding: {len(reports)}",
+        f"- Tổng số finding: {len(reports) + len(qc)}",
         f"- Thời lượng: {duration_seconds} giây",
         f"- Đã xác nhận: {confirmed_count}",
         f"- Bỏ qua / báo sai: {ignored_count}",
@@ -543,6 +545,17 @@ def build_session_summary_input(reports: list[dict],
         ])
         for r in recs[:5]:
             lines.append(f"  · {r}")
+
+    # Quick-confirmed lesions ("Xác nhận luôn") — confirmed by the doctor but
+    # not run through the per-frame LLM analysis, so they have no detailed
+    # report. List them so the summary still accounts for them.
+    if qc:
+        lines.append("")
+        lines.append("## Tổn thương 'Xác nhận luôn' (bác sĩ xác nhận nhanh, chưa phân tích LLM chi tiết)")
+        for i, q in enumerate(qc, 1):
+            conf = q.get("confidence")
+            conf_str = f", conf {conf}" if conf is not None else ""
+            lines.append(f"- #{i} {q.get('label', '?')} — frame {q.get('frame_index', '?')}{conf_str}")
 
     lines.extend([
         "",

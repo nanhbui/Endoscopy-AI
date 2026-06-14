@@ -8,8 +8,10 @@ import {
   AlertTriangle, CheckCircle2, CircleX, Clock, Download, FileText,
   ScanSearch, Sparkles, Trash2, Video, X, Zap, Radio, FolderOpen, Upload, ChevronLeft,
 } from 'lucide-react';
-import { useAnalysis, type Detection, type DetectionStatus, type Session } from '@/context/AnalysisContext';
+import { useAnalysis, sessionFindings, type Detection, type DetectionStatus, type Session } from '@/context/AnalysisContext';
 import { listDbSessions, type DbSessionRow } from '@/lib/ws-client';
+import { labelToColor } from '@/lib/lesion-colors';
+import { fmtDateTime as fmtDate, fmtClock as fmtTs } from '@/lib/format';
 import { SessionSummaryPanel } from '@/components/session-summary-panel';
 
 /** Map a DB-backed session row to the UI Session shape. DB rows have no frame
@@ -64,22 +66,6 @@ function getSeverity(confidence: number) {
   if (confidence >= SEVERITY_THRESHOLDS.medium)
     return { label: 'Trung bình', color: '#D97706', bg: 'rgba(245,158,11,0.12)', light: 'rgba(245,158,11,0.06)' };
   return { label: 'Nhẹ', color: '#059669', bg: 'rgba(5,150,105,0.1)', light: 'rgba(5,150,105,0.05)' };
-}
-
-function fmtTs(seconds: number): string {
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return m > 0 ? `${m} phút ${String(s).padStart(2, '0')} giây` : `${s} giây`;
-}
-
-function fmtDate(ms: number): string {
-  const d = new Date(ms);
-  const dd = String(d.getDate()).padStart(2, '0');
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const yyyy = d.getFullYear();
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mi = String(d.getMinutes()).padStart(2, '0');
-  return `${dd}/${mm}/${yyyy} ${hh}:${mi}`;
 }
 
 function trimName(name: string, max = 42): string {
@@ -164,9 +150,7 @@ function DetectionModal({
                   style={{ display: 'block', maxWidth: '100%', maxHeight: '80vh', width: 'auto', height: 'auto' }}
                 />
                 {(() => {
-                  const _c = (/ung thư|ung thu/i.test(det.label) ? '#C44E52'
-                            : /loét|loet/i.test(det.label)       ? '#55A868'
-                            :                                       '#DD8452');
+                  const _c = labelToColor(det.label);
                   // The thumbnail (frame_b64) already has the backend yellow box at
                   // the correct position; show only a label badge, not a second box.
                   return (
@@ -664,7 +648,11 @@ export default function ReportPage() {
     const byId = new Map<string, Session>();
     for (const s of dbSessions) byId.set(s.id, s);
     for (const s of sessions) byId.set(s.id, s);   // local overrides DB (richer)
-    return [...byId.values()].sort((a, b) => b.startedAt - a.startedAt);
+    // Fold quick-confirmed ("Xác nhận luôn") captures into detections so cards,
+    // stats, the detail modal and PDF all include them.
+    return [...byId.values()]
+      .map((s) => ({ ...s, detections: sessionFindings(s) }))
+      .sort((a, b) => b.startedAt - a.startedAt);
   }, [dbSessions, sessions]);
 
   const openSession = useMemo(

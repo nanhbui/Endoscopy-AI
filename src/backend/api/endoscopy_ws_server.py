@@ -71,6 +71,7 @@ from db import (                                                       # noqa: E
     save_false_positive, load_all_false_positives, matches_false_positive,
     save_confirmed_lesion, load_all_confirmed_lesions,
     delete_confirmed_lesions_matching, delete_false_positives_matching,
+    clear_false_positives, clear_confirmed_lesions, memory_counts,
     list_all_sessions,
     save_session_summary, get_session_summary,
     append_qa_message, get_qa_history,
@@ -106,6 +107,59 @@ LLM_MODEL_FOLLOWUP = os.getenv("OPENAI_MODEL_FOLLOWUP", "gpt-4o-mini")
 LLM_BACKEND     = os.getenv("LLM_BACKEND", "openai").lower()
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL", "qwen2.5vl:7b")
+
+# ── Runtime config (Settings panel) ───────────────────────────────────────────
+# Detection-sensitivity tunables that the (spawned) pipeline worker reads from
+# os.environ at module import. The worker is spawned per session, so updating
+# os.environ here makes the NEXT session pick up new values. Persisted to data/
+# so it survives restarts; loaded on startup before any session.
+_CONFIG_FILE = _REPO_ROOT / "data" / "runtime_config.json"
+# field → (env var, default) — matches pipeline_controller CONFIDENCE_THRESHOLD
+# + CLASS_CONF_THRESHOLDS.
+_CONFIG_FIELDS = {
+    "conf_global":   ("ENDOSCOPY_CONF", "0.5"),
+    "conf_viem_tq":  ("CONF_VIEM_TQ",   "0.60"),
+    "conf_viem_dd":  ("CONF_VIEM_DD",   "0.60"),
+    "conf_ut_tq":    ("CONF_UT_TQ",     "0.75"),
+    "conf_ut_dd":    ("CONF_UT_DD",     "0.75"),
+    "conf_loet_htt": ("CONF_LOET_HTT",  "0.60"),
+}
+
+
+def _current_config() -> dict:
+    out = {}
+    for k, (env, dflt) in _CONFIG_FIELDS.items():
+        try:
+            out[k] = round(float(os.environ.get(env, dflt)), 2)
+        except ValueError:
+            out[k] = float(dflt)
+    return out
+
+
+def _apply_config(cfg: dict) -> None:
+    for k, (env, _d) in _CONFIG_FIELDS.items():
+        if cfg.get(k) is not None:
+            os.environ[env] = str(cfg[k])
+
+
+def _load_runtime_config() -> None:
+    try:
+        if _CONFIG_FILE.exists():
+            _apply_config(json.loads(_CONFIG_FILE.read_text()))
+            logger.info("Loaded runtime config from {}", _CONFIG_FILE)
+    except Exception as exc:
+        logger.warning("Could not load runtime config: {}", exc)
+
+
+def _save_runtime_config() -> None:
+    try:
+        _CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _CONFIG_FILE.write_text(json.dumps(_current_config(), ensure_ascii=False, indent=2))
+    except Exception as exc:
+        logger.warning("Could not save runtime config: {}", exc)
+
+
+_load_runtime_config()
 
 # Phase C1 — hard timeout for any LLM completion call. Prevents the UI from
 # hanging indefinitely when Ollama is stuck / OOM / context overflow. 90s
@@ -188,46 +242,75 @@ _DOT_DIR = Path(os.getenv("GST_DEBUG_DUMP_DOT_DIR", "/tmp/gst-dot"))
 _DOT_FILE = _DOT_DIR / "endoscopy_pipeline.dot"
 
 
+def _find_sample_video() -> "str | None":
+    """Pick any real .mp4 to preroll for the representative graph. Dynamic-pad
+    demuxers (qtdemux) only negotiate pads with real data, so /dev/null yields
+    an incomplete graph — a real sample gives the full native topology."""
+    import glob
+    for root in (UPLOAD_DIR, LIBRARY_DIR, _REPO_ROOT / "data" / "lab"):
+        vids = sorted(glob.glob(str(Path(root) / "*.mp4")))
+        if vids:
+            return vids[0]
+    return None
+
+
 def _generate_pipeline_dot() -> None:
-    """Build the canonical file-source pipeline, dump its DOT topology, then destroy it.
-    The topology is static (independent of video), so we only need to do this once.
+    """Write the pipeline DOT shown before the first session, using GStreamer's
+    NATIVE Gst.debug_bin_to_dot_data() so the dashboard graph is the real
+    library output (matches the worker's per-session dump + the thesis figure).
 
-    Kept in sync with pipeline_controller._pipeline_worker (commit `realtime sync
-    pipeline + UX polish`):
-      - sync=true on appsink so it paces to wall-clock (fixes the old
-        "48 frames then EOS" race where decoder raced ahead of Python)
-      - max-buffers=2 drop=true so realtime-lag never exceeds ~2 frames
-      - queue WITHOUT leaky (back-pressures decoder when YOLO is busy)
-      - explicit videoconvert before queue matches the worker layout
-
-    The worker overwrites this DOT file with the real per-session pipeline
-    once a session starts, so this representative graph only matters before
-    the first session.
+    We preroll a REAL sample video to PAUSED so qtdemux's dynamic pads negotiate
+    and the FULL chain is captured (the old /dev/null source produced a graph
+    cut off right after the demuxer). The worker overwrites this file with the
+    real per-session pipeline once a session starts.
     """
     try:
+        sample = _find_sample_video()
+        if not sample:
+            logger.warning("Pipeline DOT: no sample .mp4 found — skipping representative graph "
+                           "(it will be generated from the first real session)")
+            return
+
+        # Probe codec to mirror the worker's decoder choice (avoids NVMM buffers).
+        codec = "h264"
+        try:
+            pr = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream=codec_name", "-of",
+                 "default=noprint_wrappers=1:nokey=1", sample],
+                capture_output=True, text=True, timeout=10,
+            )
+            codec = pr.stdout.strip() or "h264"
+        except Exception:
+            pass
+
+        if codec == "h264":
+            chain = "qtdemux ! h264parse ! avdec_h264 ! videoconvert"
+        elif codec == "hevc":
+            chain = "qtdemux ! h265parse ! avdec_h265 ! videoconvert"
+        elif codec == "mpeg4":
+            chain = "qtdemux ! avdec_mpeg4 ! videoconvert"
+        else:
+            chain = "decodebin ! videoconvert"
+
         import gi
         gi.require_version("Gst", "1.0")
         from gi.repository import Gst
         Gst.init(None)
-
-        # Representative pipeline string (file source, CPU h264 path).
-        # Matches the .mp4 branch of _pipeline_worker line 362-364 + the
-        # _SINK_TAIL definition at line 311.
         pipeline_str = (
-            "filesrc location=/dev/null"
-            " ! qtdemux"
-            " ! h264parse"
-            " ! avdec_h264"
-            " ! videoconvert"
+            f'filesrc location="{sample}" ! {chain}'
             " ! queue max-size-buffers=4 max-size-time=0 max-size-bytes=0"
             " ! appsink name=sink sync=true max-buffers=2 drop=true"
         )
         pipe = Gst.parse_launch(pipeline_str)
+        pipe.set_state(Gst.State.PAUSED)
+        pipe.get_state(3 * Gst.SECOND)  # wait for preroll → pads + caps negotiated
         _DOT_DIR.mkdir(parents=True, exist_ok=True)
         dot_data = Gst.debug_bin_to_dot_data(pipe, Gst.DebugGraphDetails.ALL)
         _DOT_FILE.write_text(dot_data)
         pipe.set_state(Gst.State.NULL)
-        logger.info("Pipeline DOT graph written → {} (representative file-source)", _DOT_FILE)
+        logger.info("Pipeline DOT graph written → {} (native, prerolled {} [{}])",
+                    _DOT_FILE, Path(sample).name, codec)
     except Exception as exc:
         logger.warning("Could not generate pipeline DOT: {}", exc)
 
@@ -322,6 +405,83 @@ _get_openai = _get_llm_client
 @app.get("/health")
 async def health():
     return {"status": "ok", "active_sessions": len(_sessions)}
+
+
+# ── Settings: config + system status + AI-memory management ───────────────────
+
+@app.get("/config")
+async def get_config():
+    """Current detection-sensitivity config (applied to the next session)."""
+    return {"config": _current_config()}
+
+
+@app.post("/config")
+async def update_config(payload: dict):
+    """Update detection thresholds. Confidence values clamped to [0.05, 0.95].
+    Applies to the NEXT analysis session (worker reads env on spawn)."""
+    clean: dict = {}
+    for k in _CONFIG_FIELDS:
+        if k in (payload or {}):
+            try:
+                clean[k] = round(min(0.95, max(0.05, float(payload[k]))), 2)
+            except (TypeError, ValueError):
+                pass
+    if not clean:
+        raise HTTPException(status_code=400, detail="No valid config fields")
+    _apply_config(clean)
+    _save_runtime_config()
+    logger.info("Runtime config updated: {}", clean)
+    return {"ok": True, "config": _current_config(), "applies": "next_session"}
+
+
+@app.post("/config/reset")
+async def reset_config():
+    """Restore default detection thresholds."""
+    for _k, (env, dflt) in _CONFIG_FIELDS.items():
+        os.environ[env] = dflt
+    _save_runtime_config()
+    return {"ok": True, "config": _current_config()}
+
+
+@app.get("/system/status")
+async def system_status():
+    """Read-only system snapshot for the Settings panel."""
+    gpu = None
+    try:
+        r = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,memory.total,memory.used",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            name, total, used = [x.strip() for x in r.stdout.strip().splitlines()[0].split(",")]
+            gpu = {"name": name, "vram_total_mb": int(float(total)), "vram_used_mb": int(float(used))}
+    except Exception:
+        pass
+    return {
+        "gpu": gpu,
+        "llm": {"backend": LLM_BACKEND, "model": _llm_model_name("vision")},
+        "tracker": "StrongSORT + OSNet (ReID)",
+        "model_file": os.environ.get("ENDOSCOPY_MODEL", "best_train6.pt").split("/")[-1],
+        "classes": ["Viêm thực quản", "Viêm dạ dày HP", "Ung thư thực quản",
+                    "Ung thư dạ dày", "Loét hoành tá tràng"],
+        "whisper_model": os.getenv("WHISPER_MODEL", "base"),
+        "memory": memory_counts(),
+        "active_sessions": len(_sessions),
+    }
+
+
+@app.post("/memory/reset")
+async def reset_memory(payload: dict | None = None):
+    """Clear learned memory: 'all' | 'false_positives' | 'confirmed_lesions'."""
+    which = (payload or {}).get("which", "all")
+    removed: dict = {}
+    if which in ("all", "false_positives"):
+        removed["false_positives"] = clear_false_positives()
+    if which in ("all", "confirmed_lesions"):
+        removed["confirmed_lesions"] = clear_confirmed_lesions()
+    logger.info("AI memory reset ({}): {}", which, removed)
+    return {"ok": True, "removed": removed}
 
 # Phase E (replaces /train) — analytics aggregates for the dashboard page.
 # Single endpoint returning everything the frontend page needs so we don't
@@ -1079,6 +1239,15 @@ async def ws_analysis(websocket: WebSocket, video_id: str):
                     logger.info("Skip confirmed-capture matching a reported false-positive: {}",
                                 lesion.get("label"))
                     continue  # don't forward to FE
+                # Track quick-confirmed ("Xác nhận luôn") lesions per session so
+                # the EOS summary counts them — they never go through the
+                # explain → lesion_report flow that the summary normally reads.
+                sess.setdefault("confirmed_captures", []).append({
+                    "frame_index": evt["data"].get("frame_index"),
+                    "label": lesion.get("label", ""),
+                    "confidence": lesion.get("confidence"),
+                    "bbox": list(lesion.get("bbox", [])),
+                })
 
             try:
                 async with _ws_lock:
@@ -1673,14 +1842,18 @@ async def _stream_session_summary(websocket: WebSocket, sess: dict,
             await websocket.send_json(data)
 
     reports = get_lesion_reports_for_session(video_id)
-    if not reports:
+    quick_confirmed = sess.get("confirmed_captures", [])
+    if not reports and not quick_confirmed:
         logger.info("Session summary skipped: no reports for {}", video_id)
         await _send({"event": "SESSION_SUMMARY_DONE",
                      "data": {"summary": None, "reason": "no_reports"}})
         return
 
-    confirmed_count = len(sess.get("confirmed_detections", []))
-    ignored_count = max(0, len(reports) - confirmed_count)
+    # Quick-confirmed ("Xác nhận luôn") lesions never create a lesion_report, so
+    # fold them into the confirmed count + summary input explicitly.
+    paused_confirmed = len(sess.get("confirmed_detections", []))
+    confirmed_count = paused_confirmed + len(quick_confirmed)
+    ignored_count = max(0, len(reports) - paused_confirmed)
 
     client = _get_llm_client()
     if client is None:
@@ -1696,6 +1869,7 @@ async def _stream_session_summary(websocket: WebSocket, sess: dict,
         confirmed_count=confirmed_count,
         ignored_count=ignored_count,
         duration_seconds=0,  # TODO: track session start_ts to compute duration
+        quick_confirmed=quick_confirmed,
     )
 
     messages = [

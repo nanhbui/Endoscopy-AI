@@ -22,21 +22,7 @@ import {
   Boxes, CircleCheck, CircleAlert, CirclePause, Stethoscope,
   ShieldCheck, RotateCcw, Ban, Cpu, Network,
 } from 'lucide-react';
-
-// Bản sao cứng của các token hay dùng — dự phòng khi var(--token) chưa load
-// (Tailwind v4 PostCSS đôi khi rớt @import lồng nhau), giống app/page.tsx.
-const HERO_GRADIENT = 'linear-gradient(135deg, #003A3D 0%, #006064 45%, #00838F 100%)';
-const C = {
-  teal600: '#006064', teal700: '#004D50', teal100: '#C6E0E1', teal50: '#E6F2F2',
-  neutral800: '#222B2A', neutral700: '#36403F', neutral600: '#4F5C5B',
-  neutral500: '#6E7C7B', neutral400: '#9BA9A8', neutral300: '#C9D4D3',
-  neutral200: '#E2EAE9', neutral100: '#EEF2F2', neutral50: '#F7FAFA',
-  borderSubtle: '#E2EAE9', bgSubtle: '#F1F5F5', bgPaper: '#FFFFFF',
-  shadowSm: '0 1px 2px rgba(13,27,42,0.04), 0 1px 1px rgba(13,27,42,0.03)',
-  sevCancer: '#C44E52', sevInflam: '#DD8452', sevUlcer: '#55A868',
-  stAnalyzed: '#0277BD', stConfirmed: '#059669', stProcessing: '#6366F1',
-  stDetected: '#D97706', stIgnored: '#9AA5B1',
-} as const;
+import { C, HERO_GRADIENT } from '@/lib/ui-tokens';
 
 const SECTIONS = [
   { id: 'tong-quan', n: '01', label: 'Tổng quan' },

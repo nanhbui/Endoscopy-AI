@@ -163,9 +163,12 @@ interface AnalysisContextType {
   // ── legacy UI compat props (alias to current session detections) ──
   isPlaying: boolean;
   currentDetection: Detection | null;
-  isListeningVoice: boolean;
-  llmInsight: string;
   detections: Detection[];
+  /** Live LLM stream value lives in a SEPARATE context (useLlmStream) so the
+   *  whole tree doesn't re-render on every streamed token. This stable ref
+   *  mirrors it for logic that needs the current value without subscribing
+   *  (e.g. the voice "UNKNOWN → follow-up" decision). */
+  llmInsightRef: { readonly current: string };
 
   // ── actions ──
   uploadOnly: (file: File, onProgress?: (pct: number) => void) => Promise<void>;
@@ -220,6 +223,15 @@ interface AnalysisContextType {
 
 const AnalysisContext = createContext<AnalysisContextType | undefined>(undefined);
 
+// High-frequency LLM stream state lives in its own context so that streaming a
+// report token-by-token only re-renders the components that actually display it
+// (DetectionBar + the insight panel), not every useAnalysis() consumer.
+interface LlmStreamContextType {
+  llmInsight: string;
+  isListeningVoice: boolean;
+}
+const LlmStreamContext = createContext<LlmStreamContextType | undefined>(undefined);
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 const FRAME_W = 1920;
@@ -228,22 +240,43 @@ const FRAME_H = 1080;
 const STORAGE_KEY = "gastroeye:sessions:v1";
 const MAX_SESSIONS = 10;
 
-// IoU between two bboxes in the shared percent-of-1920×1080 space (Detection and
-// CapturedDetection both use {x, y, width, height} as %). Kept >= the worker's
-// ENDOSCOPY_CONFIRM_IOU so "Báo sai" retracts the same region the worker captured.
+// Demo/offline mock is OFF by default so fabricated detections + LLM text never
+// leak into real sessions (and persisted history). Enable explicitly with
+// NEXT_PUBLIC_ENABLE_MOCK=1 only for UI demos without a backend.
+const MOCK_ENABLED = process.env.NEXT_PUBLIC_ENABLE_MOCK === "1";
+
+// IoU threshold for matching an auto-capture against a just-reported "Báo sai"
+// region, so the confirmed-captures panel + report retract a lesion the doctor
+// rejected (otherwise a confirmed-luôn capture lingers after Báo sai).
 const CAPTURE_FP_IOU = 0.5;
 
-function bboxIou(
-  a: { x: number; y: number; width: number; height: number },
-  b: { x: number; y: number; width: number; height: number },
-): number {
-  const ax2 = a.x + a.width, ay2 = a.y + a.height;
-  const bx2 = b.x + b.width, by2 = b.y + b.height;
-  const ix = Math.max(0, Math.min(ax2, bx2) - Math.max(a.x, b.x));
-  const iy = Math.max(0, Math.min(ay2, by2) - Math.max(a.y, b.y));
+type Bbox = { x: number; y: number; width: number; height: number };
+function bboxIou(a: Bbox, b: Bbox): number {
+  const ix = Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x));
+  const iy = Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
   const inter = ix * iy;
-  const ua = a.width * a.height + b.width * b.height - inter;
-  return ua > 0 ? inter / ua : 0;
+  const union = a.width * a.height + b.width * b.height - inter;
+  return union > 0 ? inter / union : 0;
+}
+
+/** All findings for a session = paused detections + quick-confirmed ("Xác nhận
+ *  luôn") captures mapped to confirmed entries (deduped by track id). Shared by
+ *  the end-of-session report, the /report history and the PDF export so quick
+ *  confirms aren't dropped. */
+export function sessionFindings(s: { detections: Detection[]; captures?: CapturedDetection[] }): Detection[] {
+  const dets = s.detections ?? [];
+  const caps = (s.captures ?? [])
+    .filter((c) => !dets.some((d) => d.trackId != null && d.trackId >= 0 && d.trackId === c.trackId))
+    .map<Detection>((c) => ({
+      label: c.label,
+      confidence: c.confidence,
+      bbox: c.bbox,
+      timestamp: c.timestamp,
+      trackId: c.trackId,
+      frame_b64: c.frame_b64,
+      status: "confirmed",
+    }));
+  return [...dets, ...caps];
 }
 
 function toDetection(d: DetectionData): Detection {
@@ -685,6 +718,8 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       connectWs(videoId);
       return;
     }
+    // No real video + mock disabled → do nothing rather than inject fake data.
+    if (!MOCK_ENABLED) return;
     clearMockTimers();
     setPipelineState("PLAYING");
     setCurrentDetection(null);
@@ -741,6 +776,8 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       wsRef.current.send({ action: "ACTION_EXPLAIN" });
       return;
     }
+    // Offline demo only — never fabricate LLM analysis in real (no-WS) sessions.
+    if (!MOCK_ENABLED) return;
     clearMockTimers();
     setIsListeningVoice(true);
     llmInsightRef.current = ""; setLlmInsight("");
@@ -814,19 +851,21 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
   const reportFalsePositive = useCallback(() => {
     if (!wsRef.current) return;
     wsRef.current.send({ action: "ACTION_REPORT_FALSE_POSITIVE" });
-    // Reporting a region false overrides a prior "Xác nhận luôn": pull any
-    // already-shown capture of the same region out of the panel so the
-    // false-positive thumbnail stops appearing under "Đã xác nhận luôn".
-    const fp = currentDetection;
-    updateCurrentSession((sess) => ({
-      ...sess,
-      detections: sess.detections.map((d, i) => (i === 0 ? { ...d, status: "ignored" } : d)),
-      captures: fp
-        ? (sess.captures ?? []).filter(
-            (c) => !(c.label === fp.label && bboxIou(c.bbox, fp.bbox) >= CAPTURE_FP_IOU),
-          )
-        : sess.captures,
-    }));
+    updateCurrentSession((sess) => {
+      const fp = sess.detections[0];
+      return {
+        ...sess,
+        detections: sess.detections.map((d, i) => (i === 0 ? { ...d, status: "ignored" } : d)),
+        // Retract any auto-capture overlapping the rejected region so a
+        // "Báo sai" lesion no longer lingers in the "Xác nhận luôn" panel
+        // (and is excluded from the end-of-session report).
+        captures: fp
+          ? (sess.captures ?? []).filter(
+              (c) => !(c.label === fp.label && bboxIou(c.bbox, fp.bbox) >= CAPTURE_FP_IOU),
+            )
+          : sess.captures,
+      };
+    });
     setPipelineState("PLAYING");
     setCurrentDetection(null);
     llmInsightRef.current = ""; setLlmInsight("");
@@ -1010,9 +1049,8 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       currentSessionId,
       isPlaying,
       currentDetection,
-      isListeningVoice,
-      llmInsight,
       detections,
+      llmInsightRef,
       uploadOnly,
       uploadAndConnect,
       connectLive,
@@ -1047,7 +1085,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
     }),
     [
       isConnected, pipelineState, videoId, sessions, currentSessionId, isPlaying,
-      currentDetection, isListeningVoice, llmInsight, detections,
+      currentDetection, detections, llmInsightRef,
       uploadOnly, uploadAndConnect, connectLive, prepareFromLibrary, selectFromLibrary,
       startMockAnalysis, resetPipeline, ignoreDetection,
       explainMore, followUpChat, confirmDetection, resumePlayback,
@@ -1060,11 +1098,31 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
     ],
   );
 
-  return <AnalysisContext.Provider value={value}>{children}</AnalysisContext.Provider>;
+  // Separate value for the streaming context — only changes when the LLM text
+  // or the listening flag changes, isolating those frequent updates.
+  const llmValue = useMemo<LlmStreamContextType>(
+    () => ({ llmInsight, isListeningVoice }),
+    [llmInsight, isListeningVoice],
+  );
+
+  return (
+    <AnalysisContext.Provider value={value}>
+      <LlmStreamContext.Provider value={llmValue}>{children}</LlmStreamContext.Provider>
+    </AnalysisContext.Provider>
+  );
 }
 
 export function useAnalysis(): AnalysisContextType {
   const ctx = useContext(AnalysisContext);
   if (!ctx) throw new Error("useAnalysis must be used within AnalysisProvider");
+  return ctx;
+}
+
+/** Subscribe ONLY to the live LLM stream (llmInsight + isListeningVoice).
+ *  Use this in the leaf components that render the streaming text so token
+ *  updates don't re-render the whole workspace. */
+export function useLlmStream(): LlmStreamContextType {
+  const ctx = useContext(LlmStreamContext);
+  if (!ctx) throw new Error("useLlmStream must be used within AnalysisProvider");
   return ctx;
 }

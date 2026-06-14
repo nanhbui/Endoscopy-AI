@@ -3,8 +3,6 @@
 import React from 'react';
 import MuiDialog from '@mui/material/Dialog';
 import MuiDialogTitle from '@mui/material/DialogTitle';
-import MuiDialogContent from '@mui/material/DialogContent';
-import MuiDialogActions from '@mui/material/DialogActions';
 import MuiDialogContentText from '@mui/material/DialogContentText';
 import IconButton from '@mui/material/IconButton';
 import CloseIcon from '@mui/icons-material/Close';
@@ -16,7 +14,13 @@ interface DialogContextType {
 
 const DialogContext = React.createContext<DialogContextType | null>(null);
 
-export const Dialog = ({ open, onOpenChange, children }: any) => {
+interface DialogProps {
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  children?: React.ReactNode;
+}
+
+export const Dialog = ({ open, onOpenChange, children }: DialogProps) => {
   const [isOpen, setIsOpen] = React.useState(open || false);
 
   React.useEffect(() => {
@@ -35,46 +39,47 @@ export const Dialog = ({ open, onOpenChange, children }: any) => {
   );
 };
 
-export const DialogTrigger = React.forwardRef<any, any>(({ children, asChild, ...props }, ref) => {
-  const context = React.useContext(DialogContext);
-  if (!context) return null;
+type DivProps = React.ComponentProps<'div'>;
 
-  return (
-    <div
-      ref={ref}
-      onClick={() => context.setOpen(true)}
-      {...props}
-    >
-      {children}
-    </div>
-  );
-});
+export const DialogTrigger = React.forwardRef<HTMLDivElement, DivProps & { asChild?: boolean }>(
+  ({ children, asChild: _asChild, ...props }, ref) => {
+    const context = React.useContext(DialogContext);
+    if (!context) return null;
+
+    return (
+      <div ref={ref} onClick={() => context.setOpen(true)} {...props}>
+        {children}
+      </div>
+    );
+  }
+);
 DialogTrigger.displayName = 'DialogTrigger';
 
-export const DialogPortal = ({ children }: any) => <>{children}</>;
+export const DialogPortal = ({ children }: { children?: React.ReactNode }) => <>{children}</>;
 
-export const DialogClose = React.forwardRef<HTMLButtonElement, any>(({ children, ...props }, ref) => {
-  const context = React.useContext(DialogContext);
-  if (!context) return null;
+export const DialogClose = React.forwardRef<HTMLButtonElement, React.ComponentProps<'button'>>(
+  ({ children, ...props }, ref) => {
+    const context = React.useContext(DialogContext);
+    if (!context) return null;
 
-  return (
-    <button
-      ref={ref}
-      onClick={() => context.setOpen(false)}
-      {...props}
-    >
-      {children}
-    </button>
-  );
-});
+    return (
+      <button ref={ref} onClick={() => context.setOpen(false)} {...props}>
+        {children}
+      </button>
+    );
+  }
+);
 DialogClose.displayName = 'DialogClose';
 
-export const DialogOverlay = React.forwardRef<HTMLDivElement, any>((props, ref) => (
+export const DialogOverlay = React.forwardRef<HTMLDivElement, DivProps>((props, ref) => (
   <div ref={ref} {...props} />
 ));
 DialogOverlay.displayName = 'DialogOverlay';
 
-export const DialogContent = React.forwardRef<HTMLDivElement, any>(
+type DialogContentProps =
+  Omit<React.ComponentProps<typeof MuiDialog>, 'open' | 'onClose'> & { showCloseButton?: boolean };
+
+export const DialogContent = React.forwardRef<HTMLDivElement, DialogContentProps>(
   ({ children, showCloseButton = true, ...props }, ref) => {
     const context = React.useContext(DialogContext);
     if (!context) return null;
@@ -107,22 +112,22 @@ export const DialogContent = React.forwardRef<HTMLDivElement, any>(
 );
 DialogContent.displayName = 'DialogContent';
 
-export const DialogHeader = React.forwardRef<HTMLDivElement, React.ComponentProps<'div'>>(
+export const DialogHeader = React.forwardRef<HTMLDivElement, DivProps>(
   (props, ref) => <div ref={ref} {...props} />
 );
 DialogHeader.displayName = 'DialogHeader';
 
-export const DialogFooter = React.forwardRef<HTMLDivElement, React.ComponentProps<'div'>>(
+export const DialogFooter = React.forwardRef<HTMLDivElement, DivProps>(
   (props, ref) => <div ref={ref} {...props} />
 );
 DialogFooter.displayName = 'DialogFooter';
 
-export const DialogTitle = React.forwardRef<HTMLDivElement, any>(
+export const DialogTitle = React.forwardRef<HTMLDivElement, React.ComponentProps<typeof MuiDialogTitle>>(
   (props, ref) => <MuiDialogTitle ref={ref} {...props} />
 );
 DialogTitle.displayName = 'DialogTitle';
 
-export const DialogDescription = React.forwardRef<HTMLDivElement, any>(
-  (props, ref) => <MuiDialogContentText ref={ref as any} {...props} />
+export const DialogDescription = React.forwardRef<HTMLParagraphElement, React.ComponentProps<typeof MuiDialogContentText>>(
+  (props, ref) => <MuiDialogContentText ref={ref} {...props} />
 );
 DialogDescription.displayName = 'DialogDescription';

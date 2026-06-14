@@ -3,10 +3,10 @@ import MuiCard from '@mui/material/Card';
 import MuiCardContent from '@mui/material/CardContent';
 import MuiCardActions from '@mui/material/CardActions';
 import Box from '@mui/material/Box';
-import Typography from '@mui/material/Typography';
+import Typography, { TypographyProps } from '@mui/material/Typography';
 import { styled } from '@mui/material/styles';
 
-const StyledCard = styled(MuiCard)(({ theme }) => ({
+const StyledCard = styled(MuiCard)(() => ({
   boxShadow: '0 1px 3px rgba(0,0,0,0.12)',
   '&:hover': {
     boxShadow: '0 3px 6px rgba(0,0,0,0.16)',
@@ -44,14 +44,14 @@ export const CardContent = React.forwardRef<HTMLDivElement, React.ComponentProps
 );
 CardContent.displayName = 'CardContent';
 
-export const CardTitle = React.forwardRef<HTMLDivElement, any>(
+export const CardTitle = React.forwardRef<HTMLDivElement, TypographyProps>(
   (props, ref) => (
     <Typography ref={ref} variant="h6" component="div" sx={{ fontWeight: 600, mb: 1 }} {...props} />
   )
 );
 CardTitle.displayName = 'CardTitle';
 
-export const CardDescription = React.forwardRef<HTMLDivElement, any>(
+export const CardDescription = React.forwardRef<HTMLDivElement, TypographyProps>(
   (props, ref) => (
     <Typography ref={ref} variant="body2" color="textSecondary" {...props} />
   )

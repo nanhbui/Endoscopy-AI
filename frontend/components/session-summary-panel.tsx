@@ -256,8 +256,8 @@ function ChatTab({ messages, streaming, onSend }: ChatTabProps) {
             <MessageSquare size={28} />
             <Typography sx={{ fontSize: '0.8rem', textAlign: 'center', maxWidth: 280 }}>
               Hỏi AI về phiên này. Ví dụ:<br />
-              <em>"Tổn thương nào nguy hiểm nhất?"</em><br />
-              <em>"Có cần sinh thiết frame 214 không?"</em>
+              <em>“Tổn thương nào nguy hiểm nhất?”</em><br />
+              <em>“Có cần sinh thiết frame 214 không?”</em>
             </Typography>
           </Box>
         )}

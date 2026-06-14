@@ -190,7 +190,7 @@ export default function AnalyticsPage() {
             </Box>
 
             <Typography sx={{ fontSize: '0.7rem', color: 'text.disabled', textAlign: 'center', mt: 2 }}>
-              Dữ liệu lấy từ SQLite — cập nhật mỗi lần "Làm mới". Không bao gồm session chưa có lesion_report nào.
+              Dữ liệu lấy từ SQLite — cập nhật mỗi lần “Làm mới”. Không bao gồm session chưa có lesion_report nào.
             </Typography>
           </>
         )}
@@ -360,7 +360,7 @@ function FalsePositivesTable({
     <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 0.75, py: 3, color: 'text.disabled' }}>
       <Flag size={24} />
       <Typography sx={{ fontSize: '0.82rem', textAlign: 'center', maxWidth: 380 }}>
-        Chưa có "case sai" nào. Bác sĩ bấm <strong>Báo sai</strong> trong workspace để
+        Chưa có “case sai” nào. Bác sĩ bấm <strong>Báo sai</strong> trong workspace để
         đánh dấu detection nhầm — vùng đó sẽ auto-skip ở các phiên sau.
       </Typography>
     </Box>
