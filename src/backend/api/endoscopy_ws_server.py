@@ -88,6 +88,13 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 LIBRARY_DIR = Path(os.getenv("ENDOSCOPY_LIBRARY_DIR", str(_REPO_ROOT / "data" / "library")))
 LIBRARY_DIR.mkdir(parents=True, exist_ok=True)
 
+# IoU used to match a confirmed-capture against the reported false-positive list
+# when filtering it out of the "Đã xác nhận luôn" panel. MUST stay <= the worker's
+# ENDOSCOPY_CONFIRM_IOU (default 0.5): the worker auto-captures any confirmed
+# region at >= that IoU, so the FP filter has to be at least as loose, otherwise a
+# region overlapping 0.5–0.6 with a "Báo sai" report leaks into the panel.
+_CONFIRM_FP_IOU = float(os.getenv("ENDOSCOPY_CONFIRM_IOU", "0.5"))
+
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 LLM_MODEL_VISION  = os.getenv("OPENAI_MODEL_VISION",  "gpt-4o")
 LLM_MODEL_FOLLOWUP = os.getenv("OPENAI_MODEL_FOLLOWUP", "gpt-4o-mini")
@@ -1067,6 +1074,7 @@ async def ws_analysis(websocket: WebSocket, video_id: str):
                     lesion.get("label", ""),
                     list(lesion.get("bbox", [])),
                     sess.get("false_positives", []),
+                    iou_threshold=_CONFIRM_FP_IOU,
                 ):
                     logger.info("Skip confirmed-capture matching a reported false-positive: {}",
                                 lesion.get("label"))
@@ -1207,6 +1215,14 @@ async def ws_analysis(websocket: WebSocket, video_id: str):
                             reported_at_ms=int(time.time() * 1000),
                             frame_b64=thumb,
                         )
+                        # Tell the worker to drop this region from its in-memory
+                        # confirmed list (symmetric to CONFIRM_LESION). The DB
+                        # delete below does NOT reach the subprocess, so without
+                        # this the worker keeps emitting CONFIRMED_CAPTURE for it
+                        # this run — leaking the reported region into the panel.
+                        if ctrl._cmd_q:
+                            ctrl._cmd_q.put("UNCONFIRM_LESION:" + json.dumps(
+                                {"label": label, "bbox": bbox}))
                         if ok:
                             sess["false_positives"].append({"label": label, "bbox": bbox})
                             # "Báo sai" overrides a prior "Xác nhận luôn" on the same

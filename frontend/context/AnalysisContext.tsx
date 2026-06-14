@@ -228,6 +228,24 @@ const FRAME_H = 1080;
 const STORAGE_KEY = "gastroeye:sessions:v1";
 const MAX_SESSIONS = 10;
 
+// IoU between two bboxes in the shared percent-of-1920×1080 space (Detection and
+// CapturedDetection both use {x, y, width, height} as %). Kept >= the worker's
+// ENDOSCOPY_CONFIRM_IOU so "Báo sai" retracts the same region the worker captured.
+const CAPTURE_FP_IOU = 0.5;
+
+function bboxIou(
+  a: { x: number; y: number; width: number; height: number },
+  b: { x: number; y: number; width: number; height: number },
+): number {
+  const ax2 = a.x + a.width, ay2 = a.y + a.height;
+  const bx2 = b.x + b.width, by2 = b.y + b.height;
+  const ix = Math.max(0, Math.min(ax2, bx2) - Math.max(a.x, b.x));
+  const iy = Math.max(0, Math.min(ay2, by2) - Math.max(a.y, b.y));
+  const inter = ix * iy;
+  const ua = a.width * a.height + b.width * b.height - inter;
+  return ua > 0 ? inter / ua : 0;
+}
+
 function toDetection(d: DetectionData): Detection {
   const [x1, y1, x2, y2] = d.lesion.bbox;
   return {
@@ -796,14 +814,23 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
   const reportFalsePositive = useCallback(() => {
     if (!wsRef.current) return;
     wsRef.current.send({ action: "ACTION_REPORT_FALSE_POSITIVE" });
+    // Reporting a region false overrides a prior "Xác nhận luôn": pull any
+    // already-shown capture of the same region out of the panel so the
+    // false-positive thumbnail stops appearing under "Đã xác nhận luôn".
+    const fp = currentDetection;
     updateCurrentSession((sess) => ({
       ...sess,
       detections: sess.detections.map((d, i) => (i === 0 ? { ...d, status: "ignored" } : d)),
+      captures: fp
+        ? (sess.captures ?? []).filter(
+            (c) => !(c.label === fp.label && bboxIou(c.bbox, fp.bbox) >= CAPTURE_FP_IOU),
+          )
+        : sess.captures,
     }));
     setPipelineState("PLAYING");
     setCurrentDetection(null);
     llmInsightRef.current = ""; setLlmInsight("");
-  }, [updateCurrentSession]);
+  }, [updateCurrentSession, currentDetection]);
 
   // Phase D — request a re-detect on the paused frame at a lower YOLO conf.
   // Result arrives as a fresh DETECTION_FOUND (or RECHECK_EMPTY) via WS,

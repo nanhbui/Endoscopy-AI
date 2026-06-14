@@ -680,6 +680,26 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                             print(f"[Worker] CONFIRM_LESION registered: {_cl['label']}", flush=True)
                     except (ValueError, KeyError):
                         pass
+                elif cmd.startswith("UNCONFIRM_LESION:"):
+                    # "Báo sai" overrides a prior "Xác nhận luôn": drop matching
+                    # entries (label + IoU) from the in-memory confirmed list so
+                    # the worker stops auto-capturing this region for the rest of
+                    # the run. Symmetric to CONFIRM_LESION above.
+                    try:
+                        _ucl = _json.loads(cmd.split(":", 1)[1])
+                        _u_label = _ucl.get("label", "")
+                        _u_bbox = _ucl.get("bbox", [])
+                        if _u_label and len(_u_bbox) >= 4:
+                            _before = len(_confirmed_lesions)
+                            _confirmed_lesions[:] = [
+                                _cl for _cl in _confirmed_lesions
+                                if not (_cl.get("label") == _u_label
+                                        and _iou(_cl.get("bbox", []), _u_bbox) >= _CONFIRM_IOU)
+                            ]
+                            if len(_confirmed_lesions) != _before:
+                                print(f"[Worker] UNCONFIRM_LESION dropped {_before - len(_confirmed_lesions)}: {_u_label}", flush=True)
+                    except (ValueError, KeyError):
+                        pass
                 elif cmd.startswith("MUTE_TRACK:"):
                     # Phase 02 — register a track id as session-muted.
                     # Subsequent frames carrying this id are silently dropped.
