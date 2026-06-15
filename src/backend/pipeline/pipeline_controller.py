@@ -305,11 +305,19 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
     # Spatial-temporal dedup: suppress same lesion area within a time window.
     _DEDUP_WINDOW_MS = int(_os.environ.get("DEDUP_WINDOW_MS", "10000"))  # 10 s
     _DEDUP_IOU = 0.25  # ≥25% overlap = same region
+    # Diffuse diagnoses (viêm) are also merged by REGION, but with a looser IoU
+    # and a longer window: the scope lingers/pans over one inflamed area, so a
+    # slightly-shifted box at the same spot still merges, while a clearly
+    # different region is reported separately.
+    _DIFFUSE_IOU = float(_os.environ.get("ENDOSCOPY_DIFFUSE_IOU", "0.20"))
+    _DIFFUSE_WINDOW_MS = int(_os.environ.get("ENDOSCOPY_DIFFUSE_WINDOW_MS", "30000"))  # 30 s
     _reported_history: list[dict] = []  # {ts_ms, bbox (1920×1080 norm), label}
 
-    def _is_recently_reported(ts_ms: int, bbox: list, label: str) -> bool:
+    def _is_recently_reported(ts_ms: int, bbox: list, label: str,
+                              iou_thr: float = _DEDUP_IOU,
+                              window_ms: int = _DEDUP_WINDOW_MS) -> bool:
         for r in _reported_history:
-            if ts_ms - r["ts_ms"] < _DEDUP_WINDOW_MS and r["label"] == label and _iou(r["bbox"], bbox) >= _DEDUP_IOU:
+            if ts_ms - r["ts_ms"] < window_ms and r["label"] == label and _iou(r["bbox"], bbox) >= iou_thr:
                 return True
         return False
 
@@ -329,27 +337,25 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
         _dedup_by_track_id = _dtid in ("1", "true", "yes", "on")
     reported_track_ids: set[int] = set()
 
-    # Per-label dedup for DIFFUSE / frame-level diagnoses (e.g. "Viêm dạ dày
-    # HP", "Viêm thực quản"). These are not focal lesions: as the scope pans,
-    # YOLO fires on many different mucosa patches — each genuinely a different
-    # image region at a different location/scale, so the tracker (correctly)
-    # gives each a NEW id and ReID cannot merge them. Reporting every patch
-    # floods the doctor with the same diagnosis over and over. So for these we
-    # report ONCE per session (dedup by label). Focal lesions (ung thư, loét,
-    # polyp) stay per-instance — two cancer sites must be two reports.
+    # Region-based dedup for DIFFUSE diagnoses (e.g. "Viêm dạ dày HP", "Viêm
+    # thực quản"). These are not focal lesions: as the scope pans, YOLO fires on
+    # many mucosa patches, each getting a NEW track id, so track-id/ReID dedup
+    # cannot collapse them. They are de-duplicated by REGION instead (see the
+    # detection loop): a viêm at the SAME spot is merged (keeping the first), a
+    # clearly DIFFERENT spot is reported as its own finding. Focal lesions
+    # (ung thư, loét, polyp) keep per-instance track-id dedup.
     # Matched by keyword substring on the cleaned label; override the keyword
     # list with ENDOSCOPY_DIFFUSE_KEYWORDS (comma-separated, "" disables).
     _diffuse_kw = [k.strip().lower()
                    for k in _os.environ.get("ENDOSCOPY_DIFFUSE_KEYWORDS", "viêm").split(",")
                    if k.strip()]
-    reported_diffuse_labels: set[str] = set()
 
     def _is_diffuse(_label: str) -> bool:
         _l = _label.lower()
         return any(k in _l for k in _diffuse_kw)
 
     print(f"[Worker] Dedup mode: {'track_id' if _dedup_by_track_id else 'spatial-temporal'} "
-          f"(tracker={_tracker_kind}) diffuse_once={_diffuse_kw}", flush=True)
+          f"(tracker={_tracker_kind}) diffuse_region={_diffuse_kw}", flush=True)
 
     # ── GStreamer pipeline ────────────────────────────────────────────────
     try:
@@ -1142,12 +1148,16 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                                 print(f"[Worker] CONFIRMED_CAPTURE track_id={track_id} {label} ts_ms={timestamp_ms}", flush=True)
                             continue
 
-                        # Diffuse-diagnosis dedup: report once per session per
-                        # label (HP gastritis / esophagitis fire on many patches
-                        # with a new track id each time — neither track_id nor
-                        # ReID can collapse them, so collapse by label).
+                        # Diffuse-diagnosis dedup BY REGION: viêm fires on many
+                        # patches, each with a NEW track id, so track-id/ReID
+                        # dedup can't collapse them. Merge by spatial overlap
+                        # instead — a viêm at the SAME spot (IoU within the
+                        # diffuse window) is suppressed, a clearly DIFFERENT spot
+                        # is reported as its own finding.
                         if _is_diffuse(label):
-                            if label in reported_diffuse_labels:
+                            if _is_recently_reported(timestamp_ms, xyxy_norm, label,
+                                                     iou_thr=_DIFFUSE_IOU,
+                                                     window_ms=_DIFFUSE_WINDOW_MS):
                                 continue
                         # Track-ID dedup (UTR-Track + OSNet-DCN ReID): a focal
                         # lesion already reported keeps its ID when the scope
@@ -1188,8 +1198,6 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                         }
                         _reported_history.append({"ts_ms": timestamp_ms, "bbox": xyxy_norm, "label": label})
                         reported_track_ids.add(int(track_id))
-                        if _is_diffuse(label):
-                            reported_diffuse_labels.add(label)
                         confirmed.append(det_data)
                         result_q.put({"event": "DETECTION_FOUND", "data": det_data})
                         paused = True
