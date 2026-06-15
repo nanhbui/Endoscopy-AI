@@ -293,13 +293,20 @@ export async function listDbSessions(): Promise<DbSessionRow[]> {
   }
 }
 
-/** Delete a session's durable DB rows (reports, summary, Q&A). Best-effort —
- *  the localStorage copy is removed separately via the context's removeSession. */
-export async function deleteDbSession(sessionId: string): Promise<void> {
+/** Delete a session's durable DB rows (reports, summary, Q&A). Returns true on
+ *  success. Logs a warning on failure (e.g. backend not restarted with the
+ *  DELETE endpoint) — otherwise the session silently reappears on reload. */
+export async function deleteDbSession(sessionId: string): Promise<boolean> {
   try {
-    await fetch(`${API_BASE}/sessions/${sessionId}`, { method: "DELETE" });
-  } catch {
-    /* ignore — local removal still applies */
+    const res = await fetch(`${API_BASE}/sessions/${sessionId}`, { method: "DELETE" });
+    if (!res.ok) {
+      console.warn(`[deleteDbSession] ${res.status} ${res.statusText} — DB row not deleted (restart backend?)`);
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.warn("[deleteDbSession] request failed:", e);
+    return false;
   }
 }
 

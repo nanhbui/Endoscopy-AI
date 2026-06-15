@@ -1046,12 +1046,17 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
   }, [clearMockTimers]);
 
   const removeSession = useCallback((sessionId: string) => {
-    setSessions((prev) => prev.filter((s) => s.id !== sessionId));
+    setSessions((prev) => {
+      const next = prev.filter((s) => s.id !== sessionId);
+      saveSessions(next);   // persist now — deletes must not wait for the 800ms debounce
+      return next;
+    });
     setCurrentSessionId((cur) => (cur === sessionId ? null : cur));
   }, []);
 
   const clearSessions = useCallback(() => {
     setSessions([]);
+    saveSessions([]);       // persist now so a quick reload doesn't restore them
     setCurrentSessionId(null);
   }, []);
 
