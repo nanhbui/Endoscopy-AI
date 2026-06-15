@@ -798,6 +798,8 @@ export default function Workspace() {
     uploadOnly,
     prepareFromLibrary,
     resetAnalysis,
+    finalizeSession,
+    removeSession,
   } = useAnalysis();
 
   // Phase B — pull the active session's Phase B state (summary + chat).
@@ -954,6 +956,22 @@ export default function Workspace() {
     }
   }, [pipelineState, voiceSupported, isVoiceListening, startListening]);
 
+  // Analysis is "active" (a session in progress) — used to guard against losing
+  // it on navigation / tab close. EOS_SUMMARY is the report stage, not active.
+  const isAnalysisActive =
+    pipelineState === 'PLAYING' ||
+    pipelineState === 'PAUSED_WAITING_INPUT' ||
+    pipelineState === 'PROCESSING_LLM';
+
+  // Warn on hard navigation (refresh / close tab) while a session is running.
+  // In-app link navigation is guarded separately by the NavBar dialog.
+  useEffect(() => {
+    if (!isAnalysisActive) return;
+    const handler = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ''; };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [isAnalysisActive]);
+
   /** Upload only — modal stays open with progress bar; background keeps VideoPickerTriggerZone.
    *  Video is shown in the player only after upload finishes and modal closes. */
   const handleUploadAndConnect = useCallback(async (file: File, onProgress: (pct: number) => void) => {
@@ -970,8 +988,16 @@ export default function Workspace() {
     if (videoRef.current) { videoRef.current.pause(); videoRef.current.currentTime = 0; }
     setTranscriptLog([]);
     setLibraryReady(false);
-    resetAnalysis();
-  }, [stopListening, resetAnalysis]);
+    if (eosReportItems.length > 0) {
+      // Đã phát hiện tổn thương → mở popup báo cáo, giữ lại phần đã chạy
+      // (kể cả khi video mới chạy được một phần).
+      finalizeSession();
+    } else {
+      // Chưa có gì để báo cáo → bỏ phiên trống để tránh rác trong thư viện.
+      if (currentSessionId) removeSession(currentSessionId);
+      resetAnalysis();
+    }
+  }, [stopListening, eosReportItems, finalizeSession, currentSessionId, removeSession, resetAnalysis]);
 
   const handleLibrarySelectFromModal = useCallback(async (libraryId: string, localFile?: File, filename?: string) => {
     try {

@@ -215,6 +215,9 @@ interface AnalysisContextType {
   addDetection: (d: Detection) => void;
   removeDetection: (timestamp: number) => void;
   resetAnalysis: () => void;
+  /** Stop the running pipeline but KEEP the current session + findings and jump
+   *  straight to the end-of-session report (workspace "Dừng" button). */
+  finalizeSession: () => void;
   /** Delete an entire session by id (from report history). */
   removeSession: (sessionId: string) => void;
   /** Clear all stored sessions. */
@@ -408,7 +411,12 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
 
   const startNewSession = useCallback(
     (opts: { name: string; source: SessionSource; videoId?: string }): string => {
-      const id = genSessionId();
+      // Reuse the backend video_id as the session id so the localStorage record
+      // and the DB-persisted record (keyed by video_id) share one id and merge
+      // into a single card on the Report page — instead of showing a duplicate
+      // empty "Phiên xxxx" card alongside the real one. Falls back to a random
+      // id for mock sessions that have no video_id.
+      const id = opts.videoId ?? genSessionId();
       const newSession: Session = {
         id,
         name: opts.name,
@@ -1023,6 +1031,20 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
     setVideoId(null);
   }, [resetPipeline]);
 
+  // Stop the pipeline (disconnect WS) but keep the current session + videoId so
+  // the report modal can show what was detected and "Phân tích lại" can replay.
+  const finalizeSession = useCallback(() => {
+    clearMockTimers();
+    wsRef.current?.disconnect();
+    wsRef.current = null;
+    explainInFlightRef.current = false;
+    setIsConnected(false);
+    setCurrentDetection(null);
+    setIsListeningVoice(false);
+    llmInsightRef.current = ""; setLlmInsight("");
+    setPipelineState("EOS_SUMMARY");
+  }, [clearMockTimers]);
+
   const removeSession = useCallback((sessionId: string) => {
     setSessions((prev) => prev.filter((s) => s.id !== sessionId));
     setCurrentSessionId((cur) => (cur === sessionId ? null : cur));
@@ -1080,6 +1102,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       addDetection,
       removeDetection,
       resetAnalysis,
+      finalizeSession,
       removeSession,
       clearSessions,
     }),
@@ -1094,7 +1117,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       recheckResult, isRecheckModalOpen, openRecheckModal, closeRecheckModal,
       removeCapture,
       sendSessionQA, lastError, setIsPlaying,
-      addDetection, removeDetection, resetAnalysis, removeSession, clearSessions,
+      addDetection, removeDetection, resetAnalysis, finalizeSession, removeSession, clearSessions,
     ],
   );
 

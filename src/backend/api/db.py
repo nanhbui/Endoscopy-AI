@@ -527,6 +527,27 @@ def list_all_sessions() -> list[dict]:
     return sorted(sessions.values(), key=lambda x: x["started_at"], reverse=True)
 
 
+def delete_session(session_id: str) -> int:
+    """Delete every persisted trace of a session (lesion reports, summary, Q&A).
+    Returns total rows removed. Backs the DELETE /sessions/{id} trash action on
+    the Report page. False-positive / confirmed-lesion memory is intentionally
+    left intact (it is cross-session learning, not per-session report data)."""
+    total = 0
+    try:
+        with _connect() as conn:
+            for sql in (
+                "DELETE FROM lesion_reports WHERE session_id = ?",
+                "DELETE FROM session_summaries WHERE session_id = ?",
+                "DELETE FROM qa_messages WHERE session_id = ?",
+            ):
+                cur = conn.execute(sql, (session_id,))
+                total += max(cur.rowcount, 0)
+            conn.commit()
+    except sqlite3.Error as e:
+        logger.error("delete_session({}) failed: {}", session_id, e)
+    return total
+
+
 # ── Session summaries (Phase B) ──────────────────────────────────────────────
 
 def save_session_summary(session_id: str, summary: dict, model: str,

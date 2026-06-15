@@ -72,7 +72,7 @@ from db import (                                                       # noqa: E
     save_confirmed_lesion, load_all_confirmed_lesions,
     delete_confirmed_lesions_matching, delete_false_positives_matching,
     clear_false_positives, clear_confirmed_lesions, memory_counts,
-    list_all_sessions,
+    list_all_sessions, delete_session,
     save_session_summary, get_session_summary,
     append_qa_message, get_qa_history,
 )
@@ -923,6 +923,14 @@ async def list_sessions():
     """DB-backed session history for the Report page. Durable across browser
     cache clears / origin changes (unlike the localStorage list)."""
     return {"sessions": list_all_sessions()}
+
+
+@app.delete("/sessions/{session_id}")
+async def delete_session_endpoint(session_id: str):
+    """Remove a session's persisted reports/summary/Q&A from the DB (Report page
+    trash / bulk-delete). The browser removes its localStorage copy separately."""
+    removed = delete_session(session_id)
+    return {"deleted": True, "session_id": session_id, "rows": removed}
 
 
 @app.get("/live/{video_id}/mjpeg")

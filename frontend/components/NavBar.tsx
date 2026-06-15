@@ -9,13 +9,17 @@
  */
 
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { useState } from 'react';
 import {
   Microscope, Gauge, ScanLine, ScrollText, BarChart3, BookOpen, Settings,
 } from 'lucide-react';
+import {
+  Dialog, DialogTitle, DialogContent, DialogContentText, DialogActions, Button,
+} from '@mui/material';
 import { AiHealthBadge } from '@/components/ai-health-badge';
 import { SettingsModal } from '@/components/settings-modal';
+import { useAnalysis } from '@/context/AnalysisContext';
 
 const navItems = [
   { href: '/',          label: 'Dashboard', icon: Gauge },
@@ -31,7 +35,44 @@ const navItems = [
 
 export default function NavBar() {
   const pathname = usePathname();
+  const router = useRouter();
+  const { pipelineState, currentSessionId, removeSession, resetAnalysis } = useAnalysis();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Pending in-app navigation target, set when we intercept a link click while
+  // a session is running. Null = no confirm dialog shown.
+  const [pendingHref, setPendingHref] = useState<string | null>(null);
+
+  // A session is "running" (worth guarding) in these states. EOS_SUMMARY is the
+  // report stage, IDLE has nothing to lose.
+  const analysisActive =
+    pipelineState === 'PLAYING' ||
+    pipelineState === 'PAUSED_WAITING_INPUT' ||
+    pipelineState === 'PROCESSING_LLM';
+
+  // Intercept navigation to another page while a session is running.
+  const guardNav = (href: string) => (e: React.MouseEvent) => {
+    if (analysisActive && href !== pathname) {
+      e.preventDefault();
+      setPendingHref(href);
+    }
+  };
+
+  // "Lưu & tạo báo cáo": stop the pipeline (findings already in localStorage),
+  // then jump to the report page.
+  const handleSaveAndReport = () => {
+    resetAnalysis();
+    setPendingHref(null);
+    router.push('/report');
+  };
+
+  // "Rời đi (mất phiên)": drop the in-progress session, then continue to target.
+  const handleLeaveAnyway = () => {
+    const href = pendingHref ?? '/';
+    if (currentSessionId) removeSession(currentSessionId);
+    resetAnalysis();
+    setPendingHref(null);
+    router.push(href);
+  };
 
   return (
     <header
@@ -57,6 +98,7 @@ export default function NavBar() {
         {/* Brand — gradient mark + 2-line text */}
         <Link
           href="/"
+          onClick={guardNav('/')}
           style={{
             display: 'flex', alignItems: 'center', gap: 12,
             marginRight: 8, textDecoration: 'none', color: 'inherit',
@@ -114,6 +156,7 @@ export default function NavBar() {
               <Link
                 key={href}
                 href={href}
+                onClick={guardNav(href)}
                 className="nav-link"
                 style={{
                   display: 'inline-flex', alignItems: 'center', gap: 6,
@@ -200,6 +243,22 @@ export default function NavBar() {
       `}</style>
 
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+
+      {/* Guard: leaving an in-progress session loses it unless saved as report. */}
+      <Dialog open={pendingHref !== null} onClose={() => setPendingHref(null)} maxWidth="xs" fullWidth>
+        <DialogTitle sx={{ fontWeight: 700 }}>Phiên đang chạy</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            Bạn sắp rời khỏi phiên phân tích hiện tại và sẽ <strong>mất phiên này</strong>.
+            Bạn có muốn lưu và tạo báo cáo luôn không?
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2, gap: 1, flexWrap: 'wrap' }}>
+          <Button onClick={() => setPendingHref(null)} color="inherit">Ở lại</Button>
+          <Button onClick={handleLeaveAnyway} color="error">Rời đi (mất phiên)</Button>
+          <Button onClick={handleSaveAndReport} variant="contained">Lưu &amp; tạo báo cáo</Button>
+        </DialogActions>
+      </Dialog>
     </header>
   );
 }

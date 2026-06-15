@@ -293,6 +293,16 @@ export async function listDbSessions(): Promise<DbSessionRow[]> {
   }
 }
 
+/** Delete a session's durable DB rows (reports, summary, Q&A). Best-effort —
+ *  the localStorage copy is removed separately via the context's removeSession. */
+export async function deleteDbSession(sessionId: string): Promise<void> {
+  try {
+    await fetch(`${API_BASE}/sessions/${sessionId}`, { method: "DELETE" });
+  } catch {
+    /* ignore — local removal still applies */
+  }
+}
+
 // ── EndoscopyWsClient ─────────────────────────────────────────────────────────
 
 export class EndoscopyWsClient {
