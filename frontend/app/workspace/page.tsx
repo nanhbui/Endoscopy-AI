@@ -236,6 +236,7 @@ const STATUS_CONFIG: Record<DetectionStatus, { label: string; color: string; bg:
   confirmed: { label: 'Xác nhận', color: '#059669', bg: 'rgba(5,150,105,0.1)', icon: <CheckCircle2 size={12} /> },
   analyzed:  { label: 'Đã phân tích', color: '#0277BD', bg: 'rgba(2,119,189,0.1)', icon: <Sparkles size={12} /> },
   ignored:   { label: 'Bỏ qua', color: '#9AA5B1', bg: 'rgba(154,165,177,0.1)', icon: <CircleX size={12} /> },
+  false_positive: { label: 'Báo sai', color: '#DC2626', bg: 'rgba(220,38,38,0.1)', icon: <Flag size={12} /> },
   detected:  { label: 'Phát hiện', color: '#D97706', bg: 'rgba(245,158,11,0.1)', icon: <AlertTriangle size={12} /> },
 };
 

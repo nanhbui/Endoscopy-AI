@@ -6,7 +6,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   AlertTriangle, CheckCircle2, CircleX, Clock, Download, FileText,
-  ScanSearch, Sparkles, Trash2, Video, X, Zap, Radio, FolderOpen, Upload, ChevronLeft,
+  ScanSearch, Sparkles, Trash2, Video, X, Zap, Radio, FolderOpen, Upload, ChevronLeft, Flag,
 } from 'lucide-react';
 import { useAnalysis, sessionFindings, type Detection, type DetectionStatus, type Session } from '@/context/AnalysisContext';
 import { listDbSessions, deleteDbSession, type DbSessionRow } from '@/lib/ws-client';
@@ -79,6 +79,7 @@ const STATUS_CFG: Record<DetectionStatus, { label: string; color: string; bg: st
   confirmed: { label: 'Xác nhận',     color: '#059669', bg: 'rgba(5,150,105,0.1)',   icon: <CheckCircle2 size={11} /> },
   analyzed:  { label: 'Đã phân tích', color: '#0277BD', bg: 'rgba(2,119,189,0.1)',   icon: <Sparkles size={11} /> },
   ignored:   { label: 'Bỏ qua',       color: '#9AA5B1', bg: 'rgba(154,165,177,0.1)', icon: <CircleX size={11} /> },
+  false_positive: { label: 'Báo sai', color: '#DC2626', bg: 'rgba(220,38,38,0.1)',  icon: <Flag size={11} /> },
   detected:  { label: 'Phát hiện',    color: '#D97706', bg: 'rgba(245,158,11,0.1)',  icon: <AlertTriangle size={11} /> },
 };
 
@@ -318,6 +319,7 @@ function SessionDetailModal({
   const sourceCfg = SOURCE_CFG[session.source];
   const confirmed = session.detections.filter(d => d.status === 'confirmed' || d.status === 'analyzed').length;
   const ignored   = session.detections.filter(d => d.status === 'ignored').length;
+  const falsePos  = session.detections.filter(d => d.status === 'false_positive').length;
   const total     = session.detections.length;
 
   // Phase B — tab switch between detection grid and AI summary panel.
@@ -362,6 +364,12 @@ function SessionDetailModal({
                 <Typography variant="caption" sx={{ color: '#9AA5B1' }}>
                   <CircleX size={12} style={{ verticalAlign: 'middle', marginRight: 4 }} />
                   {ignored} bỏ qua
+                </Typography>
+              )}
+              {falsePos > 0 && (
+                <Typography variant="caption" sx={{ color: '#DC2626' }}>
+                  <Flag size={12} style={{ verticalAlign: 'middle', marginRight: 4 }} />
+                  {falsePos} báo sai
                 </Typography>
               )}
             </Box>
@@ -446,7 +454,7 @@ function SessionDetailModal({
                         display: 'flex',
                         flexDirection: 'column',
                         cursor: 'pointer',
-                        opacity: det.status === 'ignored' ? 0.7 : 1,
+                        opacity: (det.status === 'ignored' || det.status === 'false_positive') ? 0.7 : 1,
                         transition: 'box-shadow 0.2s, transform 0.2s, opacity 0.2s',
                         '&:hover': { boxShadow: '0 6px 18px rgba(13,27,42,0.1)', transform: 'translateY(-2px)', opacity: 1 },
                       }}
@@ -527,6 +535,7 @@ function SessionCard({ session, idx, onClick, selected, onToggleSelect, onDelete
   const total = session.detections.length;
   const confirmed = session.detections.filter(d => d.status === 'confirmed' || d.status === 'analyzed').length;
   const ignored = session.detections.filter(d => d.status === 'ignored').length;
+  const falsePos = session.detections.filter(d => d.status === 'false_positive').length;
   const thumbs = session.detections.filter(d => d.frame_b64).slice(0, 3);
   const peakConfidence = session.detections.reduce((max, d) => Math.max(max, d.confidence), 0);
   const sev = getSeverity(peakConfidence);
@@ -653,6 +662,12 @@ function SessionCard({ session, idx, onClick, selected, onToggleSelect, onDelete
               <Typography variant="caption" sx={{ fontWeight: 700, color: '#9AA5B1' }}>{ignored}</Typography>
             </Box>
           )}
+          {falsePos > 0 && (
+            <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.4 }}>
+              <Flag size={12} color="#DC2626" />
+              <Typography variant="caption" sx={{ fontWeight: 700, color: '#DC2626' }}>{falsePos}</Typography>
+            </Box>
+          )}
         </Box>
       </Box>
     </MotionBox>
@@ -726,11 +741,6 @@ export default function ReportPage() {
     [allSessions, openSessionId],
   );
 
-  const totalDetections = useMemo(
-    () => allSessions.reduce((acc, s) => acc + s.detections.length, 0),
-    [allSessions],
-  );
-
   if (allSessions.length === 0) {
     return (
       <Box sx={{ minHeight: 'calc(100vh - 130px)', py: 5, px: { xs: 2, lg: 4 }, backgroundColor: 'background.default', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -783,31 +793,6 @@ export default function ReportPage() {
             >
               Lịch sử phiên nội soi
             </Typography>
-
-            {/* Compact stat row: 2 numbers + retention note */}
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 2.5, flexWrap: 'wrap' }}>
-              <Box sx={{ display: 'inline-flex', alignItems: 'baseline', gap: 0.5 }}>
-                <Typography sx={{ fontSize: '1.05rem', fontWeight: 700, color: '#006064', fontFamily: 'var(--font-mono)' }}>
-                  {allSessions.length}
-                </Typography>
-                <Typography sx={{ fontSize: '0.78rem', color: '#6E7C7B' }}>
-                  phiên
-                </Typography>
-              </Box>
-              <Box sx={{ width: 1, height: 14, backgroundColor: '#E2EAE9' }} />
-              <Box sx={{ display: 'inline-flex', alignItems: 'baseline', gap: 0.5 }}>
-                <Typography sx={{ fontSize: '1.05rem', fontWeight: 700, color: '#D97706', fontFamily: 'var(--font-mono)' }}>
-                  {totalDetections}
-                </Typography>
-                <Typography sx={{ fontSize: '0.78rem', color: '#6E7C7B' }}>
-                  tổn thương
-                </Typography>
-              </Box>
-              <Box sx={{ width: 1, height: 14, backgroundColor: '#E2EAE9' }} />
-              <Typography sx={{ fontSize: '0.72rem', color: '#9BA9A8' }}>
-                Lưu cục bộ tối đa 10 phiên gần nhất
-              </Typography>
-            </Box>
           </Box>
 
           <Box sx={{ display: 'flex', gap: 1.25, flexWrap: 'wrap', flexShrink: 0 }}>
