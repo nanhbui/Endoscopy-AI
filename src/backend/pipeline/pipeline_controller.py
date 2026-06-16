@@ -265,9 +265,16 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
     _tracker_kind = _os.environ.get("ENDOSCOPY_TRACKER", "strongsort").lower()
     try:
         import torch as _torch
-        if reid_weights_str and _os.path.exists(reid_weights_str):
+        # Resolve a RELATIVE ENDOSCOPY_REID against the repo root so tracker
+        # selection doesn't depend on the backend's CWD. (os.path.exists/abspath
+        # both resolve relative paths against CWD — which the launcher may not set
+        # to the repo — so they can't fix this; anchoring on _REPO_ROOT can.)
+        _reid_path = Path(reid_weights_str) if reid_weights_str else None
+        if _reid_path is not None and not _reid_path.is_absolute():
+            _reid_path = _REPO_ROOT / _reid_path
+        if _reid_path is not None and _reid_path.exists():
             _device = _torch.device("cuda:0" if _torch.cuda.is_available() else "cpu")
-            _reid_abs = _os.path.abspath(reid_weights_str)
+            _reid_abs = str(_reid_path.resolve())
             if _tracker_kind in ("tlukf", "utrtrack"):
                 from boxmot import UTRTrack
                 tracker = UTRTrack(
@@ -311,6 +318,12 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
     # different region is reported separately.
     _DIFFUSE_IOU = float(_os.environ.get("ENDOSCOPY_DIFFUSE_IOU", "0.20"))
     _DIFFUSE_WINDOW_MS = int(_os.environ.get("ENDOSCOPY_DIFFUSE_WINDOW_MS", "30000"))  # 30 s
+    # Diffuse "same spot" is judged by CENTER distance, not IoU: a viêm patch's
+    # box jitters in size as the scope moves, which makes IoU drop and re-report
+    # the SAME area; box centres stay close, so distance is far more stable. Two
+    # viêm are the "same spot" if their centres are within this fraction of the
+    # frame width (default 0.18 ≈ 18% of width).
+    _DIFFUSE_CENTER_FRAC = float(_os.environ.get("ENDOSCOPY_DIFFUSE_CENTER_FRAC", "0.18"))
     _reported_history: list[dict] = []  # {ts_ms, bbox (1920×1080 norm), label}
 
     def _is_recently_reported(ts_ms: int, bbox: list, label: str,
@@ -319,6 +332,19 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
         for r in _reported_history:
             if ts_ms - r["ts_ms"] < window_ms and r["label"] == label and _iou(r["bbox"], bbox) >= iou_thr:
                 return True
+        return False
+
+    def _diffuse_same_spot(ts_ms: int, bbox: list, label: str, window_ms: int) -> bool:
+        """A diffuse viêm at the SAME spot as a recently-reported one — judged by
+        box-centre distance (robust to the box-size jitter that breaks IoU)."""
+        cx, cy = (bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0
+        max_d = _DIFFUSE_CENTER_FRAC * 1920.0  # bbox is in 1920×1080 coords
+        for r in _reported_history:
+            if ts_ms - r["ts_ms"] < window_ms and r["label"] == label:
+                rb = r["bbox"]
+                rx, ry = (rb[0] + rb[2]) / 2.0, (rb[1] + rb[3]) / 2.0
+                if ((cx - rx) ** 2 + (cy - ry) ** 2) ** 0.5 <= max_d:
+                    return True
         return False
 
     # Track-ID dedup: report each track exactly once for the whole session.
@@ -337,25 +363,38 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
         _dedup_by_track_id = _dtid in ("1", "true", "yes", "on")
     reported_track_ids: set[int] = set()
 
-    # Region-based dedup for DIFFUSE diagnoses (e.g. "Viêm dạ dày HP", "Viêm
-    # thực quản"). These are not focal lesions: as the scope pans, YOLO fires on
-    # many mucosa patches, each getting a NEW track id, so track-id/ReID dedup
-    # cannot collapse them. They are de-duplicated by REGION instead (see the
-    # detection loop): a viêm at the SAME spot is merged (keeping the first), a
-    # clearly DIFFERENT spot is reported as its own finding. Focal lesions
-    # (ung thư, loét, polyp) keep per-instance track-id dedup.
-    # Matched by keyword substring on the cleaned label; override the keyword
-    # list with ENDOSCOPY_DIFFUSE_KEYWORDS (comma-separated, "" disables).
+    # Dedup for DIFFUSE diagnoses (e.g. "Viêm dạ dày HP", "Viêm thực quản").
+    # These are not focal lesions: as the scope pans, YOLO fires on many mucosa
+    # patches, each getting a NEW track id at a different position — neither
+    # track-id/ReID nor spatial IoU can cleanly collapse them. Mode is selectable
+    # via ENDOSCOPY_DIFFUSE_MODE:
+    #   cooldown (default) — POSITION-AWARE cooldown: after reporting a viêm at a
+    #                        spot, the SAME spot (IoU overlap) is suppressed for
+    #                        ENDOSCOPY_DIFFUSE_COOLDOWN_MS (default 7 s), but a
+    #                        clearly DIFFERENT spot is still reported. Merges rapid
+    #                        same-region re-fires (anti-spam) while keeping
+    #                        genuinely different locations. (Visual ReID cannot
+    #                        re-identify diffuse inflammation, so position+time is
+    #                        used instead.)
+    #   once             — report ONCE per session per label.
+    #   region           — like cooldown but with a longer (30 s) window.
+    #   off              — no diffuse-specific dedup (falls back to track-id).
+    # Tuning: ENDOSCOPY_DIFFUSE_IOU (how much overlap counts as the "same spot").
+    # Which labels count as diffuse: ENDOSCOPY_DIFFUSE_KEYWORDS (substring match,
+    # comma-separated, "" disables).
+    _diffuse_mode = _os.environ.get("ENDOSCOPY_DIFFUSE_MODE", "cooldown").strip().lower()
+    _DIFFUSE_COOLDOWN_MS = int(_os.environ.get("ENDOSCOPY_DIFFUSE_COOLDOWN_MS", "7000"))  # 7 s
     _diffuse_kw = [k.strip().lower()
                    for k in _os.environ.get("ENDOSCOPY_DIFFUSE_KEYWORDS", "viêm").split(",")
                    if k.strip()]
+    reported_diffuse_labels: set[str] = set()
 
     def _is_diffuse(_label: str) -> bool:
         _l = _label.lower()
         return any(k in _l for k in _diffuse_kw)
 
     print(f"[Worker] Dedup mode: {'track_id' if _dedup_by_track_id else 'spatial-temporal'} "
-          f"(tracker={_tracker_kind}) diffuse_region={_diffuse_kw}", flush=True)
+          f"(tracker={_tracker_kind}) diffuse_mode={_diffuse_mode} kw={_diffuse_kw}", flush=True)
 
     # ── GStreamer pipeline ────────────────────────────────────────────────
     try:
@@ -1148,21 +1187,37 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                                 print(f"[Worker] CONFIRMED_CAPTURE track_id={track_id} {label} ts_ms={timestamp_ms}", flush=True)
                             continue
 
-                        # Diffuse-diagnosis dedup BY REGION: viêm fires on many
-                        # patches, each with a NEW track id, so track-id/ReID
-                        # dedup can't collapse them. Merge by spatial overlap
-                        # instead — a viêm at the SAME spot (IoU within the
-                        # diffuse window) is suppressed, a clearly DIFFERENT spot
-                        # is reported as its own finding.
-                        if _is_diffuse(label):
-                            if _is_recently_reported(timestamp_ms, xyxy_norm, label,
-                                                     iou_thr=_DIFFUSE_IOU,
-                                                     window_ms=_DIFFUSE_WINDOW_MS):
-                                continue
+                        # Diffuse-diagnosis dedup (mode-selectable, see top of
+                        # worker). "once" = one report per label per session
+                        # (correct for a whole-organ diagnosis like HP gastritis);
+                        # "region" = merge same spot, report different spots;
+                        # "off" = fall through to track-id dedup.
+                        if _is_diffuse(label) and _diffuse_mode != "off":
+                            if _diffuse_mode == "region":
+                                if _is_recently_reported(timestamp_ms, xyxy_norm, label,
+                                                         iou_thr=_DIFFUSE_IOU,
+                                                         window_ms=_DIFFUSE_WINDOW_MS):
+                                    continue
+                            elif _diffuse_mode == "once":
+                                if label in reported_diffuse_labels:
+                                    continue
+                            else:  # "cooldown" (default) — position-aware by box
+                                # CENTRE distance (robust to box-size jitter):
+                                # suppress only when the SAME spot was reported
+                                # within the cooldown window; a clearly DIFFERENT
+                                # spot is reported even within the window, and the
+                                # same spot becomes reportable again once it passes.
+                                if _diffuse_same_spot(timestamp_ms, xyxy_norm, label,
+                                                      window_ms=_DIFFUSE_COOLDOWN_MS):
+                                    continue
                         # Track-ID dedup (UTR-Track + OSNet-DCN ReID): a focal
                         # lesion already reported keeps its ID when the scope
                         # drifts off and back, so suppress its repeat appearances.
-                        elif _dedup_by_track_id:
+                        # Guard on use_tracker + real id: when DEDUP_BY_TRACK_ID is
+                        # forced on but the tracker is off, every box gets the fake
+                        # track_id=0 — without this guard the first detection would
+                        # suppress ALL later ones. Falls through to spatial-temporal.
+                        elif _dedup_by_track_id and use_tracker and track_id >= 0:
                             if track_id in reported_track_ids:
                                 continue
                         # Spatial-temporal dedup (fallback / StrongSORT mode)
@@ -1197,7 +1252,13 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                             "frame_b64": thumbnail_b64,
                         }
                         _reported_history.append({"ts_ms": timestamp_ms, "bbox": xyxy_norm, "label": label})
-                        reported_track_ids.add(int(track_id))
+                        # Record the id only when track-id dedup is actually active
+                        # and the tracker produced a real id — symmetric with the
+                        # read above, so a fake track_id=0 never poisons the set.
+                        if _dedup_by_track_id and use_tracker and track_id >= 0:
+                            reported_track_ids.add(int(track_id))
+                        if _is_diffuse(label):
+                            reported_diffuse_labels.add(label)
                         confirmed.append(det_data)
                         result_q.put({"event": "DETECTION_FOUND", "data": det_data})
                         paused = True
