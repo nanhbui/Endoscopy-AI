@@ -34,7 +34,7 @@ export interface QaMessage {
 // Phase A bridge: render structured lesion report as markdown until the
 // dedicated <LesionReportCard> component (task A4) lands. Keeps the existing
 // ReactMarkdown render path in workspace alive.
-function lesionReportToMarkdown(r: LesionReport): string {
+export function lesionReportToMarkdown(r: LesionReport): string {
   const sevEmoji = r.conclusion.severity === "cao" ? "🔴"
                  : r.conclusion.severity === "trung bình" ? "🟡" : "🟢";
   const diff = r.conclusion.differential
@@ -73,7 +73,7 @@ function lesionReportToMarkdown(r: LesionReport): string {
 // ── Domain types ──────────────────────────────────────────────────────────────
 
 /** Outcome of a detection after doctor interaction. */
-export type DetectionStatus = "detected" | "ignored" | "confirmed" | "analyzed";
+export type DetectionStatus = "detected" | "ignored" | "confirmed" | "analyzed" | "false_positive";
 
 /** Detection as used internally by the context (mirrors DetectionData). */
 export interface Detection {
@@ -218,6 +218,11 @@ interface AnalysisContextType {
   /** Stop the running pipeline but KEEP the current session + findings and jump
    *  straight to the end-of-session report (workspace "Dừng" button). */
   finalizeSession: () => void;
+  /** Browser-live flow — materialize the captures collected in BrowserCaptureLive
+   *  into a single `live` session atomically (avoids the stale currentSessionId
+   *  race of startNewSession+addDetection), set it current, jump to EOS_SUMMARY
+   *  so /report shows it. Returns the new session id. */
+  saveLiveSession: (name: string, detections: Detection[]) => string;
   /** Delete an entire session by id (from report history). */
   removeSession: (sessionId: string) => void;
   /** Clear all stored sessions. */
@@ -863,7 +868,9 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       const fp = sess.detections[0];
       return {
         ...sess,
-        detections: sess.detections.map((d, i) => (i === 0 ? { ...d, status: "ignored" } : d)),
+        // "false_positive" (not "ignored") so the report distinguishes a flagged
+        // false positive from a plain session-only skip.
+        detections: sess.detections.map((d, i) => (i === 0 ? { ...d, status: "false_positive" } : d)),
         // Retract any auto-capture overlapping the rejected region so a
         // "Báo sai" lesion no longer lingers in the "Xác nhận luôn" panel
         // (and is excluded from the end-of-session report).
@@ -1060,6 +1067,21 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
     setCurrentSessionId(null);
   }, []);
 
+  const saveLiveSession = useCallback((name: string, detections: Detection[]): string => {
+    const id = genSessionId();
+    const newSession: Session = {
+      id,
+      name,
+      source: "live",
+      startedAt: Date.now(),
+      detections,
+    };
+    setSessions((prev) => [newSession, ...prev].slice(0, MAX_SESSIONS));
+    setCurrentSessionId(id);
+    setPipelineState("EOS_SUMMARY");
+    return id;
+  }, []);
+
   useEffect(() => {
     return () => {
       clearMockTimers();
@@ -1108,6 +1130,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       removeDetection,
       resetAnalysis,
       finalizeSession,
+      saveLiveSession,
       removeSession,
       clearSessions,
     }),
@@ -1122,7 +1145,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       recheckResult, isRecheckModalOpen, openRecheckModal, closeRecheckModal,
       removeCapture,
       sendSessionQA, lastError, setIsPlaying,
-      addDetection, removeDetection, resetAnalysis, finalizeSession, removeSession, clearSessions,
+      addDetection, removeDetection, resetAnalysis, finalizeSession, saveLiveSession, removeSession, clearSessions,
     ],
   );
 
