@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 import uuid
@@ -220,7 +221,8 @@ Phân loại tổn thương dạng polypoid và không polypoid theo Paris Class
 
 ## Format phản hồi (bắt buộc)
 
-Luôn trả lời bằng tiếng Việt với cấu trúc sau:
+Luôn trả lời bằng tiếng Việt với cấu trúc sau (TUYỆT ĐỐI KHÔNG dùng chữ Hán /
+ký tự tiếng Trung — thuật ngữ nước ngoài chỉ viết bằng tiếng Anh):
 
 **Phân loại Paris:** [Loại cụ thể] — [mô tả đặc điểm hình thái quan sát được: màu sắc, bờ viền, kích thước ước tính]
 
@@ -394,6 +396,35 @@ def _llm_model_name(role: str = "vision") -> str:
     if LLM_BACKEND == "ollama":
         return OLLAMA_MODEL
     return LLM_MODEL_VISION if role == "vision" else LLM_MODEL_FOLLOWUP
+
+
+# ── CJK leakage guard ─────────────────────────────────────────────────────────
+# Qwen2.5-VL (Alibaba) occasionally leaks Han/Chinese characters into Vietnamese
+# output, e.g. "nốt淋巴oid" instead of "nốt lymphoid" (淋巴 = "lymph"). Vietnamese
+# uses only Latin script, so any CJK ideograph in LLM output is a defect. We strip
+# it as a hard safety net regardless of backend, prompt wording, or temperature.
+_CJK_RE = re.compile(r'[㐀-䶿一-鿿豈-﫿＀-￯]+')
+
+
+def _strip_cjk(text: str) -> str:
+    """Remove CJK characters and tidy the whitespace/punctuation they leave behind."""
+    if not text or not isinstance(text, str) or not _CJK_RE.search(text):
+        return text
+    cleaned = _CJK_RE.sub('', text)
+    cleaned = re.sub(r'\s{2,}', ' ', cleaned)          # collapse doubled spaces
+    cleaned = re.sub(r'\s+([,.;:)\]])', r'\1', cleaned)  # drop space before punctuation
+    return cleaned.strip()
+
+
+def _sanitize_llm_output(obj):
+    """Recursively strip CJK from any string inside an LLM JSON report (dict/list)."""
+    if isinstance(obj, str):
+        return _strip_cjk(obj)
+    if isinstance(obj, list):
+        return [_sanitize_llm_output(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _sanitize_llm_output(v) for k, v in obj.items()}
+    return obj
 
 
 # Backward-compat shim: legacy code paths still call _get_openai()
@@ -1010,7 +1041,7 @@ async def live_explain(request: Request, label: str = "", conf: float = 0.0):
                 model=_llm_model_name("vision"), messages=messages,
                 response_format=response_format, max_tokens=1500),
             timeout=LLM_CALL_TIMEOUT_SEC)
-        report = json.loads(completion.choices[0].message.content or "{}")
+        report = _sanitize_llm_output(json.loads(completion.choices[0].message.content or "{}"))
         return {"report": report}
     except Exception as e:
         code, friendly = _classify_llm_error(e)
@@ -1070,7 +1101,7 @@ async def post_session_qa(video_id: str, request: Request):
             ),
             timeout=LLM_CALL_TIMEOUT_SEC,
         )
-        reply = completion.choices[0].message.content or ""
+        reply = _strip_cjk(completion.choices[0].message.content or "")
         logger.info("Session Q&A (HTTP): latency={:.2f}s chars={}",
                     time.monotonic() - t0, len(reply))
     except Exception as exc:
@@ -1532,7 +1563,7 @@ async def _stream_llm(websocket: WebSocket, detection: dict, sess: dict, ws_lock
             max_tokens=700,
         )
         async for chunk in stream:
-            delta = chunk.choices[0].delta.content or ""
+            delta = _strip_cjk(chunk.choices[0].delta.content or "")
             if delta:
                 full_response += delta
                 await _send({"event": "LLM_CHUNK", "data": {"chunk": delta}})
@@ -1639,7 +1670,7 @@ async def _stream_lesion_report(websocket: WebSocket, detection: dict,
         )
         raw_json = completion.choices[0].message.content or "{}"
         try:
-            report = json.loads(raw_json)
+            report = _sanitize_llm_output(json.loads(raw_json))
         except json.JSONDecodeError as je:
             code, friendly = _classify_llm_error(je)
             logger.error("Lesion report JSON parse failed: {} — raw: {}", je, raw_json[:200])
@@ -1797,7 +1828,7 @@ async def _stream_follow_up(websocket: WebSocket, text: str, sess: dict, ws_lock
             max_tokens=350,
         )
         async for chunk in stream:
-            delta = chunk.choices[0].delta.content or ""
+            delta = _strip_cjk(chunk.choices[0].delta.content or "")
             if delta:
                 full_response += delta
                 await _send({"event": "LLM_CHUNK", "data": {"chunk": delta}})
@@ -1903,7 +1934,7 @@ async def _stream_session_summary(websocket: WebSocket, sess: dict,
         )
         raw_json = completion.choices[0].message.content or "{}"
         try:
-            summary = json.loads(raw_json)
+            summary = _sanitize_llm_output(json.loads(raw_json))
         except json.JSONDecodeError as je:
             code, friendly = _classify_llm_error(je)
             logger.error("Session summary JSON parse failed: {}", je)
