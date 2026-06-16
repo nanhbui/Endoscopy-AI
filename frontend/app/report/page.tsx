@@ -6,10 +6,10 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   AlertTriangle, CheckCircle2, CircleX, Clock, Download, FileText,
-  ScanSearch, Sparkles, Trash2, Video, X, Zap, Radio, FolderOpen, Upload, ChevronLeft,
+  ScanSearch, Sparkles, Trash2, Video, X, Zap, Radio, FolderOpen, Upload, ChevronLeft, Flag,
 } from 'lucide-react';
 import { useAnalysis, sessionFindings, type Detection, type DetectionStatus, type Session } from '@/context/AnalysisContext';
-import { listDbSessions, type DbSessionRow } from '@/lib/ws-client';
+import { listDbSessions, deleteDbSession, type DbSessionRow } from '@/lib/ws-client';
 import { labelToColor } from '@/lib/lesion-colors';
 import { fmtDateTime as fmtDate, fmtClock as fmtTs } from '@/lib/format';
 import { SessionSummaryPanel } from '@/components/session-summary-panel';
@@ -53,6 +53,8 @@ import MuiButton from '@mui/material/Button';
 import MuiDialog from '@mui/material/Dialog';
 import MuiDialogContent from '@mui/material/DialogContent';
 import IconButton from '@mui/material/IconButton';
+import Checkbox from '@mui/material/Checkbox';
+import Tooltip from '@mui/material/Tooltip';
 import Chip from '@mui/material/Chip';
 import { PipelineMetricsSection } from '@/components/pipeline-metrics-section';
 
@@ -77,6 +79,7 @@ const STATUS_CFG: Record<DetectionStatus, { label: string; color: string; bg: st
   confirmed: { label: 'Xác nhận',     color: '#059669', bg: 'rgba(5,150,105,0.1)',   icon: <CheckCircle2 size={11} /> },
   analyzed:  { label: 'Đã phân tích', color: '#0277BD', bg: 'rgba(2,119,189,0.1)',   icon: <Sparkles size={11} /> },
   ignored:   { label: 'Bỏ qua',       color: '#9AA5B1', bg: 'rgba(154,165,177,0.1)', icon: <CircleX size={11} /> },
+  false_positive: { label: 'Báo sai', color: '#DC2626', bg: 'rgba(220,38,38,0.1)',  icon: <Flag size={11} /> },
   detected:  { label: 'Phát hiện',    color: '#D97706', bg: 'rgba(245,158,11,0.1)',  icon: <AlertTriangle size={11} /> },
 };
 
@@ -316,6 +319,7 @@ function SessionDetailModal({
   const sourceCfg = SOURCE_CFG[session.source];
   const confirmed = session.detections.filter(d => d.status === 'confirmed' || d.status === 'analyzed').length;
   const ignored   = session.detections.filter(d => d.status === 'ignored').length;
+  const falsePos  = session.detections.filter(d => d.status === 'false_positive').length;
   const total     = session.detections.length;
 
   // Phase B — tab switch between detection grid and AI summary panel.
@@ -360,6 +364,12 @@ function SessionDetailModal({
                 <Typography variant="caption" sx={{ color: '#9AA5B1' }}>
                   <CircleX size={12} style={{ verticalAlign: 'middle', marginRight: 4 }} />
                   {ignored} bỏ qua
+                </Typography>
+              )}
+              {falsePos > 0 && (
+                <Typography variant="caption" sx={{ color: '#DC2626' }}>
+                  <Flag size={12} style={{ verticalAlign: 'middle', marginRight: 4 }} />
+                  {falsePos} báo sai
                 </Typography>
               )}
             </Box>
@@ -444,7 +454,7 @@ function SessionDetailModal({
                         display: 'flex',
                         flexDirection: 'column',
                         cursor: 'pointer',
-                        opacity: det.status === 'ignored' ? 0.7 : 1,
+                        opacity: (det.status === 'ignored' || det.status === 'false_positive') ? 0.7 : 1,
                         transition: 'box-shadow 0.2s, transform 0.2s, opacity 0.2s',
                         '&:hover': { boxShadow: '0 6px 18px rgba(13,27,42,0.1)', transform: 'translateY(-2px)', opacity: 1 },
                       }}
@@ -517,11 +527,15 @@ function SessionDetailModal({
 
 // ── Session card on the report grid ──
 
-function SessionCard({ session, idx, onClick }: { session: Session; idx: number; onClick: () => void }) {
+function SessionCard({ session, idx, onClick, selected, onToggleSelect, onDelete }: {
+  session: Session; idx: number; onClick: () => void;
+  selected: boolean; onToggleSelect: () => void; onDelete: () => void;
+}) {
   const sourceCfg = SOURCE_CFG[session.source];
   const total = session.detections.length;
   const confirmed = session.detections.filter(d => d.status === 'confirmed' || d.status === 'analyzed').length;
   const ignored = session.detections.filter(d => d.status === 'ignored').length;
+  const falsePos = session.detections.filter(d => d.status === 'false_positive').length;
   const thumbs = session.detections.filter(d => d.frame_b64).slice(0, 3);
   const peakConfidence = session.detections.reduce((max, d) => Math.max(max, d.confidence), 0);
   const sev = getSeverity(peakConfidence);
@@ -536,17 +550,46 @@ function SessionCard({ session, idx, onClick }: { session: Session; idx: number;
         height: '100%',
         backgroundColor: 'background.paper',
         borderRadius: '18px',
-        border: '1px solid #E2EAE8',
-        boxShadow: '0 2px 12px rgba(13,27,42,0.06)',
+        border: selected ? '2px solid #0277BD' : '1px solid #E2EAE8',
+        boxShadow: selected ? '0 6px 20px rgba(2,119,189,0.18)' : '0 2px 12px rgba(13,27,42,0.06)',
         overflow: 'hidden',
         display: 'flex',
         flexDirection: 'column',
         cursor: 'pointer',
-        transition: 'box-shadow 0.2s, transform 0.2s',
+        transition: 'box-shadow 0.2s, transform 0.2s, border-color 0.2s',
         '&:hover': { boxShadow: '0 10px 32px rgba(13,27,42,0.12)', transform: 'translateY(-3px)' },
       }}
     >
       <Box sx={{ height: 160, backgroundColor: '#0D1117', position: 'relative', display: 'flex', overflow: 'hidden' }}>
+        {/* Multi-select checkbox (top-left) — toggles selection without opening the card. */}
+        <Checkbox
+          checked={selected}
+          onClick={(e) => { e.stopPropagation(); onToggleSelect(); }}
+          size="small"
+          sx={{
+            position: 'absolute', top: 4, left: 4, zIndex: 3, p: 0.5,
+            color: 'rgba(255,255,255,0.75)',
+            backgroundColor: 'rgba(0,0,0,0.35)', borderRadius: '6px',
+            '&.Mui-checked': { color: '#26C6DA' },
+            '&:hover': { backgroundColor: 'rgba(0,0,0,0.55)' },
+          }}
+        />
+        {/* Per-session delete (bottom-left) — removes from DB + localStorage. */}
+        <Tooltip title="Xoá phiên" arrow>
+          <IconButton
+            onClick={(e) => { e.stopPropagation(); onDelete(); }}
+            size="small"
+            aria-label="Xoá phiên"
+            sx={{
+              position: 'absolute', bottom: 8, left: 8, zIndex: 3,
+              backgroundColor: 'rgba(0,0,0,0.55)', color: '#FCA5A5',
+              backdropFilter: 'blur(8px)',
+              '&:hover': { backgroundColor: 'rgba(220,38,38,0.9)', color: '#fff' },
+            }}
+          >
+            <Trash2 size={14} />
+          </IconButton>
+        </Tooltip>
         {thumbs.length === 0 ? (
           <Box sx={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 1 }}>
             <Video size={32} color="rgba(255,255,255,0.18)" />
@@ -575,7 +618,7 @@ function SessionCard({ session, idx, onClick }: { session: Session; idx: number;
           ))
         )}
 
-        <Box sx={{ position: 'absolute', top: 10, left: 10, display: 'inline-flex', alignItems: 'center', gap: 0.5, px: 1.1, py: 0.4, borderRadius: '7px', backgroundColor: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(10px)', border: '1px solid rgba(255,255,255,0.12)', color: '#fff' }}>
+        <Box sx={{ position: 'absolute', top: 10, left: 44, display: 'inline-flex', alignItems: 'center', gap: 0.5, px: 1.1, py: 0.4, borderRadius: '7px', backgroundColor: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(10px)', border: '1px solid rgba(255,255,255,0.12)', color: '#fff' }}>
           {sourceCfg.icon}
           <Typography sx={{ fontSize: '0.65rem', fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase' }}>{sourceCfg.label}</Typography>
         </Box>
@@ -619,6 +662,12 @@ function SessionCard({ session, idx, onClick }: { session: Session; idx: number;
               <Typography variant="caption" sx={{ fontWeight: 700, color: '#9AA5B1' }}>{ignored}</Typography>
             </Box>
           )}
+          {falsePos > 0 && (
+            <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.4 }}>
+              <Flag size={12} color="#DC2626" />
+              <Typography variant="caption" sx={{ fontWeight: 700, color: '#DC2626' }}>{falsePos}</Typography>
+            </Box>
+          )}
         </Box>
       </Box>
     </MotionBox>
@@ -632,6 +681,38 @@ export default function ReportPage() {
   const [openSessionId, setOpenSessionId] = useState<string | null>(null);
   const [openDetection, setOpenDetection] = useState<Detection | null>(null);
   const [dbSessions, setDbSessions] = useState<Session[]>([]);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+  const toggleSelect = (id: string) => setSelectedIds((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+
+  // Delete sessions from BOTH stores: localStorage (context) + durable DB.
+  // Without the DB delete, a removed session reappears on reload (re-fetched
+  // from /sessions). Also drops the local dbSessions copy so the UI updates now.
+  const deleteSessions = (ids: string[]) => {
+    for (const id of ids) {
+      removeSession(id);
+      void deleteDbSession(id);
+    }
+    setDbSessions((prev) => prev.filter((s) => !ids.includes(s.id)));
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      ids.forEach((id) => next.delete(id));
+      return next;
+    });
+  };
+
+  const handleDeleteOne = (s: Session) => {
+    if (window.confirm(`Xoá phiên "${s.name}"?`)) deleteSessions([s.id]);
+  };
+
+  const handleDeleteSelected = () => {
+    const ids = [...selectedIds];
+    if (ids.length && window.confirm(`Xoá ${ids.length} phiên đã chọn?`)) deleteSessions(ids);
+  };
 
   // Pull the durable session list from the backend DB (survives cache clears /
   // origin changes). Merge with the localStorage list: local entries win on id
@@ -658,11 +739,6 @@ export default function ReportPage() {
   const openSession = useMemo(
     () => allSessions.find((s) => s.id === openSessionId) ?? null,
     [allSessions, openSessionId],
-  );
-
-  const totalDetections = useMemo(
-    () => allSessions.reduce((acc, s) => acc + s.detections.length, 0),
-    [allSessions],
   );
 
   if (allSessions.length === 0) {
@@ -717,31 +793,6 @@ export default function ReportPage() {
             >
               Lịch sử phiên nội soi
             </Typography>
-
-            {/* Compact stat row: 2 numbers + retention note */}
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 2.5, flexWrap: 'wrap' }}>
-              <Box sx={{ display: 'inline-flex', alignItems: 'baseline', gap: 0.5 }}>
-                <Typography sx={{ fontSize: '1.05rem', fontWeight: 700, color: '#006064', fontFamily: 'var(--font-mono)' }}>
-                  {allSessions.length}
-                </Typography>
-                <Typography sx={{ fontSize: '0.78rem', color: '#6E7C7B' }}>
-                  phiên
-                </Typography>
-              </Box>
-              <Box sx={{ width: 1, height: 14, backgroundColor: '#E2EAE9' }} />
-              <Box sx={{ display: 'inline-flex', alignItems: 'baseline', gap: 0.5 }}>
-                <Typography sx={{ fontSize: '1.05rem', fontWeight: 700, color: '#D97706', fontFamily: 'var(--font-mono)' }}>
-                  {totalDetections}
-                </Typography>
-                <Typography sx={{ fontSize: '0.78rem', color: '#6E7C7B' }}>
-                  tổn thương
-                </Typography>
-              </Box>
-              <Box sx={{ width: 1, height: 14, backgroundColor: '#E2EAE9' }} />
-              <Typography sx={{ fontSize: '0.72rem', color: '#9BA9A8' }}>
-                Lưu cục bộ tối đa 10 phiên gần nhất
-              </Typography>
-            </Box>
           </Box>
 
           <Box sx={{ display: 'flex', gap: 1.25, flexWrap: 'wrap', flexShrink: 0 }}>
@@ -749,7 +800,12 @@ export default function ReportPage() {
               variant="outlined"
               startIcon={<Trash2 size={14} />}
               onClick={() => {
-                if (window.confirm('Xoá toàn bộ lịch sử phiên?')) clearSessions();
+                if (window.confirm('Xoá toàn bộ lịch sử phiên?')) {
+                  allSessions.forEach((s) => { void deleteDbSession(s.id); });
+                  setDbSessions([]);
+                  setSelectedIds(new Set());
+                  clearSessions();
+                }
               }}
               sx={{
                 borderRadius: '8px', fontWeight: 600, fontSize: '0.82rem',
@@ -790,6 +846,37 @@ export default function ReportPage() {
           </Box>
         </Box>
 
+        {/* Bulk-select action bar — appears once ≥1 session is checked. */}
+        {selectedIds.size > 0 && (
+          <Box sx={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            gap: 2, px: 2.5, py: 1.5, borderRadius: '12px',
+            backgroundColor: 'rgba(196,78,82,0.06)', border: '1px solid rgba(196,78,82,0.25)',
+          }}>
+            <Typography sx={{ fontWeight: 700, color: '#C44E52', fontSize: '0.9rem' }}>
+              Đã chọn {selectedIds.size} phiên
+            </Typography>
+            <Box sx={{ display: 'flex', gap: 1 }}>
+              <MuiButton
+                onClick={() => setSelectedIds(new Set())}
+                color="inherit"
+                sx={{ textTransform: 'none', fontWeight: 600 }}
+              >
+                Bỏ chọn
+              </MuiButton>
+              <MuiButton
+                onClick={handleDeleteSelected}
+                variant="contained"
+                color="error"
+                startIcon={<Trash2 size={14} />}
+                sx={{ textTransform: 'none', borderRadius: '8px', fontWeight: 700 }}
+              >
+                Xoá đã chọn ({selectedIds.size})
+              </MuiButton>
+            </Box>
+          </Box>
+        )}
+
         <Grid container spacing={2.5}>
           {allSessions.map((session, idx) => (
             <Grid size={{ xs: 12, sm: 6, md: 4 }} key={session.id}>
@@ -797,6 +884,9 @@ export default function ReportPage() {
                 session={session}
                 idx={idx}
                 onClick={() => setOpenSessionId(session.id)}
+                selected={selectedIds.has(session.id)}
+                onToggleSelect={() => toggleSelect(session.id)}
+                onDelete={() => handleDeleteOne(session)}
               />
             </Grid>
           ))}
@@ -814,7 +904,7 @@ export default function ReportPage() {
           onSendSessionQA={sendSessionQA}
           onDeleteSession={() => {
             if (window.confirm(`Xoá phiên "${openSession.name}"?`)) {
-              removeSession(openSession.id);
+              deleteSessions([openSession.id]);
               setOpenSessionId(null);
             }
           }}

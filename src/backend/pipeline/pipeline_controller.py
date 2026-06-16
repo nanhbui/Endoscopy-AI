@@ -252,41 +252,149 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
     except Exception as exc:
         print(f"[Worker] YOLO load/warm-up failed: {exc}", flush=True)
 
-    # ── StrongSORT tracker ────────────────────────────────────────────────
+    # ── Tracker (StrongSORT / UTR-Track) ──────────────────────────────────
+    # ENDOSCOPY_TRACKER selects the tracker; the .update(dets, frame) API is
+    # identical for all of them so nothing else in the loop changes:
+    #   strongsort (default) → boxmot StrongSort + OSNet x0.25 (current setup)
+    #   xysr                 → UTR-Track StrongSortXYSR (XYSR Kalman) + OSNet-DCN
+    #   tlukf | utrtrack     → UTR-Track UTRTrack (TLUKF, virtual-trajectory on
+    #                          detection gaps — tuned for endoscopy)
+    # For xysr/tlukf, install UTR-Track's boxmot fork and point ENDOSCOPY_REID at
+    # osnet_dcn_x0_5_endocv.pt (the OSNet-DCN endoscopy ReID weights).
     tracker = None
+    _tracker_kind = _os.environ.get("ENDOSCOPY_TRACKER", "strongsort").lower()
     try:
         import torch as _torch
-        from boxmot.trackers.strongsort.strongsort import StrongSort
-        _reid_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), reid_weights_str) if reid_weights_str and not _os.path.isabs(reid_weights_str) else reid_weights_str
-        if reid_weights_str and _os.path.exists(reid_weights_str):
+        # Resolve a RELATIVE ENDOSCOPY_REID against the repo root so tracker
+        # selection doesn't depend on the backend's CWD. (os.path.exists/abspath
+        # both resolve relative paths against CWD — which the launcher may not set
+        # to the repo — so they can't fix this; anchoring on _REPO_ROOT can.)
+        _reid_path = Path(reid_weights_str) if reid_weights_str else None
+        if _reid_path is not None and not _reid_path.is_absolute():
+            _reid_path = _REPO_ROOT / _reid_path
+        if _reid_path is not None and _reid_path.exists():
             _device = _torch.device("cuda:0" if _torch.cuda.is_available() else "cpu")
-            tracker = StrongSort(
-                reid_weights=_os.path.abspath(reid_weights_str),
-                device=_device,
-                half=_torch.cuda.is_available(),
-                n_init=1,          # confirm track after 1 hit
-                max_age=300,       # keep lost track alive for 300 frames (scope can leave FOV)
-                max_iou_dist=0.85, # relaxed vs original 0.7; scope moves but different lesions rarely overlap
-                max_cos_dist=0.4,  # relaxed: appearance changes under scope lighting
-            )
-            print(f"[Worker] StrongSORT tracker ON ({_device})", flush=True)
+            _reid_abs = str(_reid_path.resolve())
+            if _tracker_kind in ("tlukf", "utrtrack"):
+                from boxmot import UTRTrack
+                tracker = UTRTrack(
+                    reid_weights=Path(_reid_abs), device=_device, half=False,
+                    max_cos_dist=0.9, max_iou_dist=0.9, max_age=500,
+                    n_init=1, ema_alpha=0.95, mc_lambda=0.98, per_class=False,
+                )
+                print(f"[Worker] UTR-Track (TLUKF) tracker ON ({_device}) reid={_reid_abs}", flush=True)
+            elif _tracker_kind == "xysr":
+                from boxmot import StrongSortXYSR
+                tracker = StrongSortXYSR(
+                    Path(_reid_abs), _device, fp16=False,
+                    max_dist=0.95, max_iou_dist=0.95, max_age=300, half=False, per_class=False,
+                )
+                print(f"[Worker] StrongSortXYSR tracker ON ({_device}) reid={_reid_abs}", flush=True)
+            else:
+                from boxmot.trackers.strongsort.strongsort import StrongSort
+                tracker = StrongSort(
+                    reid_weights=_reid_abs,
+                    device=_device,
+                    half=_torch.cuda.is_available(),
+                    n_init=1,          # confirm track after 1 hit
+                    max_age=300,       # keep lost track alive for 300 frames (scope can leave FOV)
+                    max_iou_dist=0.85, # relaxed vs original 0.7; scope moves but different lesions rarely overlap
+                    max_cos_dist=0.4,  # relaxed: appearance changes under scope lighting
+                )
+                print(f"[Worker] StrongSORT tracker ON ({_device})", flush=True)
         else:
             print(f"[Worker] ReID weights not found ({reid_weights_str}), tracker disabled", flush=True)
     except Exception as _te:
-        print(f"[Worker] StrongSORT init failed: {_te} — falling back to no tracker", flush=True)
+        import traceback as _tb
+        print(f"[Worker] Tracker init failed (kind={_tracker_kind}): {_te} — no tracker", flush=True)
+        _tb.print_exc()
 
     # Spatial-temporal dedup: suppress same lesion area within a time window.
-    # Track-ID-based dedup was fragile: max_age=300 causes the tracker to
-    # re-associate returning lesions with old IDs, silently skipping them.
     _DEDUP_WINDOW_MS = int(_os.environ.get("DEDUP_WINDOW_MS", "10000"))  # 10 s
     _DEDUP_IOU = 0.25  # ≥25% overlap = same region
+    # Diffuse diagnoses (viêm) are also merged by REGION, but with a looser IoU
+    # and a longer window: the scope lingers/pans over one inflamed area, so a
+    # slightly-shifted box at the same spot still merges, while a clearly
+    # different region is reported separately.
+    _DIFFUSE_IOU = float(_os.environ.get("ENDOSCOPY_DIFFUSE_IOU", "0.20"))
+    _DIFFUSE_WINDOW_MS = int(_os.environ.get("ENDOSCOPY_DIFFUSE_WINDOW_MS", "30000"))  # 30 s
+    # Diffuse "same spot" is judged by CENTER distance, not IoU: a viêm patch's
+    # box jitters in size as the scope moves, which makes IoU drop and re-report
+    # the SAME area; box centres stay close, so distance is far more stable. Two
+    # viêm are the "same spot" if their centres are within this fraction of the
+    # frame width (default 0.18 ≈ 18% of width).
+    _DIFFUSE_CENTER_FRAC = float(_os.environ.get("ENDOSCOPY_DIFFUSE_CENTER_FRAC", "0.18"))
     _reported_history: list[dict] = []  # {ts_ms, bbox (1920×1080 norm), label}
 
-    def _is_recently_reported(ts_ms: int, bbox: list, label: str) -> bool:
+    def _is_recently_reported(ts_ms: int, bbox: list, label: str,
+                              iou_thr: float = _DEDUP_IOU,
+                              window_ms: int = _DEDUP_WINDOW_MS) -> bool:
         for r in _reported_history:
-            if ts_ms - r["ts_ms"] < _DEDUP_WINDOW_MS and r["label"] == label and _iou(r["bbox"], bbox) >= _DEDUP_IOU:
+            if ts_ms - r["ts_ms"] < window_ms and r["label"] == label and _iou(r["bbox"], bbox) >= iou_thr:
                 return True
         return False
+
+    def _diffuse_same_spot(ts_ms: int, bbox: list, label: str, window_ms: int) -> bool:
+        """A diffuse viêm at the SAME spot as a recently-reported one — judged by
+        box-centre distance (robust to the box-size jitter that breaks IoU)."""
+        cx, cy = (bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0
+        max_d = _DIFFUSE_CENTER_FRAC * 1920.0  # bbox is in 1920×1080 coords
+        for r in _reported_history:
+            if ts_ms - r["ts_ms"] < window_ms and r["label"] == label:
+                rb = r["bbox"]
+                rx, ry = (rb[0] + rb[2]) / 2.0, (rb[1] + rb[3]) / 2.0
+                if ((cx - rx) ** 2 + (cy - ry) ** 2) ** 0.5 <= max_d:
+                    return True
+        return False
+
+    # Track-ID dedup: report each track exactly once for the whole session.
+    # This is the real fix for "scope shifts a bit → the SAME lesion gets
+    # re-detected and pauses again". It only works with a ReID strong enough to
+    # re-associate a lesion to its original ID after the scope leaves and
+    # returns — that is exactly what the UTR-Track family + OSNet-DCN endoscopy
+    # ReID provides. Plain StrongSORT's generic ReID re-associates poorly, so
+    # for it we stay on spatial-temporal dedup (track_id dedup there would
+    # wrongly merge distinct lesions OR skip genuine new ones). "auto" enables
+    # it for the UTR-Track trackers only; override with DEDUP_BY_TRACK_ID=0/1.
+    _dtid = _os.environ.get("DEDUP_BY_TRACK_ID", "auto").lower()
+    if _dtid == "auto":
+        _dedup_by_track_id = tracker is not None and _tracker_kind in ("tlukf", "utrtrack", "xysr")
+    else:
+        _dedup_by_track_id = _dtid in ("1", "true", "yes", "on")
+    reported_track_ids: set[int] = set()
+
+    # Dedup for DIFFUSE diagnoses (e.g. "Viêm dạ dày HP", "Viêm thực quản").
+    # These are not focal lesions: as the scope pans, YOLO fires on many mucosa
+    # patches, each getting a NEW track id at a different position — neither
+    # track-id/ReID nor spatial IoU can cleanly collapse them. Mode is selectable
+    # via ENDOSCOPY_DIFFUSE_MODE:
+    #   cooldown (default) — POSITION-AWARE cooldown: after reporting a viêm at a
+    #                        spot, the SAME spot (IoU overlap) is suppressed for
+    #                        ENDOSCOPY_DIFFUSE_COOLDOWN_MS (default 7 s), but a
+    #                        clearly DIFFERENT spot is still reported. Merges rapid
+    #                        same-region re-fires (anti-spam) while keeping
+    #                        genuinely different locations. (Visual ReID cannot
+    #                        re-identify diffuse inflammation, so position+time is
+    #                        used instead.)
+    #   once             — report ONCE per session per label.
+    #   region           — like cooldown but with a longer (30 s) window.
+    #   off              — no diffuse-specific dedup (falls back to track-id).
+    # Tuning: ENDOSCOPY_DIFFUSE_IOU (how much overlap counts as the "same spot").
+    # Which labels count as diffuse: ENDOSCOPY_DIFFUSE_KEYWORDS (substring match,
+    # comma-separated, "" disables).
+    _diffuse_mode = _os.environ.get("ENDOSCOPY_DIFFUSE_MODE", "cooldown").strip().lower()
+    _DIFFUSE_COOLDOWN_MS = int(_os.environ.get("ENDOSCOPY_DIFFUSE_COOLDOWN_MS", "7000"))  # 7 s
+    _diffuse_kw = [k.strip().lower()
+                   for k in _os.environ.get("ENDOSCOPY_DIFFUSE_KEYWORDS", "viêm").split(",")
+                   if k.strip()]
+    reported_diffuse_labels: set[str] = set()
+
+    def _is_diffuse(_label: str) -> bool:
+        _l = _label.lower()
+        return any(k in _l for k in _diffuse_kw)
+
+    print(f"[Worker] Dedup mode: {'track_id' if _dedup_by_track_id else 'spatial-temporal'} "
+          f"(tracker={_tracker_kind}) diffuse_mode={_diffuse_mode} kw={_diffuse_kw}", flush=True)
 
     # ── GStreamer pipeline ────────────────────────────────────────────────
     try:
@@ -651,6 +759,26 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                         if _cl.get("label") and len(_cl.get("bbox", [])) >= 4:
                             _confirmed_lesions.append({"label": _cl["label"], "bbox": _cl["bbox"]})
                             print(f"[Worker] CONFIRM_LESION registered: {_cl['label']}", flush=True)
+                    except (ValueError, KeyError):
+                        pass
+                elif cmd.startswith("UNCONFIRM_LESION:"):
+                    # "Báo sai" overrides a prior "Xác nhận luôn": drop matching
+                    # entries (label + IoU) from the in-memory confirmed list so
+                    # the worker stops auto-capturing this region for the rest of
+                    # the run. Symmetric to CONFIRM_LESION above.
+                    try:
+                        _ucl = _json.loads(cmd.split(":", 1)[1])
+                        _u_label = _ucl.get("label", "")
+                        _u_bbox = _ucl.get("bbox", [])
+                        if _u_label and len(_u_bbox) >= 4:
+                            _before = len(_confirmed_lesions)
+                            _confirmed_lesions[:] = [
+                                _cl for _cl in _confirmed_lesions
+                                if not (_cl.get("label") == _u_label
+                                        and _iou(_cl.get("bbox", []), _u_bbox) >= _CONFIRM_IOU)
+                            ]
+                            if len(_confirmed_lesions) != _before:
+                                print(f"[Worker] UNCONFIRM_LESION dropped {_before - len(_confirmed_lesions)}: {_u_label}", flush=True)
                     except (ValueError, KeyError):
                         pass
                 elif cmd.startswith("MUTE_TRACK:"):
@@ -1059,8 +1187,41 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                                 print(f"[Worker] CONFIRMED_CAPTURE track_id={track_id} {label} ts_ms={timestamp_ms}", flush=True)
                             continue
 
-                        # Spatial-temporal dedup
-                        if _is_recently_reported(timestamp_ms, xyxy_norm, label):
+                        # Diffuse-diagnosis dedup (mode-selectable, see top of
+                        # worker). "once" = one report per label per session
+                        # (correct for a whole-organ diagnosis like HP gastritis);
+                        # "region" = merge same spot, report different spots;
+                        # "off" = fall through to track-id dedup.
+                        if _is_diffuse(label) and _diffuse_mode != "off":
+                            if _diffuse_mode == "region":
+                                if _is_recently_reported(timestamp_ms, xyxy_norm, label,
+                                                         iou_thr=_DIFFUSE_IOU,
+                                                         window_ms=_DIFFUSE_WINDOW_MS):
+                                    continue
+                            elif _diffuse_mode == "once":
+                                if label in reported_diffuse_labels:
+                                    continue
+                            else:  # "cooldown" (default) — position-aware by box
+                                # CENTRE distance (robust to box-size jitter):
+                                # suppress only when the SAME spot was reported
+                                # within the cooldown window; a clearly DIFFERENT
+                                # spot is reported even within the window, and the
+                                # same spot becomes reportable again once it passes.
+                                if _diffuse_same_spot(timestamp_ms, xyxy_norm, label,
+                                                      window_ms=_DIFFUSE_COOLDOWN_MS):
+                                    continue
+                        # Track-ID dedup (UTR-Track + OSNet-DCN ReID): a focal
+                        # lesion already reported keeps its ID when the scope
+                        # drifts off and back, so suppress its repeat appearances.
+                        # Guard on use_tracker + real id: when DEDUP_BY_TRACK_ID is
+                        # forced on but the tracker is off, every box gets the fake
+                        # track_id=0 — without this guard the first detection would
+                        # suppress ALL later ones. Falls through to spatial-temporal.
+                        elif _dedup_by_track_id and use_tracker and track_id >= 0:
+                            if track_id in reported_track_ids:
+                                continue
+                        # Spatial-temporal dedup (fallback / StrongSORT mode)
+                        elif _is_recently_reported(timestamp_ms, xyxy_norm, label):
                             continue
 
                         print(f"[Worker] Detection track_id={track_id} {label} conf={det_conf:.2f} bbox={[round(v,1) for v in xyxy]}", flush=True)
@@ -1091,6 +1252,13 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                             "frame_b64": thumbnail_b64,
                         }
                         _reported_history.append({"ts_ms": timestamp_ms, "bbox": xyxy_norm, "label": label})
+                        # Record the id only when track-id dedup is actually active
+                        # and the tracker produced a real id — symmetric with the
+                        # read above, so a fake track_id=0 never poisons the set.
+                        if _dedup_by_track_id and use_tracker and track_id >= 0:
+                            reported_track_ids.add(int(track_id))
+                        if _is_diffuse(label):
+                            reported_diffuse_labels.add(label)
                         confirmed.append(det_data)
                         result_q.put({"event": "DETECTION_FOUND", "data": det_data})
                         paused = True

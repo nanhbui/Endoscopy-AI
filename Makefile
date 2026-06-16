@@ -38,6 +38,18 @@ UVICORN     := $(VENV)/bin/python -m uvicorn
 BE_SRC      := $(ROOT)/src/backend/api
 FE_SRC      := $(ROOT)/frontend
 
+# ── ReID / tracker config (override on the CLI to switch back, e.g.
+#    `make be ENDOSCOPY_TRACKER=strongsort BOXMOT_FORK_PATH=`) ───────────────────
+#   ENDOSCOPY_TRACKER : tlukf|utrtrack|xysr (UTR-Track fork) or strongsort (prod boxmot)
+#   BOXMOT_FORK_PATH  : dir containing the UTR-Track fork's `boxmot` package;
+#                       prepended to PYTHONPATH so it shadows the installed boxmot.
+#                       Set empty to use the installed boxmot (StrongSORT prod).
+#   REID_WEIGHTS_PATH : OSNet-DCN endoscopy ReID weights.
+ENDOSCOPY_TRACKER ?= tlukf
+BOXMOT_FORK_PATH  ?= $(HOME)/UTR-Track/boxmot
+REID_WEIGHTS_PATH ?= $(ROOT)/models/osnet_dcn_x0_5_endocv.pt
+DEDUP_BY_TRACK_ID ?= auto
+
 # ── Remote / VPN config ───────────────────────────────────────────────────────
 VPN_NAME    := bee15
 GPU_HOST    := 10.8.0.7
@@ -103,8 +115,13 @@ dev: env-check
 		wait'
 
 be: env-check
-	@echo "$(CYAN)Starting backend (reload enabled)…$(RESET)"
-	cd $(BE_SRC) && $(UVICORN) endoscopy_ws_server:app --host 0.0.0.0 --port 8001 --reload
+	@echo "$(CYAN)Starting backend (reload enabled, tracker=$(ENDOSCOPY_TRACKER))…$(RESET)"
+	cd $(BE_SRC) && \
+		PYTHONPATH="$(BOXMOT_FORK_PATH):$$PYTHONPATH" \
+		ENDOSCOPY_TRACKER=$(ENDOSCOPY_TRACKER) \
+		ENDOSCOPY_REID="$(REID_WEIGHTS_PATH)" \
+		DEDUP_BY_TRACK_ID=$(DEDUP_BY_TRACK_ID) \
+		$(UVICORN) endoscopy_ws_server:app --host 0.0.0.0 --port 8001 --reload
 
 fe:
 	@echo "$(CYAN)Starting frontend (Next.js dev)…$(RESET)"

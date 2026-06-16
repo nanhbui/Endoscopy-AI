@@ -34,7 +34,7 @@ export interface QaMessage {
 // Phase A bridge: render structured lesion report as markdown until the
 // dedicated <LesionReportCard> component (task A4) lands. Keeps the existing
 // ReactMarkdown render path in workspace alive.
-function lesionReportToMarkdown(r: LesionReport): string {
+export function lesionReportToMarkdown(r: LesionReport): string {
   const sevEmoji = r.conclusion.severity === "cao" ? "🔴"
                  : r.conclusion.severity === "trung bình" ? "🟡" : "🟢";
   const diff = r.conclusion.differential
@@ -73,7 +73,7 @@ function lesionReportToMarkdown(r: LesionReport): string {
 // ── Domain types ──────────────────────────────────────────────────────────────
 
 /** Outcome of a detection after doctor interaction. */
-export type DetectionStatus = "detected" | "ignored" | "confirmed" | "analyzed";
+export type DetectionStatus = "detected" | "ignored" | "confirmed" | "analyzed" | "false_positive";
 
 /** Detection as used internally by the context (mirrors DetectionData). */
 export interface Detection {
@@ -215,6 +215,14 @@ interface AnalysisContextType {
   addDetection: (d: Detection) => void;
   removeDetection: (timestamp: number) => void;
   resetAnalysis: () => void;
+  /** Stop the running pipeline but KEEP the current session + findings and jump
+   *  straight to the end-of-session report (workspace "Dừng" button). */
+  finalizeSession: () => void;
+  /** Browser-live flow — materialize the captures collected in BrowserCaptureLive
+   *  into a single `live` session atomically (avoids the stale currentSessionId
+   *  race of startNewSession+addDetection), set it current, jump to EOS_SUMMARY
+   *  so /report shows it. Returns the new session id. */
+  saveLiveSession: (name: string, detections: Detection[]) => string;
   /** Delete an entire session by id (from report history). */
   removeSession: (sessionId: string) => void;
   /** Clear all stored sessions. */
@@ -408,7 +416,12 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
 
   const startNewSession = useCallback(
     (opts: { name: string; source: SessionSource; videoId?: string }): string => {
-      const id = genSessionId();
+      // Reuse the backend video_id as the session id so the localStorage record
+      // and the DB-persisted record (keyed by video_id) share one id and merge
+      // into a single card on the Report page — instead of showing a duplicate
+      // empty "Phiên xxxx" card alongside the real one. Falls back to a random
+      // id for mock sessions that have no video_id.
+      const id = opts.videoId ?? genSessionId();
       const newSession: Session = {
         id,
         name: opts.name,
@@ -855,7 +868,9 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       const fp = sess.detections[0];
       return {
         ...sess,
-        detections: sess.detections.map((d, i) => (i === 0 ? { ...d, status: "ignored" } : d)),
+        // "false_positive" (not "ignored") so the report distinguishes a flagged
+        // false positive from a plain session-only skip.
+        detections: sess.detections.map((d, i) => (i === 0 ? { ...d, status: "false_positive" } : d)),
         // Retract any auto-capture overlapping the rejected region so a
         // "Báo sai" lesion no longer lingers in the "Xác nhận luôn" panel
         // (and is excluded from the end-of-session report).
@@ -869,7 +884,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
     setPipelineState("PLAYING");
     setCurrentDetection(null);
     llmInsightRef.current = ""; setLlmInsight("");
-  }, [updateCurrentSession]);
+  }, [updateCurrentSession, currentDetection]);
 
   // Phase D — request a re-detect on the paused frame at a lower YOLO conf.
   // Result arrives as a fresh DETECTION_FOUND (or RECHECK_EMPTY) via WS,
@@ -1023,14 +1038,48 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
     setVideoId(null);
   }, [resetPipeline]);
 
+  // Stop the pipeline (disconnect WS) but keep the current session + videoId so
+  // the report modal can show what was detected and "Phân tích lại" can replay.
+  const finalizeSession = useCallback(() => {
+    clearMockTimers();
+    wsRef.current?.disconnect();
+    wsRef.current = null;
+    explainInFlightRef.current = false;
+    setIsConnected(false);
+    setCurrentDetection(null);
+    setIsListeningVoice(false);
+    llmInsightRef.current = ""; setLlmInsight("");
+    setPipelineState("EOS_SUMMARY");
+  }, [clearMockTimers]);
+
   const removeSession = useCallback((sessionId: string) => {
-    setSessions((prev) => prev.filter((s) => s.id !== sessionId));
+    setSessions((prev) => {
+      const next = prev.filter((s) => s.id !== sessionId);
+      saveSessions(next);   // persist now — deletes must not wait for the 800ms debounce
+      return next;
+    });
     setCurrentSessionId((cur) => (cur === sessionId ? null : cur));
   }, []);
 
   const clearSessions = useCallback(() => {
     setSessions([]);
+    saveSessions([]);       // persist now so a quick reload doesn't restore them
     setCurrentSessionId(null);
+  }, []);
+
+  const saveLiveSession = useCallback((name: string, detections: Detection[]): string => {
+    const id = genSessionId();
+    const newSession: Session = {
+      id,
+      name,
+      source: "live",
+      startedAt: Date.now(),
+      detections,
+    };
+    setSessions((prev) => [newSession, ...prev].slice(0, MAX_SESSIONS));
+    setCurrentSessionId(id);
+    setPipelineState("EOS_SUMMARY");
+    return id;
   }, []);
 
   useEffect(() => {
@@ -1080,6 +1129,8 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       addDetection,
       removeDetection,
       resetAnalysis,
+      finalizeSession,
+      saveLiveSession,
       removeSession,
       clearSessions,
     }),
@@ -1094,7 +1145,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       recheckResult, isRecheckModalOpen, openRecheckModal, closeRecheckModal,
       removeCapture,
       sendSessionQA, lastError, setIsPlaying,
-      addDetection, removeDetection, resetAnalysis, removeSession, clearSessions,
+      addDetection, removeDetection, resetAnalysis, finalizeSession, saveLiveSession, removeSession, clearSessions,
     ],
   );
 

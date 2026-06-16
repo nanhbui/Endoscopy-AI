@@ -173,6 +173,10 @@ tiếng Anh trong ngoặc — áp dụng cho CẢ primary_dx VÀ MỌI mục dif
   ❌ "Ung thư" (quá chung — KHÔNG có nghĩa lâm sàng, phải nói rõ ung thư gì)
   ❌ "Loét khác" (vô nghĩa — bỏ entry này, ghi differential cụ thể hoặc giảm xuống 2 mục)
 
+TUYỆT ĐỐI KHÔNG dùng chữ Hán / ký tự tiếng Trung (vd 淋巴, 胃, 炎). Thuật ngữ
+nước ngoài CHỈ được viết bằng tiếng Anh (chữ Latin). Output chỉ gồm tiếng Việt +
+tiếng Anh — bất kỳ ký tự tiếng Trung nào đều là VI PHẠM nghiêm trọng.
+
 ## QUY TẮC KỸ THUẬT (technique fields — đừng nhầm)
 - method: phương pháp NỘI SOI, không phải thuật toán AI.
   ✅ "Nội soi dạ dày-tá tràng AI-assisted (EGD with AI assistance)"
