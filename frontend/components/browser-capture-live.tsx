@@ -19,6 +19,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
+import CircularProgress from '@mui/material/CircularProgress';
 import { Radio, Cpu, Square, Video as VideoIcon, X, Info, Maximize2, FileText, StopCircle } from 'lucide-react';
 import { WS_BASE, API_BASE } from '@/lib/ws-client';
 import { labelToColor as colorFor } from '@/lib/lesion-colors';
@@ -139,8 +140,10 @@ export function BrowserCaptureLive() {
     }
   }, []);
 
-  // Snapshot the current frame for `box`, push it to the panel, kick off the VLM.
-  const captureFrame = useCallback((box: LiveBox) => {
+  // Snapshot the current frame, draw the detection boxes onto it (same overlay
+  // the doctor sees live), push it to the panel, then kick off the VLM. `box` is
+  // the strongest box (drives label/conf + explain); `all` are drawn for context.
+  const captureFrame = useCallback((box: LiveBox, all: LiveBox[]) => {
     const v = videoRef.current, cap = capCanvasRef.current;
     if (!v || !cap || !v.videoWidth) return;
     const cw = CAP_WIDTH;
@@ -149,6 +152,28 @@ export function BrowserCaptureLive() {
     const ctx = cap.getContext('2d');
     if (!ctx) return;
     ctx.drawImage(v, 0, 0, cw, ch);
+    // Draw boxes — bbox coords are normalized to 1920×1080, same as the live overlay.
+    const sx = cw / FRAME_W, sy = ch / FRAME_H;
+    const lw = Math.max(2, Math.round(cw / 320));
+    const fontPx = Math.max(11, Math.round(cw / 60));
+    const labelH = fontPx + 6;
+    ctx.textBaseline = 'middle';
+    for (const b of all) {
+      const [x1, y1, x2, y2] = b.bbox;
+      const rx = x1 * sx, ry = y1 * sy, rw = (x2 - x1) * sx, rh = (y2 - y1) * sy;
+      const col = colorFor(b.label);
+      ctx.lineWidth = lw;
+      ctx.strokeStyle = col;
+      ctx.strokeRect(rx, ry, rw, rh);
+      const text = `${b.label} ${(b.confidence * 100).toFixed(0)}%`;
+      ctx.font = `700 ${fontPx}px sans-serif`;
+      const tw = ctx.measureText(text).width + 8;
+      const ly = Math.max(0, ry - labelH);
+      ctx.fillStyle = col;
+      ctx.fillRect(rx, ly, tw, labelH);
+      ctx.fillStyle = '#fff';
+      ctx.fillText(text, rx + 4, ly + labelH / 2);
+    }
     const b64 = cap.toDataURL('image/jpeg', 0.8).split(',')[1] ?? '';
     if (!b64) return;
     const id = ++capIdRef.current;
@@ -167,7 +192,7 @@ export function BrowserCaptureLive() {
     const now = Date.now();
     if (now - (lastCapAtRef.current.get(top.label) ?? 0) < CAPTURE_COOLDOWN_MS) return;
     lastCapAtRef.current.set(top.label, now);
-    captureFrame(top);
+    captureFrame(top, nb);
   }, [captureFrame]);
 
   const stopAi = useCallback(() => {
@@ -230,8 +255,13 @@ export function BrowserCaptureLive() {
   }, []);
 
   // "Tạo báo cáo" — fold captures into a live session and open /report.
+  // Block report creation until every capture's VLM call has settled — otherwise
+  // detections land in the report with an empty "Phân tích AI".
+  const pendingExplain = captures.filter((c) => c.explaining).length;
+  const canReport = captures.length > 0 && pendingExplain === 0;
+
   const createReport = useCallback(() => {
-    if (captures.length === 0) return;
+    if (captures.length === 0 || captures.some((c) => c.explaining)) return;
     const base = Math.min(...captures.map((c) => c.ts));
     const dets: Detection[] = captures.map((c) => ({
       label: c.label,
@@ -372,8 +402,15 @@ export function BrowserCaptureLive() {
               </>
             )}
             {captures.length > 0 && (
-              <Box component="button" onClick={createReport} sx={btnSx('#00838F')}>
-                <FileText size={16} /> Tạo báo cáo ({captures.length})
+              <Box component="button" onClick={createReport} disabled={!canReport}
+                sx={{ ...btnSx('#00838F'),
+                  opacity: canReport ? 1 : 0.55,
+                  cursor: canReport ? 'pointer' : 'not-allowed',
+                  '&:hover': { filter: canReport ? 'brightness(1.08)' : 'none' } }}
+              >
+                {canReport
+                  ? <><FileText size={16} /> Tạo báo cáo ({captures.length})</>
+                  : <><CircularProgress size={15} sx={{ color: '#fff' }} /> Đang phân tích LLM… ({pendingExplain})</>}
               </Box>
             )}
           </Box>
