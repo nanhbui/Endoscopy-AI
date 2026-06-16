@@ -17,7 +17,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
 import CircularProgress from '@mui/material/CircularProgress';
-import { Radio, Cpu, Square, Video as VideoIcon, Sparkles, X } from 'lucide-react';
+import { Radio, Cpu, Square, Video as VideoIcon, Sparkles, X, Info, Maximize2 } from 'lucide-react';
 import { WS_BASE, API_BASE, type LesionReport } from '@/lib/ws-client';
 import { labelToColor as colorFor } from '@/lib/lesion-colors';
 import { LesionReportCard } from '@/components/lesion-report-card';
@@ -28,6 +28,24 @@ const FRAME_W = 1920;
 const FRAME_H = 1080;
 const SEND_INTERVAL_MS = 200;   // grab cadence (~5 fps to backend)
 const GRAB_WIDTH = 960;          // downscale frames sent to backend
+
+// Capture resolutions offered to the doctor. "auto" lets the dongle decide.
+const RES_OPTIONS = [
+  { value: 'auto', label: 'Tự động' },
+  { value: '1920x1080', label: '1920×1080 (16:9)' },
+  { value: '1280x720', label: '1280×720 (16:9)' },
+  { value: '1024x768', label: '1024×768 (4:3)' },
+  { value: '800x600', label: '800×600 (4:3)' },
+];
+
+// How the mirror fills its frame. "contain" keeps aspect (letterbox), "fill"
+// stretches to the frame (fixes a squished signal), "cover" crops to fill.
+type FitMode = 'contain' | 'cover' | 'fill';
+const FIT_OPTIONS: { value: FitMode; label: string }[] = [
+  { value: 'contain', label: 'Vừa khung' },
+  { value: 'fill', label: 'Lấp đầy' },
+  { value: 'cover', label: 'Cắt vừa' },
+];
 
 export function BrowserCaptureLive() {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -40,6 +58,13 @@ export function BrowserCaptureLive() {
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [deviceId, setDeviceId] = useState('');
   const [previewing, setPreviewing] = useState(false);
+  // Display tuning: requested capture resolution, how the mirror fills the
+  // frame, and a manual zoom to compensate a squished/off-center signal.
+  const [resolution, setResolution] = useState('auto');
+  const [fitMode, setFitMode] = useState<FitMode>('contain');
+  const [zoom, setZoom] = useState(100);          // percent, 50–150
+  const [actualRes, setActualRes] = useState(''); // e.g. "1920×1080" from the track
+  const [showHint, setShowHint] = useState(true);
   const [aiOn, setAiOn] = useState(false);
   const [boxes, setBoxes] = useState<LiveBox[]>([]);
   const [err, setErr] = useState('');
@@ -57,12 +82,15 @@ export function BrowserCaptureLive() {
     }
   }, []);
 
-  const startPreview = useCallback(async (id?: string) => {
+  const startPreview = useCallback(async (id?: string, res?: string) => {
     setErr('');
     try {
       streamRef.current?.getTracks().forEach((t) => t.stop());
+      const useRes = res ?? resolution;
+      const [w, h] = useRes !== 'auto' ? useRes.split('x').map(Number) : [];
+      const sizeConstraint = w && h ? { width: { ideal: w }, height: { ideal: h } } : {};
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: id ? { deviceId: { exact: id } } : true,
+        video: id ? { deviceId: { exact: id }, ...sizeConstraint } : (w ? sizeConstraint : true),
         audio: false,
       });
       streamRef.current = stream;
@@ -74,11 +102,12 @@ export function BrowserCaptureLive() {
       await refreshDevices();
       const settings = stream.getVideoTracks()[0]?.getSettings?.();
       if (settings?.deviceId) setDeviceId(settings.deviceId);
+      if (settings?.width && settings?.height) setActualRes(`${settings.width}×${settings.height}`);
     } catch {
       setErr('Không truy cập được thiết bị. Hãy cấp quyền camera cho trang và cắm cục capture.');
       setPreviewing(false);
     }
-  }, [refreshDevices]);
+  }, [refreshDevices, resolution]);
 
   const stopAi = useCallback(() => {
     setAiOn(false);
@@ -159,13 +188,32 @@ export function BrowserCaptureLive() {
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+      {/* Duplicate-mode notice — an Extend (mở rộng) signal arrives squished/cropped */}
+      {showHint && (
+        <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 1, px: 1.5, py: 1, borderRadius: '10px', border: '1px solid #FCD34D', backgroundColor: '#FFFBEB' }}>
+          <Info size={16} color="#B45309" style={{ flexShrink: 0, marginTop: 2 }} />
+          <Typography sx={{ fontSize: '0.75rem', color: '#92400E', flex: 1, lineHeight: 1.5 }}>
+            Trên máy nguồn, đặt chế độ màn hình là <b>Duplicate (Nhân đôi)</b>, không dùng <b>Extend (Mở rộng)</b> —
+            nếu để Extend, hình truyền sang sẽ bị méo/bẹp hoặc cắt mất. Có thể chỉnh thêm độ phân giải và tỉ lệ bên dưới.
+          </Typography>
+          <Box component="button" onClick={() => setShowHint(false)}
+            sx={{ border: 'none', background: 'transparent', cursor: 'pointer', color: '#B45309', display: 'inline-flex', p: 0 }}>
+            <X size={15} />
+          </Box>
+        </Box>
+      )}
+
       {/* Video surface + overlay */}
       <Box sx={{ aspectRatio: '16 / 9', width: '100%', borderRadius: '16px', backgroundColor: '#0D1117', position: 'relative', overflow: 'hidden', border: '1px solid #1c2530', boxShadow: '0 6px 24px rgba(13,27,42,0.10)' }}>
         <video
           ref={videoRef}
           muted
           playsInline
-          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', background: '#0D1117' }}
+          style={{
+            position: 'absolute', inset: 0, width: '100%', height: '100%',
+            objectFit: fitMode, background: '#0D1117',
+            transform: zoom !== 100 ? `scale(${zoom / 100})` : undefined,
+          }}
         />
         {!previewing && (
           <Box sx={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 1 }}>
@@ -200,6 +248,11 @@ export function BrowserCaptureLive() {
           <Typography sx={{ fontSize: '0.68rem', fontWeight: 700, color: '#fff', letterSpacing: '0.06em' }}>
             {aiOn ? 'AI ĐANG CHẠY' : previewing ? 'MIRROR' : 'OFFLINE'}
           </Typography>
+          {previewing && actualRes && (
+            <Typography sx={{ fontSize: '0.6rem', fontWeight: 600, color: 'rgba(255,255,255,0.85)', ml: 0.5 }}>
+              · {actualRes}
+            </Typography>
+          )}
         </Box>
 
         {/* detection count (AI on) */}
@@ -262,6 +315,52 @@ export function BrowserCaptureLive() {
           </>
         )}
       </Box>
+      {/* Display tuning — resolution, fit mode, zoom (fixes a squished signal) */}
+      {previewing && (
+        <Box sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 1.5, px: 1.5, py: 1, borderRadius: '10px', border: '1px solid #E2EAE8', backgroundColor: '#F8FAFB' }}>
+          <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.6 }}>
+            <Maximize2 size={14} color="#006064" />
+            <Typography sx={{ fontSize: '0.72rem', fontWeight: 700, color: '#445' }}>Độ phân giải</Typography>
+            <Box component="select"
+              value={resolution}
+              onChange={(e: React.ChangeEvent<HTMLSelectElement>) => { setResolution(e.target.value); startPreview(deviceId, e.target.value); }}
+              sx={{ px: 1, py: 0.6, borderRadius: '8px', border: '1px solid #CBD5D3', fontSize: '0.78rem', backgroundColor: '#fff' }}
+            >
+              {RES_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </Box>
+          </Box>
+
+          <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.6 }}>
+            <Typography sx={{ fontSize: '0.72rem', fontWeight: 700, color: '#445' }}>Hiển thị</Typography>
+            <Box sx={{ display: 'inline-flex', borderRadius: '8px', overflow: 'hidden', border: '1px solid #CBD5D3' }}>
+              {FIT_OPTIONS.map((o) => (
+                <Box key={o.value} component="button" onClick={() => setFitMode(o.value)}
+                  sx={{ px: 1.1, py: 0.6, border: 'none', cursor: 'pointer', fontSize: '0.74rem', fontWeight: 600,
+                    backgroundColor: fitMode === o.value ? '#006064' : '#fff',
+                    color: fitMode === o.value ? '#fff' : '#445' }}>
+                  {o.label}
+                </Box>
+              ))}
+            </Box>
+          </Box>
+
+          <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.75, flex: '1 1 180px', minWidth: 160 }}>
+            <Typography sx={{ fontSize: '0.72rem', fontWeight: 700, color: '#445', whiteSpace: 'nowrap' }}>Tỉ lệ {zoom}%</Typography>
+            <Box component="input" type="range" min={50} max={150} step={1}
+              value={zoom}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setZoom(Number(e.target.value))}
+              sx={{ flex: 1, accentColor: '#006064', cursor: 'pointer' }}
+            />
+            {zoom !== 100 && (
+              <Box component="button" onClick={() => setZoom(100)}
+                sx={{ border: 'none', background: 'transparent', cursor: 'pointer', color: '#006064', fontSize: '0.72rem', fontWeight: 700, whiteSpace: 'nowrap', p: 0 }}>
+                Đặt lại
+              </Box>
+            )}
+          </Box>
+        </Box>
+      )}
+
       <Typography sx={{ fontSize: '0.72rem', color: 'text.disabled' }}>
         Cục capture HDMI cắm vào máy này; trình duyệt nhận như một “camera”. Màn hình máy kia hiển thị
         liên tục (mirror); chỉ khi bấm <b>Bắt đầu AI</b> mới chạy mô hình phát hiện. Bấm <b>Giải thích</b>
