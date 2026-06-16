@@ -16,7 +16,6 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useRouter } from 'next/navigation';
 import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
 import CircularProgress from '@mui/material/CircularProgress';
@@ -62,7 +61,6 @@ function b64ToJpegBlob(b64: string): Blob {
 }
 
 export function BrowserCaptureLive() {
-  const router = useRouter();
   const { saveLiveSession } = useAnalysis();
 
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -262,6 +260,7 @@ export function BrowserCaptureLive() {
 
   const createReport = useCallback(() => {
     if (captures.length === 0 || captures.some((c) => c.explaining)) return;
+    stopSession();   // end the live mirror/detector — the report popup takes over
     const base = Math.min(...captures.map((c) => c.ts));
     const dets: Detection[] = captures.map((c) => ({
       label: c.label,
@@ -274,9 +273,12 @@ export function BrowserCaptureLive() {
       status: 'analyzed',
     }));
     const name = `Trực tiếp ${new Date().toLocaleString('vi-VN')}`;
+    // saveLiveSession flips pipelineState → EOS_SUMMARY; the workspace page then
+    // renders its SessionReportModal (the stop→report popup). We intentionally do
+    // NOT navigate to /report here — the doctor reviews the popup first, then the
+    // modal's "Xem báo cáo đầy đủ" button routes to /report.
     saveLiveSession(name, dets);
-    router.push('/report');
-  }, [captures, saveLiveSession, router]);
+  }, [captures, saveLiveSession, stopSession]);
 
   // Cleanup on unmount.
   useEffect(() => () => {
