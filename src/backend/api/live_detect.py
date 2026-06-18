@@ -22,7 +22,7 @@ from loguru import logger
 # the file/library path. Importing is cheap — pipeline_controller defers gi/torch
 # imports to inside its worker function.
 from pipeline_controller import (
-    DEFAULT_MODEL, CLASS_CONF_THRESHOLDS, CONFIDENCE_THRESHOLD,
+    DEFAULT_MODEL, CLASS_CONF_THRESHOLDS, CONFIDENCE_THRESHOLD, FRAME_W, FRAME_H,
 )
 
 _model = None
@@ -90,7 +90,7 @@ def detect_jpeg(jpeg: bytes) -> list[dict]:
                 out.append({
                     "label": label,
                     "confidence": round(conf, 4),
-                    "bbox": [x1 / w * 1920, y1 / h * 1080, x2 / w * 1920, y2 / h * 1080],
+                    "bbox": [x1 / w * FRAME_W, y1 / h * FRAME_H, x2 / w * FRAME_W, y2 / h * FRAME_H],
                 })
         out.sort(key=lambda d: d["confidence"], reverse=True)
         return out[:10]

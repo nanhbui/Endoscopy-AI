@@ -17,6 +17,7 @@ no point creating empty tables for Phase A; YAGNI applies.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 from typing import Optional
@@ -24,8 +25,9 @@ from typing import Optional
 from loguru import logger
 
 # DB lives next to other persistent data (uploads, library) — keeps the
-# server self-contained for backup/move purposes.
-_DB_PATH = Path(__file__).parent / "data" / "endoscopy.db"
+# server self-contained for backup/move purposes. Override with ENDOSCOPY_DB_PATH
+# for deployments that keep the database on a separate volume.
+_DB_PATH = Path(os.getenv("ENDOSCOPY_DB_PATH", str(Path(__file__).parent / "data" / "endoscopy.db")))
 
 _LESION_REPORTS_DDL = """
 CREATE TABLE IF NOT EXISTS lesion_reports (
@@ -153,7 +155,7 @@ def init_db() -> None:
 
 # ── Durability: backup + self-heal so report history is never lost ────────────
 
-_BACKUP_DIR = _DB_PATH.parent / "backups"
+_BACKUP_DIR = Path(os.getenv("ENDOSCOPY_DB_BACKUP_DIR", str(_DB_PATH.parent / "backups")))
 
 
 def _row_count(conn: sqlite3.Connection) -> int:
@@ -194,7 +196,7 @@ def restore_db_if_empty() -> bool:
         return False
 
 
-def backup_db(keep: int = 15) -> Optional[Path]:
+def backup_db(keep: int = int(os.getenv("ENDOSCOPY_DB_BACKUP_KEEP", "15"))) -> Optional[Path]:
     """Snapshot the DB to data/backups/ (WAL-safe online backup) so report
     history survives an accidental wipe of the live file. Skips empty DBs so we
     don't evict good snapshots. Keeps the newest `keep` backups. The backups dir
@@ -280,8 +282,13 @@ def db_path() -> Path:
 
 # ── False-positives (Phase D) ────────────────────────────────────────────────
 
-_FRAME_W = 1920.0
-_FRAME_H = 1080.0
+# Canvas dims come from the pipeline (single source of truth); fall back to the
+# known 1920×1080 if the pipeline module isn't importable (e.g. standalone use).
+try:
+    from pipeline_controller import FRAME_W as _PC_FRAME_W, FRAME_H as _PC_FRAME_H
+    _FRAME_W, _FRAME_H = float(_PC_FRAME_W), float(_PC_FRAME_H)
+except Exception:
+    _FRAME_W, _FRAME_H = 1920.0, 1080.0
 _MAX_FP_AREA_RATIO = 0.7  # reject near-full-frame bboxes — they cause IoU>=0.6
                           # matches against unrelated future detections (Copilot
                           # high-severity finding, see PR review).

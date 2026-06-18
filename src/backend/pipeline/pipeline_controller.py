@@ -64,6 +64,32 @@ CLASS_CONF_THRESHOLDS = {
 MAX_BBOX_AREA_RATIO = float(_os.environ.get("ENDOSCOPY_MAX_BBOX_RATIO", "0.95"))
 
 
+# ── Virtual full-frame canvas ─────────────────────────────────────────────────
+# Every emitted bbox is normalized to this fixed canvas. The frontend overlay,
+# the DB false-positive matching (db.py) and the browser live-detector
+# (live_detect.py) all assume it, so this is the SINGLE source of truth they
+# import — do not re-hardcode 1920/1080 elsewhere.
+FRAME_W = 1920
+FRAME_H = 1080
+
+
+# ── Lesion class labels ───────────────────────────────────────────────────────
+# ASCII model class names → Vietnamese display labels (fallback when the model
+# ships no labels.txt, so the UI never shows raw names like "3_Viem_da_day_HP").
+# DISPLAY_LABELS is the de-duplicated display set — single source for the API
+# class list (endoscopy_ws_server.py) and the worker's label cleaner below.
+LABEL_ASCII_TO_DIACRITIC = {
+    "Viem_thuc_quan": "Viêm thực quản",
+    "Viem_da_day_HP_am": "Viêm dạ dày HP",
+    "Viem_da_day_HP": "Viêm dạ dày HP",
+    "Ung_thu_thuc_quan": "Ung thư thực quản",
+    "Ung_thu_da_day": "Ung thư dạ dày",
+    "Loet_HTT": "Loét hoành tá tràng",
+    "Loet_hoanh_ta_trang": "Loét hoành tá tràng",
+}
+DISPLAY_LABELS = list(dict.fromkeys(LABEL_ASCII_TO_DIACRITIC.values()))
+
+
 # ── StrongSORT Re-ID weights ─────────────────────────────────────────────────
 _DEFAULT_REID = _REPO_ROOT / "sample_code/endocv_2024/osnet_x0_25_endocv_30.pt"
 REID_WEIGHTS = Path(_os.environ.get("ENDOSCOPY_REID", str(_DEFAULT_REID)))
@@ -140,18 +166,9 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
     import numpy as np
     import re as _re
 
-    # Map underscored ASCII back to common Vietnamese diacritic forms — used as a
-    # fallback when labels.txt is missing so the doctor never sees raw class names
-    # like "3_Viem_da_day_HP_am" in the UI.
-    _ASCII_TO_DIACRITIC = {
-        "Viem_thuc_quan": "Viêm thực quản",
-        "Viem_da_day_HP_am": "Viêm dạ dày HP",
-        "Viem_da_day_HP": "Viêm dạ dày HP",
-        "Ung_thu_thuc_quan": "Ung thư thực quản",
-        "Ung_thu_da_day": "Ung thư dạ dày",
-        "Loet_HTT": "Loét hoành tá tràng",
-        "Loet_hoanh_ta_trang": "Loét hoành tá tràng",
-    }
+    # ASCII→Vietnamese label map lives at module scope (LABEL_ASCII_TO_DIACRITIC)
+    # so the API class list derives from the same source; the worker just reuses it.
+    _ASCII_TO_DIACRITIC = LABEL_ASCII_TO_DIACRITIC
     _PREFIX_NUM = _re.compile(r"^\d+_")
 
     def _clean_label(raw: str) -> str:
@@ -338,7 +355,7 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
         """A diffuse viêm at the SAME spot as a recently-reported one — judged by
         box-centre distance (robust to the box-size jitter that breaks IoU)."""
         cx, cy = (bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0
-        max_d = _DIFFUSE_CENTER_FRAC * 1920.0  # bbox is in 1920×1080 coords
+        max_d = _DIFFUSE_CENTER_FRAC * float(FRAME_W)  # bbox is in FRAME_W×FRAME_H coords
         for r in _reported_history:
             if ts_ms - r["ts_ms"] < window_ms and r["label"] == label:
                 rb = r["bbox"]
@@ -835,10 +852,10 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                             _fw_full = _last_paused_frame.shape[1]
                             _fh_full = _last_paused_frame.shape[0]
                             _xyxy_norm = [
-                                _xyxy[0] / _fw_full * 1920,
-                                _xyxy[1] / _fh_full * 1080,
-                                _xyxy[2] / _fw_full * 1920,
-                                _xyxy[3] / _fh_full * 1080,
+                                _xyxy[0] / _fw_full * FRAME_W,
+                                _xyxy[1] / _fh_full * FRAME_H,
+                                _xyxy[2] / _fw_full * FRAME_W,
+                                _xyxy[3] / _fh_full * FRAME_H,
                             ]
                             _label = _clean_label(model_names.get(_bcls, f"class_{_bcls}"))
                             _thumb = _crop_b64(_last_paused_frame, _xyxy)
@@ -882,10 +899,10 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                                     "label": _clean_label(model_names.get(_ab_cls, f"class_{_ab_cls}")),
                                     "confidence": round(_ab_c, 4),
                                     "bbox": [
-                                        _abx1 / _fw_norm * 1920,
-                                        _aby1 / _fh_norm * 1080,
-                                        _abx2 / _fw_norm * 1920,
-                                        _aby2 / _fh_norm * 1080,
+                                        _abx1 / _fw_norm * FRAME_W,
+                                        _aby1 / _fh_norm * FRAME_H,
+                                        _abx2 / _fw_norm * FRAME_W,
+                                        _aby2 / _fh_norm * FRAME_H,
                                     ],
                                 })
                             result_q.put({
@@ -1153,10 +1170,10 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                         _fw_full = frame.shape[1]
                         _fh_full = frame.shape[0]
                         xyxy_norm = [
-                            xyxy[0] / _fw_full * 1920,
-                            xyxy[1] / _fh_full * 1080,
-                            xyxy[2] / _fw_full * 1920,
-                            xyxy[3] / _fh_full * 1080,
+                            xyxy[0] / _fw_full * FRAME_W,
+                            xyxy[1] / _fh_full * FRAME_H,
+                            xyxy[2] / _fw_full * FRAME_W,
+                            xyxy[3] / _fh_full * FRAME_H,
                         ]
 
                         # ── Phase 02: confirmed-always / muted shortcuts ──────
