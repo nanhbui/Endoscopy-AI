@@ -107,7 +107,7 @@ LLM_MODEL_FOLLOWUP = os.getenv("OPENAI_MODEL_FOLLOWUP", "gpt-4o-mini")
 # Both backends share the OpenAI Python SDK — only base_url + api_key differ.
 LLM_BACKEND     = os.getenv("LLM_BACKEND", "openai").lower()
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
-OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL", "qwen2.5vl:7b")
+OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL", "medgemma-4b")
 
 # ── Runtime config (Settings panel) ───────────────────────────────────────────
 # Detection-sensitivity tunables that the (spawned) pipeline worker reads from
@@ -1029,7 +1029,7 @@ async def live_explain(request: Request, label: str = "", conf: float = 0.0):
     messages = [
         {"role": "system", "content": LESION_REPORT_PROMPT},
         {"role": "user", "content": [
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{frame_b64}", "detail": "low"}},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{frame_b64}", "detail": "high"}},
             {"type": "text", "text": build_lesion_user_message(_label, conf, 0, 0)},
         ]},
     ]
@@ -1541,7 +1541,7 @@ async def _stream_llm(websocket: WebSocket, detection: dict, sess: dict, ws_lock
         )
         if frame_b64:
             user_content = [
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{frame_b64}", "detail": "low"}},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{frame_b64}", "detail": "high"}},
                 {"type": "text",      "text": user_text},
             ]
         else:
@@ -1636,7 +1636,7 @@ async def _stream_lesion_report(websocket: WebSocket, detection: dict,
     user_text = build_lesion_user_message(label, conf, timestamp_ms, frame_index)
     if frame_b64:
         user_content = [
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{frame_b64}", "detail": "low"}},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{frame_b64}", "detail": "high"}},
             {"type": "text", "text": user_text},
         ]
     else:
@@ -2007,8 +2007,8 @@ async def _stream_session_qa(websocket: WebSocket, user_text: str,
         # Streaming chunks — FE renders token-by-token for a chatbot feel.
         # extra_body.options.num_ctx bumps Ollama context window from default
         # 4096 → 6144 so the rich per-finding context fits. Cap at 6144 to
-        # keep KV-cache footprint in the 2GB headroom the 16GB GPU has after
-        # loading the 14GB qwen2.5vl model.
+        # keep KV-cache footprint comfortably within the 16GB GPU after
+        # loading the ~5GB medgemma-4b (Q8) vision model.
         stream = await client.chat.completions.create(
             model=_llm_model_name("vision"),
             messages=messages,

@@ -631,11 +631,16 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
             x1, y1 = x1 - _vx, y1 - _vy
             x2, y2 = x2 - _vx, y2 - _vy
             cv2.rectangle(out, (x1, y1), (x2, y2), (0, 255, 255), 3)
-            # Scale to max 800 px wide to keep payload reasonable
-            scale = min(1.0, 800 / max(out.shape[1], out.shape[0]))
+            # Scale to max 1024 px (was 800) + JPEG q90 (was 75): the VLM needs
+            # mucosal/vascular detail to describe the lesion well, so the thumbnail
+            # is sent at higher fidelity. ~1024px matches common VLM tile sizes;
+            # payload stays modest (a few hundred KB base-64). Tune via env.
+            _vlm_px = int(_os.environ.get("ENDOSCOPY_THUMB_MAXPX", "1024"))
+            _vlm_q = int(_os.environ.get("ENDOSCOPY_THUMB_JPEG_Q", "90"))
+            scale = min(1.0, _vlm_px / max(out.shape[1], out.shape[0]))
             if scale < 1.0:
                 out = cv2.resize(out, (int(out.shape[1] * scale), int(out.shape[0] * scale)))
-            ok, buf = cv2.imencode(".jpg", out, [cv2.IMWRITE_JPEG_QUALITY, 75])
+            ok, buf = cv2.imencode(".jpg", out, [cv2.IMWRITE_JPEG_QUALITY, _vlm_q])
             if ok:
                 return base64.b64encode(buf.tobytes()).decode()
         except Exception:

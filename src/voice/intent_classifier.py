@@ -200,12 +200,23 @@ class IntentClassifier:
 
         for intent, keywords in self._PATTERNS.items():
             for keyword in keywords:
-                if keyword in normalized:
+                if self._matches(keyword, normalized):
                     confidence = self._keyword_confidence(keyword)
                     if confidence > best_confidence:
                         best_confidence = confidence
                         best_intent = intent
         return best_intent, best_confidence
+
+    @staticmethod
+    def _matches(keyword: str, normalized: str) -> bool:
+        """Khớp keyword theo ranh giới TỪ, không phải substring thô.
+
+        `normalized` đã được tách bằng khoảng trắng đơn và bỏ dấu câu, nên ta
+        chỉ chấp nhận khi keyword nằm trọn vẹn giữa các ranh giới khoảng trắng.
+        Tránh các match sai kiểu "lại" lọt vào "tải", "sai" lọt vào "sai số"
+        ở giữa một token dài hơn.
+        """
+        return re.search(rf"(?<!\S){re.escape(keyword)}(?!\S)", normalized) is not None
 
     # ------------------------------------------------------------------
     # Internal helpers

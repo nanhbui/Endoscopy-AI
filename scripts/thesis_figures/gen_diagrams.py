@@ -46,11 +46,11 @@ def render_dot(name: str, body: str, engine: str = "dot", graph_attrs: str = "")
 def fig_yolo():
     body = (
         'rankdir=LR;\n' + BOX +
-        'inp [label="Input frame\\n640 px", fillcolor="#f5f5f5", color="#888"];\n'
+        'inp [label="Input frame\\n640 px", fillcolor="#f5f5f5", color="#888888"];\n'
         'bb  [label="Backbone\\n(CSP)"];\n'
         'nk  [label="Neck\\n(PAN-FPN)"];\n'
         'hd  [label="Decoupled head\\n(anchor-free)"];\n'
-        'subgraph cluster_out {\n style=dashed; color="#888"; label="Multi-scale detections";\n'
+        'subgraph cluster_out {\n style=dashed; color="#888888"; label="Multi-scale detections";\n'
         '  p3 [label="P3 / small", shape=note, fillcolor="#fff3e0", color="#e08a2c"];\n'
         '  p4 [label="P4 / medium", shape=note, fillcolor="#fff3e0", color="#e08a2c"];\n'
         '  p5 [label="P5 / large", shape=note, fillcolor="#fff3e0", color="#e08a2c"];\n'
@@ -65,14 +65,16 @@ def fig_yolo():
 def fig_strongsort():
     body = (
         'rankdir=LR;\n' + BOX +
-        'det  [label="Detection\\n(YOLO box)", fillcolor="#f5f5f5", color="#888"];\n'
-        'reid [label="OSNet\\nRe-ID embedding"];\n'
-        'kf   [label="Kalman\\nmotion prediction"];\n'
+        'det  [label="Detection\\n(YOLO box)", fillcolor="#f5f5f5", color="#888888"];\n'
+        'reid [label="OSNet / OSNet-DCN\\nRe-ID embedding"];\n'
+        'kf   [label="Kalman motion\\n(+ virtual trajectory\\non detection gaps)"];\n'
         'match[label="Hungarian\\nmatching", shape=diamond, fillcolor="#fdeaea", color="#c0392b"];\n'
-        'trk  [label="Track\\n(stable identity)", fillcolor="#e8f5e9", color="#2e7d32"];\n'
+        'trk  [label="Track\\n(persistent track_id)", fillcolor="#e8f5e9", color="#2e7d32"];\n'
+        'dedup[label="track-id dedup\\n(report once per track)", fillcolor="#fff3e0", color="#e08a2c"];\n'
         'det -> reid -> match;\n'
         'kf -> match;\n'
         'match -> trk;\n'
+        'trk -> dedup;\n'
         'trk -> kf [label="predict next", style=dashed, constraint=false];\n'
     )
     render_dot("fig_2_3_strongsort", body)
@@ -117,9 +119,9 @@ def fig_usecase():
         'phys [label="Physician\\n(endoscopist)", shape=box, style="rounded,filled", '
         'fillcolor="#fffde7", color="#b8860b"];\n'
         'worker [label="GStreamer + YOLO\\nworker", shape=box, style="rounded,filled", '
-        'fillcolor="#f0f0f0", color="#888"];\n'
+        'fillcolor="#f0f0f0", color="#888888"];\n'
         'vlm [label="VLM backend\\n(OpenAI / Ollama)", shape=box, style="rounded,filled", '
-        'fillcolor="#f0f0f0", color="#888"];\n'
+        'fillcolor="#f0f0f0", color="#888888"];\n'
         'subgraph cluster_sys {\n label="AI-assisted endoscopy system"; style=dashed; color="#2c5fa8";\n'
         + uc_nodes +
         '}\n'
@@ -141,9 +143,9 @@ def fig_architecture():
         'be [label="FastAPI backend\\n(port 8001)\\nREST + WebSocket,\\nVLM client, persistence, voice"];\n'
         'wk [label="GStreamer + YOLO worker\\n(spawned subprocess)\\nGLib threads + CUDA", '
         'fillcolor="#e8f5e9", color="#2e7d32"];\n'
-        'db [label="SQLite (WAL)", shape=cylinder, fillcolor="#f5f5f5", color="#888"];\n'
+        'db [label="SQLite (WAL)", shape=cylinder, fillcolor="#f5f5f5", color="#888888"];\n'
         'vlm [label="VLM backend\\nOpenAI / Ollama", shape=box, style="rounded,filled", '
-        'fillcolor="#f0f0f0", color="#888"];\n'
+        'fillcolor="#f0f0f0", color="#888888"];\n'
         'fe -> be [label="WebSocket (live loop)\\n+ REST", dir=both];\n'
         'be -> wk [label="2 IPC queues\\nresult / command", dir=both];\n'
         'be -> db [dir=both];\n'
@@ -217,16 +219,38 @@ def fig_er():
 
 
 # ── 4.1 Detection data flow ─────────────────────────────────────────────────────
+def fig_dedup():
+    body = (
+        'rankdir=TB; nodesep=0.4; ranksep=0.45;\n'
+        'node [shape=box, style="rounded,filled", fillcolor="#eef3fb", color="#2c5fa8", fontsize=10];\n'
+        'det [label="Surviving detection\\n(label, bbox, track_id)", fillcolor="#f5f5f5", color="#888888"];\n'
+        'wf [label="Box spans > 95%\\nof viewport?", shape=diamond, fillcolor="#fff3e0", color="#e08a2c"];\n'
+        'diff [label="Diffuse label?\\n(\\"viêm\\" keyword)", shape=diamond, fillcolor="#fff3e0", color="#e08a2c"];\n'
+        'spot [label="Same spot?\\n(centre near a recent\\nreport, within cooldown)", shape=diamond, fillcolor="#fff3e0", color="#e08a2c"];\n'
+        'tid [label="track_id already\\nreported this session?", shape=diamond, fillcolor="#fff3e0", color="#e08a2c"];\n'
+        'drop [label="Suppress", fillcolor="#fdeaea", color="#c0392b"];\n'
+        'rep [label="Report\\n(pause + DETECTION_FOUND)", fillcolor="#e8f5e9", color="#2e7d32"];\n'
+        'det -> wf;\n'
+        'wf -> drop [label="yes (frame-level)"];\n'
+        'wf -> diff [label="no"];\n'
+        'diff -> spot [label="yes\\n(diffuse)"];\n'
+        'diff -> tid [label="no\\n(focal)"];\n'
+        'spot -> drop [label="yes"]; spot -> rep [label="no"];\n'
+        'tid -> drop [label="yes"]; tid -> rep [label="no"];\n'
+    )
+    render_dot("fig_4_1b_dedup", body)
+
+
 def fig_detection_flow():
     steps = [
-        ("s0", "ffprobe codec probe", "#f5f5f5", "#888"),
+        ("s0", "ffprobe codec probe", "#f5f5f5", "#888888"),
         ("s1", "GStreamer decode\\n(appsink sync / drop)", "#eef3fb", "#2c5fa8"),
         ("s2", "Viewport detection\\n(scope circle, ≥ 30%)", "#eef3fb", "#2c5fa8"),
         ("s3", "Frame-quality filter\\n(dark / uniform / skip-initial)", "#eef3fb", "#2c5fa8"),
         ("s4", "YOLO inference\\n(every FRAME_STEP-th frame)", "#eef3fb", "#2c5fa8"),
         ("s5", "Per-class thresholds\\n(cancer 0.75 / infl. 0.60)", "#eef3fb", "#2c5fa8"),
-        ("s6", "StrongSORT + IoU/time\\nde-duplication", "#eef3fb", "#2c5fa8"),
-        ("s7", "Area-ratio suppression", "#eef3fb", "#2c5fa8"),
+        ("s6", "Tracker (UTR-Track + OSNet-DCN)\\n→ track-id / diffuse dedup", "#eef3fb", "#2c5fa8"),
+        ("s7", "Whole-frame suppression\\n(area > 95%)", "#eef3fb", "#2c5fa8"),
         ("s8", "DETECTION_FOUND\\n(pause + emit event)", "#e8f5e9", "#2e7d32"),
     ]
     nodes = "".join(
@@ -253,7 +277,7 @@ def fig_voice():
         'intent [label="Clinical intent\\n(BO_QUA / GIAI_THICH /\\nXAC_NHAN / KIEM_TRA_LAI)", '
         'fillcolor="#fff3e0", color="#e08a2c"];\n'
         'ws [label="WebSocket action", fillcolor="#e8f5e9", color="#2e7d32"];\n'
-        'fw [label="server-side\\nfaster-whisper\\n(/voice/command)", fillcolor="#f0f0f0", color="#888"];\n'
+        'fw [label="server-side\\nfaster-whisper\\n(/voice/command)", fillcolor="#f0f0f0", color="#888888"];\n'
         'mic -> wsa;\n wsa -> fast; wsa -> slow;\n slow -> llm -> intent;\n fast -> intent;\n'
         'intent -> ws;\n mic -> fw [style=dashed, label="raw audio"];\n fw -> intent [style=dashed];\n'
     )
@@ -267,10 +291,10 @@ def fig_vlm():
         'node [shape=box, style="rounded,filled", fillcolor="#eef3fb", color="#2c5fa8", fontsize=11];\n'
         'env [label="LLM_BACKEND\\n(env switch)", shape=diamond, fillcolor="#fff3e0", color="#e08a2c"];\n'
         'cli [label="single AsyncOpenAI\\nclient + model factory"];\n'
-        'oai [label="OpenAI\\ngpt-4o (vision)\\ngpt-4o-mini (text)", fillcolor="#e3f2fd", color="#1565c0"];\n'
-        'oll [label="Ollama\\nqwen2.5vl:7b\\n(local)", fillcolor="#e8f5e9", color="#2e7d32"];\n'
-        'rep [label="schema-constrained\\nJSON report", shape=note, fillcolor="#f5f5f5", color="#888"];\n'
-        'strm [label="streamed summary /\\nQ&A (token-by-token)", shape=note, fillcolor="#f5f5f5", color="#888"];\n'
+        'oai [label="OpenAI\\ngpt-4o (vision)\\ngpt-4o-mini (text)\\n(cloud fallback)", fillcolor="#e3f2fd", color="#1565c0"];\n'
+        'oll [label="Ollama\\nmedgemma-4b\\n(local, primary)", fillcolor="#e8f5e9", color="#2e7d32"];\n'
+        'rep [label="schema-constrained\\nJSON report", shape=note, fillcolor="#f5f5f5", color="#888888"];\n'
+        'strm [label="streamed summary /\\nQ&A (token-by-token)", shape=note, fillcolor="#f5f5f5", color="#888888"];\n'
         'env -> cli;\n cli -> oai [label="cloud"]; cli -> oll [label="local"];\n'
         'cli -> rep; cli -> strm;\n'
     )
@@ -306,10 +330,10 @@ def fig_deploy():
 def fig_lora():
     body = (
         'rankdir=LR;\n' + BOX +
-        'hk [label="HyperKvasir +\\nlabelled endoscopy", fillcolor="#f5f5f5", color="#888"];\n'
+        'hk [label="HyperKvasir +\\nlabelled endoscopy", fillcolor="#f5f5f5", color="#888888"];\n'
         'gen [label="instruction-pair\\ngenerator"];\n'
         'vqa [label="ShareGPT\\nVQA pairs", shape=note, fillcolor="#fff3e0", color="#e08a2c"];\n'
-        'ft [label="4-bit LoRA\\nfine-tune (7B VLM)"];\n'
+        'ft [label="4-bit LoRA\\nfine-tune (MedGemma 4B)"];\n'
         'off [label="local offline\\nreporting", fillcolor="#e8f5e9", color="#2e7d32"];\n'
         'hk -> gen -> vqa -> ft -> off;\n'
     )
@@ -324,13 +348,13 @@ def fig_dual_modality():
         'cam [label="Endoscopy camera /\\nvideo source", fillcolor="#fffde7", color="#b8860b"];\n'
         'mic [label="Microphone", fillcolor="#fffde7", color="#b8860b"];\n'
         'gst [label="GStreamer\\ndecode", fillcolor="#e8f5e9", color="#2e7d32"];\n'
-        'yolo [label="YOLOv8 +\\nStrongSORT", fillcolor="#e8f5e9", color="#2e7d32"];\n'
+        'yolo [label="YOLOv8 +\\nUTR-Track / StrongSORT", fillcolor="#e8f5e9", color="#2e7d32"];\n'
         'asr [label="ASR\\n(Web Speech /\\nfaster-whisper)", fillcolor="#e3f2fd", color="#1565c0"];\n'
         'intent [label="Intent classifier\\n(keyword / LLM)", fillcolor="#e3f2fd", color="#1565c0"];\n'
         'ctrl [label="Central controller\\n(FSM / pipeline)", shape=box, style="filled", fillcolor="#fff3e0", color="#e08a2c", penwidth=2];\n'
-        'vlm [label="VLM report\\n(GPT-4o / Qwen2.5-VL)", fillcolor="#eef3fb", color="#2c5fa8"];\n'
+        'vlm [label="VLM report\\n(MedGemma 4B / GPT-4o)", fillcolor="#eef3fb", color="#2c5fa8"];\n'
         'ui [label="Frontend UI", fillcolor="#eef3fb", color="#2c5fa8"];\n'
-        'db [label="SQLite", shape=cylinder, fillcolor="#f5f5f5", color="#888"];\n'
+        'db [label="SQLite", shape=cylinder, fillcolor="#f5f5f5", color="#888888"];\n'
         'cam -> gst [label="video"]; gst -> yolo [label="frames"]; yolo -> ctrl [label="detections"];\n'
         'mic -> asr [label="audio"]; asr -> intent [label="transcript"]; intent -> ctrl [label="voice intent"];\n'
         'ctrl -> vlm [label="explain"]; vlm -> ctrl [style=dashed];\n'
@@ -457,11 +481,11 @@ def fig_modules():
         'fe [label="Next.js frontend", shape=box, style="rounded,filled", fillcolor="#e3f2fd", color="#1565c0"];\n'
         'ws [label="endoscopy_ws_server\\n(FastAPI: REST + WebSocket,\\nLLM client + error mapping)"];\n'
         'pc [label="pipeline_controller\\n(FSM + IPC queues +\\nworker management)"];\n'
-        'wk [label="worker (spawn)\\nGStreamer decode + YOLO +\\nStrongSORT/OSNet", fillcolor="#e8f5e9", color="#2e7d32"];\n'
-        'db [label="db\\n(SQLite, WAL)", shape=cylinder, fillcolor="#f5f5f5", color="#888"];\n'
+        'wk [label="worker (spawn)\\nGStreamer decode + YOLO +\\nUTR-Track / StrongSORT (OSNet-DCN)", fillcolor="#e8f5e9", color="#2e7d32"];\n'
+        'db [label="db\\n(SQLite, WAL)", shape=cylinder, fillcolor="#f5f5f5", color="#888888"];\n'
         'voice [label="voice_api\\nintent_classifier /\\nfaster-whisper"];\n'
         'prompts [label="llm_prompts\\n(report / summary\\nJSON schemas)", shape=note, fillcolor="#fff3e0", color="#e08a2c"];\n'
-        'vlm [label="VLM backend\\nOpenAI / Ollama", shape=box, style="rounded,filled", fillcolor="#f0f0f0", color="#888"];\n'
+        'vlm [label="VLM backend\\nOpenAI / Ollama", shape=box, style="rounded,filled", fillcolor="#f0f0f0", color="#888888"];\n'
         'fe -> ws [label="WS / REST", dir=both];\n'
         'ws -> pc [label="control / events", dir=both];\n'
         'pc -> wk [label="2 IPC queues", dir=both];\n'
@@ -477,7 +501,7 @@ def fig_capture():
         'rankdir=LR; nodesep=0.4;\n'
         'node [shape=box, style="rounded,filled", fontsize=10];\n'
         'tower [label="Endoscopy tower\\n(video output)", fillcolor="#fffde7", color="#b8860b"];\n'
-        'card [label="USB capture card\\n/dev/videoN (V4L2)", fillcolor="#f5f5f5", color="#888"];\n'
+        'card [label="USB capture card\\n/dev/videoN (V4L2)", fillcolor="#f5f5f5", color="#888888"];\n'
         'subgraph cluster_local {\n label="Local host (near the tower)"; style=filled; fillcolor="#e3f2fd"; color="#1565c0";\n'
         '  enc [label="GStreamer:\\nv4l2src (MJPEG 720p30)\\njpegdec -> x264enc\\n(zerolatency)\\nrtph264pay", fillcolor="white", color="#1565c0"];\n'
         '}\n'
@@ -491,6 +515,36 @@ def fig_capture():
         'enc -> rx [label="RTP/H.264 over\\nUDP (WireGuard VPN)"];\n'
     )
     render_dot("fig_4_2_capture", body)
+
+
+# ── 4.4 Browser-capture live mode (capture-and-accumulate) ──────────────────────
+def fig_browser_live():
+    body = (
+        'rankdir=LR; nodesep=0.4; ranksep=0.7;\n'
+        'node [shape=box, style="rounded,filled", fontsize=10];\n'
+        'subgraph cluster_browser {\n'
+        '  label="Browser (clinician laptop)"; style=dashed; color="#2c5fa8"; fontcolor="#2c5fa8";\n'
+        '  dongle [label="HDMI dongle\\n(getUserMedia)", fillcolor="#fffde7", color="#b8860b"];\n'
+        '  mirror [label="Live mirror\\n<video> (continuous)", fillcolor="#eef3fb", color="#2c5fa8"];\n'
+        '  snap [label="Auto-snapshot\\non detection\\n(canvas + boxes)", fillcolor="#eef3fb", color="#2c5fa8"];\n'
+        '  panel [label="Captures panel\\nthumbnail + report", fillcolor="#eef3fb", color="#2c5fa8"];\n'
+        '  report [label="Session report\\n(/report)", fillcolor="#fff3e0", color="#e08a2c", penwidth=2];\n'
+        '}\n'
+        'subgraph cluster_server {\n'
+        '  label="GPU server"; style=dashed; color="#2e7d32"; fontcolor="#2e7d32";\n'
+        '  yolo [label="YOLO detector\\n/ws/live-detect", fillcolor="#e8f5e9", color="#2e7d32"];\n'
+        '  vlm [label="VLM\\n/live/explain", fillcolor="#e8f5e9", color="#2e7d32"];\n'
+        '}\n'
+        'dongle -> mirror [label="capture"];\n'
+        'mirror -> yolo [label="JPEG ~5 fps"];\n'
+        'yolo -> mirror [label="boxes", style=dashed, constraint=false];\n'
+        'mirror -> snap [label="on detect\\n(cooldown 4 s)"];\n'
+        'snap -> panel [label="thumbnail"];\n'
+        'snap -> vlm [label="explain (parallel)"];\n'
+        'vlm -> panel [label="report", style=dashed];\n'
+        'panel -> report [label="create report\\n(when all VLM settle)"];\n'
+    )
+    render_dot("fig_4_4_browser_live", body)
 
 
 # ── 5.1 Benchmark methodology ───────────────────────────────────────────────────
@@ -697,7 +751,7 @@ def fig_viewport():
         print("  [skip] fig_4_3_viewport: unreadable frame")
         return
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    _, th = cv2.threshold(gray, 20, 255, cv2.THRESH_BINARY)
+    _, th = cv2.threshold(gray, 25, 255, cv2.THRESH_BINARY)
     kernel = np.ones((15, 15), np.uint8)
     closed = cv2.morphologyEx(th, cv2.MORPH_CLOSE, kernel)
     cnts, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -710,7 +764,7 @@ def fig_viewport():
 
     panels = [
         ("Raw clinical frame", cv2.cvtColor(img, cv2.COLOR_BGR2RGB)),
-        ("Binary threshold", th),
+        ("Binary threshold (>25)", th),
         ("Morphological close (15x15)", closed),
         ("Largest contour -> viewport", cv2.cvtColor(rectimg, cv2.COLOR_BGR2RGB)),
     ]
@@ -732,7 +786,7 @@ def main():
     fig_yolo(); fig_strongsort(); fig_gstreamer(); fig_usecase()
     fig_architecture(); fig_subprocess_ipc(); fig_fsm(); fig_er()
     fig_detection_flow(); fig_voice(); fig_vlm(); fig_deploy(); fig_lora()
-    fig_bench_method(); fig_capture(); fig_modules(); fig_userflow(); fig_sitemap()
+    fig_bench_method(); fig_capture(); fig_browser_live(); fig_dedup(); fig_modules(); fig_userflow(); fig_sitemap()
     fig_dual_modality(); fig_hardware()
     print("Matplotlib figures:")
     fig_ws_sequence(); fig_throughput(); fig_latency(); fig_viewport(); fig_training_curve(); fig_gantt()

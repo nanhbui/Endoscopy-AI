@@ -5,7 +5,7 @@ Separated from llm_prompts.py (Phase A — per-detection lesion report) because:
   - Different input shape (summary reads pre-parsed reports, lesion takes one image)
   - Different cadence (summary fires once on EOS, lesion fires per detection)
 
-Both phases share the same LLM backend (Ollama qwen2.5vl:7b) — text-only here, no
+Both phases share the same LLM backend (local Ollama, default medgemma-4b) — text-only here, no
 images needed since per-detection reports already carry the visual analysis.
 """
 
