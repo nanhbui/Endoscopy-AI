@@ -165,7 +165,7 @@ _load_runtime_config()
 # Phase C1 — hard timeout for any LLM completion call. Prevents the UI from
 # hanging indefinitely when Ollama is stuck / OOM / context overflow. 90s
 # covers Phase B summary (~15s typical, 30s worst-case) with headroom.
-LLM_CALL_TIMEOUT_SEC = float(os.getenv("LLM_CALL_TIMEOUT_SEC", "90"))
+LLM_CALL_TIMEOUT_SEC = float(os.getenv("LLM_CALL_TIMEOUT_SEC", "180"))
 
 
 def _classify_llm_error(exc: Exception) -> tuple[str, str]:
@@ -396,6 +396,34 @@ def _llm_model_name(role: str = "vision") -> str:
     if LLM_BACKEND == "ollama":
         return OLLAMA_MODEL
     return LLM_MODEL_VISION if role == "vision" else LLM_MODEL_FOLLOWUP
+
+
+@app.on_event("startup")
+async def _warm_vlm() -> None:
+    """Pre-load the local VLM into VRAM at startup so the FIRST live/explain call
+    does not pay the cold model-load. Reading the multi-GB weights off the (HDD)
+    model store on a cold page cache can take tens of seconds and previously
+    tripped LLM_CALL_TIMEOUT_SEC on the first request of the day. Best-effort and
+    non-blocking: failure here never stops the server, and it only applies to the
+    local Ollama backend (the cloud backend has no load step)."""
+    if LLM_BACKEND != "ollama":
+        return
+    client = _get_llm_client()
+    if client is None:
+        return
+
+    async def _warm() -> None:
+        try:
+            await client.chat.completions.create(
+                model=_llm_model_name("vision"),
+                messages=[{"role": "user", "content": "ok"}],
+                max_tokens=1,
+            )
+            logger.info("VLM pre-warm complete (model={})", OLLAMA_MODEL)
+        except Exception as exc:  # pragma: no cover - best effort
+            logger.warning("VLM pre-warm skipped: {}", exc)
+
+    asyncio.create_task(_warm())
 
 
 # ── CJK leakage guard ─────────────────────────────────────────────────────────
