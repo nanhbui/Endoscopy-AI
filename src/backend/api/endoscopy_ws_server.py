@@ -56,7 +56,7 @@ _REPO_ROOT = _HERE.parents[3]
 _PIPELINE_DIR = Path(os.getenv("PIPELINE_DIR", str(_HERE.parents[1] / "pipeline")))
 sys.path.insert(0, str(_PIPELINE_DIR))
 
-from pipeline_controller import PipelineController, PipelineState   # noqa: E402
+from pipeline_controller import PipelineController, PipelineState, DISPLAY_LABELS   # noqa: E402
 from video_library import VideoLibrary                               # noqa: E402
 from video_proxy import (                                            # noqa: E402
     playback_path, ensure_proxy_async, remove_proxy,
@@ -494,8 +494,7 @@ async def system_status():
         "llm": {"backend": LLM_BACKEND, "model": _llm_model_name("vision")},
         "tracker": "StrongSORT + OSNet (ReID)",
         "model_file": os.environ.get("ENDOSCOPY_MODEL", "best_train6.pt").split("/")[-1],
-        "classes": ["Viêm thực quản", "Viêm dạ dày HP", "Ung thư thực quản",
-                    "Ung thư dạ dày", "Loét hoành tá tràng"],
+        "classes": list(DISPLAY_LABELS),
         "whisper_model": os.getenv("WHISPER_MODEL", "base"),
         "memory": memory_counts(),
         "active_sessions": len(_sessions),
