@@ -302,19 +302,24 @@ sync: _require-vpn
 		--exclude='*.trt' \
 		--exclude='logs/' \
 		--exclude='*.log' \
+		--exclude='frontend/.env.local' \
+		--exclude='src/backend/api/.env' \
 		$(ROOT)/ $(GPU_USER)@$(GPU_HOST):$(REMOTE_DIR)/
-	@echo "$(CYAN)Syncing .env files…$(RESET)"
+	@echo "$(GREEN)✔ Sync complete$(RESET) $(YELLOW)(server .env left untouched — run 'make sync-env' to push local .env)$(RESET)"
+
+# Push local .env files to the server — OVERWRITES the server's config. Use only
+# for first-time setup; plain `make sync` deliberately preserves the server .env
+# (funnel URL, disk2 paths, …) so a code sync never clobbers the deployment.
+sync-env: _require-vpn
+	@echo "$(CYAN)Pushing .env to $(GPU_USER)@$(GPU_HOST) (OVERWRITES server)…$(RESET)"
 	@if [ -f "$(BE_SRC)/.env" ]; then \
 		rsync -az $(BE_SRC)/.env $(GPU_USER)@$(GPU_HOST):$(REMOTE_DIR)/src/backend/api/.env; \
 		echo "  $(GREEN)✔$(RESET) src/backend/api/.env"; \
-	else \
-		echo "  $(YELLOW)⚠ $(BE_SRC)/.env not found — run: make env-init$(RESET)"; \
 	fi
 	@if [ -f "$(FE_SRC)/.env.local" ]; then \
 		rsync -az $(FE_SRC)/.env.local $(GPU_USER)@$(GPU_HOST):$(REMOTE_DIR)/frontend/.env.local; \
 		echo "  $(GREEN)✔$(RESET) frontend/.env.local"; \
 	fi
-	@echo "$(GREEN)✔ Sync complete$(RESET)"
 
 remote-install: _require-vpn
 	@echo "$(CYAN)Installing Python deps on GPU server…$(RESET)"

@@ -4,8 +4,12 @@ const nextConfig: NextConfig = {
   // Produces a self-contained bundle for Docker: node server.js
   output: 'standalone',
 
-  // Allow dev HMR websocket from ngrok tunnel (Next dev rejects unknown Origin → 401)
+  // Allow dev requests from the public tunnel host (Next dev blocks cross-origin
+  // /_next/* + HMR ws from unknown Origin → page renders but client JS is dead).
+  // server4 is exposed via Tailscale Funnel (server4.tail145f3.ts.net).
   allowedDevOrigins: [
+    'server4.tail145f3.ts.net',
+    '*.ts.net',
     'ferris-smudgy-fondue.ngrok-free.dev',
     '*.ngrok-free.dev',
     '*.ngrok-free.app',
