@@ -32,7 +32,6 @@ const FRAME_H = 1080;
 const SEND_INTERVAL_MS = 200;       // grab cadence (~5 fps to backend)
 const GRAB_WIDTH = 960;             // downscale frames sent to the detector
 const CAP_WIDTH = 960;              // snapshot width stored for the panel + report
-const CAPTURE_COOLDOWN_MS = 4000;   // per-label cooldown so 5 fps doesn't spam the panel
 const MAX_CAPTURES = 50;            // cap memory/localStorage footprint
 
 // Capture resolutions offered to the doctor. "auto" lets the dongle decide.
@@ -70,7 +69,6 @@ export function BrowserCaptureLive() {
   const wsRef = useRef<WebSocket | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const sendingRef = useRef(false);
-  const lastCapAtRef = useRef<Map<string, number>>(new Map()); // label → last capture ms
   const capIdRef = useRef(0);
 
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
@@ -182,15 +180,16 @@ export function BrowserCaptureLive() {
     explainCapture(id, b64, box);
   }, [explainCapture]);
 
-  // Capture the strongest box per message, throttled per-label so a lesion that
-  // lingers across frames is recorded once every CAPTURE_COOLDOWN_MS, not 5×/s.
-  const maybeCapture = useCallback((nb: LiveBox[]) => {
-    if (nb.length === 0) return;
-    const top = nb.reduce((a, b) => (b.confidence > a.confidence ? b : a));
-    const now = Date.now();
-    if (now - (lastCapAtRef.current.get(top.label) ?? 0) < CAPTURE_COOLDOWN_MS) return;
-    lastCapAtRef.current.set(top.label, now);
-    captureFrame(top, nb);
+  // Snapshot only NEW detections. The backend (LiveDetector) already de-dupes a
+  // lingering lesion across frames (spatial-temporal + diffuse cooldown) and
+  // sends them in `captures`, so a lesion that stays in view is recorded once —
+  // not 5×/s. `overlay` is drawn on the snapshot for context. We snapshot the
+  // strongest new detection per message (distinct simultaneous lesions are rare
+  // in a single scope view).
+  const maybeCapture = useCallback((captures: LiveBox[], overlay: LiveBox[]) => {
+    if (captures.length === 0) return;
+    const top = captures.reduce((a, b) => (b.confidence > a.confidence ? b : a));
+    captureFrame(top, overlay.length ? overlay : captures);
   }, [captureFrame]);
 
   const stopAi = useCallback(() => {
@@ -209,10 +208,15 @@ export function BrowserCaptureLive() {
     wsRef.current = ws;
     ws.onmessage = (ev) => {
       let nb: LiveBox[] = [];
-      try { nb = JSON.parse(ev.data).boxes ?? []; } catch { /* ignore */ }
+      let caps: LiveBox[] = [];
+      try {
+        const msg = JSON.parse(ev.data);
+        nb = msg.boxes ?? [];
+        caps = msg.captures ?? [];
+      } catch { /* ignore */ }
       setBoxes(nb);
       sendingRef.current = false;
-      maybeCapture(nb);
+      maybeCapture(caps, nb);
     };
     ws.onclose = () => { sendingRef.current = false; };
     ws.onerror = () => { setErr('Mất kết nối tới máy chủ AI.'); };

@@ -1026,13 +1026,16 @@ async def ws_live_detect(websocket: WebSocket, video_id: str):
     One reply per frame → natural backpressure; the client sends the next frame
     after each result, so a slow GPU never builds a backlog."""
     await websocket.accept()
-    from live_detect import detect_jpeg
+    from live_detect import LiveDetector
+    # One detector per connection → its viewport cache + dedup history span the
+    # whole live session (mirrors the upload worker's per-session dedup).
+    detector = LiveDetector()
     logger.info("Live-detect WS connected: {}", video_id)
     try:
         while True:
             data = await websocket.receive_bytes()
-            boxes = await asyncio.to_thread(detect_jpeg, data)
-            await websocket.send_json({"boxes": boxes})
+            result = await asyncio.to_thread(detector.detect, data)
+            await websocket.send_json(result)
     except WebSocketDisconnect:
         pass
     except Exception as e:
