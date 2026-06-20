@@ -284,7 +284,7 @@ const FEATURES = [
   },
   {
     title: 'Trợ lý LLM y khoa',
-    body:  'Qwen2.5-VL 7B sinh báo cáo 3 phần (Kỹ thuật / Mô tả / Kết luận) theo schema JSON.',
+    body:  'MedGemma-4B sinh báo cáo 3 phần (Kỹ thuật / Mô tả / Kết luận) theo schema JSON.',
     icon:  Sparkles, color: 'var(--st-processing)',
   },
   {

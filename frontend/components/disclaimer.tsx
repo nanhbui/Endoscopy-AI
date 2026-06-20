@@ -6,7 +6,7 @@
  * Decision 4C (locked): show a banner at the top of any AI-report surface
  * AND a footer line at the bottom. Banner carries the legal/clinical weight
  * ("not a substitute for physician judgment"); footer carries the technical
- * provenance ("Powered by Qwen2.5-VL").
+ * provenance ("Powered by MedGemma").
  *
  * Wording is intentionally conservative — nội soi tổn thương dạ dày-thực
  * quản is high-stakes; under-warning is worse than over-warning.
@@ -44,7 +44,7 @@ export function DisclaimerFooter() {
       mt: 1.5,
       lineHeight: 1.4,
     }}>
-      Powered by Qwen2.5-VL · AI confidence ≠ medical certainty
+      Powered by MedGemma · AI confidence ≠ medical certainty
     </Typography>
   );
 }

@@ -237,7 +237,7 @@ function SectionKienTruc() {
     { label: 'Tracker',      sub: 'StrongSORT / UTR-Track', icon: <ScanLine size={14} />,    color: C.stProcessing },
     { label: 'Auto-pause',   sub: 'PAUSED_WAITING_INPUT',   icon: <CirclePause size={14} />, color: C.teal600 },
     { label: 'Whisper + intent', sub: 'STT tiếng Việt',     icon: <Mic size={14} />,         color: C.teal600 },
-    { label: 'LLM (Vision)', sub: 'gpt-4o / qwen2.5-vl',    icon: <Sparkles size={14} />,    color: C.stProcessing },
+    { label: 'LLM (Vision)', sub: 'gpt-4o / medgemma-4b',   icon: <Sparkles size={14} />,    color: C.stProcessing },
     { label: 'Resume',       sub: '→ PLAYING',              icon: <Play size={14} />,        color: C.neutral600 },
   ];
   const states = ['IDLE', 'PLAYING', 'PAUSED_WAITING_INPUT', 'PROCESSING_LLM', 'EOS_SUMMARY'];
@@ -312,7 +312,7 @@ function SectionKienTruc() {
         >
           <CircleAlert size={16} style={{ color: C.teal600, flexShrink: 0, marginTop: 2 }} />
           <span>
-            LLM có thể chạy <strong style={{ color: C.neutral800 }}>local</strong> (Ollama <code className="theme-mono">qwen2.5vl:7b</code>) để dữ liệu bệnh nhân
+            LLM có thể chạy <strong style={{ color: C.neutral800 }}>local</strong> (Ollama <code className="theme-mono">medgemma-4b</code>) để dữ liệu bệnh nhân
             không rời máy, hoặc dùng OpenAI <code className="theme-mono">gpt-4o</code> qua API. Chọn bằng biến môi trường <code className="theme-mono">LLM_BACKEND</code>.
             Tracker chọn được <code className="theme-mono">strongsort</code> / <code className="theme-mono">xysr</code> / <code className="theme-mono">utrtrack-tlukf</code> qua <code className="theme-mono">ENDOSCOPY_TRACKER</code>.
           </span>
@@ -581,7 +581,7 @@ function SectionTech() {
       icon: <Sparkles size={15} />, tag: 'LLM & dữ liệu',
       items: [
         ['OpenAI gpt-4o / mini', 'vision-LLM (cloud)'],
-        ['Ollama qwen2.5vl:7b', 'vision-LLM (local)'],
+        ['Ollama medgemma-4b', 'vision-LLM (local)'],
         ['FAISS', 'dedup negative pattern'],
         ['SQLite', 'phiên, báo cáo, false-positive'],
       ],
