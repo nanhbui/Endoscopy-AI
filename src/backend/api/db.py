@@ -118,6 +118,40 @@ CREATE TABLE IF NOT EXISTS qa_messages (
 
 _QA_SESSION_INDEX_DDL = "CREATE INDEX IF NOT EXISTS idx_qa_session ON qa_messages(session_id)"
 
+# Phase 1 — Patient context per session (PHI — stored local sqlite only).
+# session_id is PK; upsert on re-submit. json column holds the PatientContext
+# to_dict() payload. updated_at is unix epoch ms.
+_PATIENT_CONTEXT_DDL = """
+CREATE TABLE IF NOT EXISTS patient_context (
+    session_id  TEXT PRIMARY KEY,
+    json        TEXT NOT NULL,
+    updated_at  INTEGER NOT NULL    -- unix epoch ms
+)
+"""
+
+# Phase 1 — Persist per-detection thumbnail in lesion_reports so the Tier B
+# summary can attach hi-res images to the multi-image LLM call.
+# Same idempotent ALTER pattern as _FP_ADD_FRAME_B64.
+_LESION_ADD_FRAME_B64 = "ALTER TABLE lesion_reports ADD COLUMN frame_b64 TEXT"
+
+# Phase 2 — Knowledge-base chunks for RAG grounding.
+# vector is a little-endian float32 BLOB (numpy tostring / frombuffer).
+# dim stores the embedding dimension for integrity checks on load.
+_KB_CHUNKS_DDL = """
+CREATE TABLE IF NOT EXISTS kb_chunks (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    citation_label   TEXT NOT NULL,
+    source_guideline TEXT NOT NULL,
+    body_region      TEXT NOT NULL,
+    lang             TEXT NOT NULL DEFAULT 'bilingual',
+    text             TEXT NOT NULL,
+    vector           BLOB NOT NULL,
+    dim              INTEGER NOT NULL
+)
+"""
+
+_KB_CHUNKS_LABEL_INDEX_DDL = "CREATE INDEX IF NOT EXISTS idx_kb_label ON kb_chunks(citation_label)"
+
 
 def _connect() -> sqlite3.Connection:
     """Open a fresh connection. Caller must close. Each call sets pragmas
@@ -130,17 +164,21 @@ def _connect() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    """Create all Phase A + Phase B + Phase D tables if missing. Safe to call repeatedly."""
+    """Create all tables if missing. Safe to call repeatedly."""
     try:
         with _connect() as conn:
             conn.execute(_LESION_REPORTS_DDL)
             conn.execute(_INDEX_DDL)
             conn.execute(_FALSE_POSITIVES_DDL)
             conn.execute(_FP_LABEL_INDEX_DDL)
-            # v2 migration: add frame_b64 column to existing FP tables.
-            # Already-exists raises OperationalError — swallow it.
+            # v2 migration: add frame_b64 to FP table. Duplicate-column swallowed.
             try:
                 conn.execute(_FP_ADD_FRAME_B64)
+            except sqlite3.OperationalError:
+                pass
+            # Phase 1 migration: add frame_b64 to lesion_reports.
+            try:
+                conn.execute(_LESION_ADD_FRAME_B64)
             except sqlite3.OperationalError:
                 pass
             conn.execute(_CONFIRMED_LESIONS_DDL)
@@ -148,6 +186,10 @@ def init_db() -> None:
             conn.execute(_SESSION_SUMMARIES_DDL)
             conn.execute(_QA_MESSAGES_DDL)
             conn.execute(_QA_SESSION_INDEX_DDL)
+            conn.execute(_PATIENT_CONTEXT_DDL)
+            # Phase 2: KB chunks for RAG grounding.
+            conn.execute(_KB_CHUNKS_DDL)
+            conn.execute(_KB_CHUNKS_LABEL_INDEX_DDL)
         logger.info("SQLite DB ready at {}", _DB_PATH)
     except sqlite3.Error as e:
         logger.error("init_db failed: {}", e)
@@ -224,12 +266,13 @@ def backup_db(keep: int = int(os.getenv("ENDOSCOPY_DB_BACKUP_KEEP", "15"))) -> O
 
 
 def save_lesion_report(session_id: str, frame_index: int, report: dict,
-                       model: str, generated_at_ms: int) -> bool:
+                       model: str, generated_at_ms: int,
+                       frame_b64: Optional[str] = None) -> bool:
     """Persist one structured lesion report. Returns True on success.
 
     Uses INSERT OR REPLACE on the (session_id, frame_index) primary key —
-    if the same detection is re-explained, the latest report wins. That's
-    the right behavior since 'Giải thích lại' should overwrite, not append.
+    if the same detection is re-explained, the latest report wins.
+    `frame_b64` stores the JPEG thumbnail so Tier B summary can attach images.
     """
     try:
         label = report.get("conclusion", {}).get("primary_dx", "")[:200]
@@ -237,10 +280,11 @@ def save_lesion_report(session_id: str, frame_index: int, report: dict,
         with _connect() as conn:
             conn.execute(
                 """INSERT OR REPLACE INTO lesion_reports
-                   (session_id, frame_index, report_json, generated_at, model, label, severity)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                   (session_id, frame_index, report_json, generated_at, model,
+                    label, severity, frame_b64)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (session_id, frame_index, json.dumps(report, ensure_ascii=False),
-                 generated_at_ms, model, label, severity),
+                 generated_at_ms, model, label, severity, frame_b64),
             )
         return True
     except sqlite3.Error as e:
@@ -250,15 +294,17 @@ def save_lesion_report(session_id: str, frame_index: int, report: dict,
 
 
 def get_lesion_reports_for_session(session_id: str) -> list[dict]:
-    """Fetch all reports for a session, ordered by frame_index. Returns list
-    of dicts with keys: frame_index, report (parsed JSON), generated_at, model.
+    """Fetch all reports for a session, ordered by frame_index.
 
-    Used by Phase B session-summary chatbot — reads back all per-detection
-    reports to feed into the summary prompt."""
+    Returns list of dicts with keys: frame_index, report (parsed JSON),
+    generated_at, model, label, severity, frame_b64.
+    `frame_b64` is None for old rows persisted before Phase 1.
+    """
     try:
         with _connect() as conn:
             cur = conn.execute(
-                """SELECT frame_index, report_json, generated_at, model, label, severity
+                """SELECT frame_index, report_json, generated_at, model,
+                          label, severity, frame_b64
                    FROM lesion_reports WHERE session_id = ?
                    ORDER BY frame_index ASC""",
                 (session_id,),
@@ -267,7 +313,7 @@ def get_lesion_reports_for_session(session_id: str) -> list[dict]:
         return [
             {"frame_index": r[0], "report": json.loads(r[1]),
              "generated_at": r[2], "model": r[3],
-             "label": r[4], "severity": r[5]}
+             "label": r[4], "severity": r[5], "frame_b64": r[6]}
             for r in rows
         ]
     except sqlite3.Error as e:
@@ -641,3 +687,111 @@ def get_qa_history(session_id: str) -> list[dict]:
     except sqlite3.Error as e:
         logger.error("get_qa_history failed: {}", e)
         return []
+
+
+# ── Patient context (Phase 1 — PHI, local only) ──────────────────────────────
+
+def save_patient_context(session_id: str, ctx_dict: dict,
+                         updated_at_ms: int) -> bool:
+    """UPSERT patient context for a session. ctx_dict is PatientContext.to_dict().
+    Do NOT pass raw context to logger — PHI rule.
+    """
+    try:
+        with _connect() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO patient_context
+                   (session_id, json, updated_at)
+                   VALUES (?, ?, ?)""",
+                (session_id, json.dumps(ctx_dict, ensure_ascii=False), updated_at_ms),
+            )
+        return True
+    except sqlite3.Error as e:
+        logger.error("save_patient_context failed (session={}): {}", session_id, e)
+        return False
+
+
+def get_patient_context(session_id: str) -> Optional[dict]:
+    """Return the stored PatientContext dict, or None if not set."""
+    try:
+        with _connect() as conn:
+            row = conn.execute(
+                "SELECT json FROM patient_context WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        if not row:
+            return None
+        return json.loads(row[0])
+    except sqlite3.Error as e:
+        logger.error("get_patient_context failed (session={}): {}", session_id, e)
+        return None
+
+
+# ── KB chunks (Phase 2 — RAG grounding) ─────────────────────────────────────
+
+def save_kb_chunk(citation_label: str, source_guideline: str, body_region: str,
+                  text: str, vector: list[float],
+                  lang: str = "bilingual") -> bool:
+    """Persist one KB chunk with its pre-computed embedding vector.
+
+    vector is stored as a little-endian float32 BLOB so load_kb_chunks can
+    reconstruct it with numpy.frombuffer without any extra serialisation dep.
+    Returns True on success.
+    """
+    import struct
+    try:
+        blob = struct.pack(f"{len(vector)}f", *vector)
+        dim = len(vector)
+        with _connect() as conn:
+            conn.execute(
+                """INSERT INTO kb_chunks
+                   (citation_label, source_guideline, body_region, lang, text, vector, dim)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (citation_label, source_guideline, body_region, lang, text, blob, dim),
+            )
+        return True
+    except sqlite3.Error as e:
+        logger.error("save_kb_chunk failed (label={}): {}", citation_label, e)
+        return False
+
+
+def load_kb_chunks() -> list[dict]:
+    """Load all KB chunks. Returns list of dicts with keys:
+    id, citation_label, source_guideline, body_region, lang, text, vector (list[float]), dim.
+    """
+    import struct
+    try:
+        with _connect() as conn:
+            rows = conn.execute(
+                """SELECT id, citation_label, source_guideline, body_region,
+                          lang, text, vector, dim
+                   FROM kb_chunks ORDER BY id ASC"""
+            ).fetchall()
+        result = []
+        for row in rows:
+            blob = row[6]
+            dim = row[7]
+            # Decode BLOB → list[float]; gracefully skip malformed rows.
+            try:
+                vec = list(struct.unpack(f"{dim}f", blob))
+            except struct.error:
+                logger.warning("kb_chunks: malformed vector for id={}", row[0])
+                continue
+            result.append({
+                "id": row[0],
+                "citation_label": row[1],
+                "source_guideline": row[2],
+                "body_region": row[3],
+                "lang": row[4],
+                "text": row[5],
+                "vector": vec,
+                "dim": dim,
+            })
+        return result
+    except sqlite3.Error as e:
+        logger.error("load_kb_chunks failed: {}", e)
+        return []
+
+
+def clear_kb_chunks() -> int:
+    """Delete all KB chunk rows (called by build-kb-embeddings.py before reinserting)."""
+    return _clear_table("kb_chunks")
