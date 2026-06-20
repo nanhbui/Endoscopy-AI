@@ -19,11 +19,19 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
 import CircularProgress from '@mui/material/CircularProgress';
-import { Radio, Cpu, Square, Video as VideoIcon, X, Info, Maximize2, FileText, StopCircle } from 'lucide-react';
+import LinearProgress from '@mui/material/LinearProgress';
+import { Radio, Cpu, Square, Video as VideoIcon, X, Info, Maximize2, FileText, StopCircle, CheckCircle2 } from 'lucide-react';
 import { WS_BASE, API_BASE } from '@/lib/ws-client';
 import { labelToColor as colorFor } from '@/lib/lesion-colors';
 import { useAnalysis, lesionReportToMarkdown, type Detection } from '@/context/AnalysisContext';
 import { LiveCapturesPanel, type LiveCapture } from '@/components/live-captures-panel';
+import {
+  PatientContextForm,
+  emptyPatientContext,
+  hasPatientContext,
+  patientContextToBody,
+  type PatientContextData,
+} from '@/components/patient-context-form';
 
 interface LiveBox { label: string; confidence: number; bbox: [number, number, number, number]; }
 
@@ -33,6 +41,11 @@ const SEND_INTERVAL_MS = 200;       // grab cadence (~5 fps to backend)
 const GRAB_WIDTH = 960;             // downscale frames sent to the detector
 const CAP_WIDTH = 960;              // snapshot width stored for the panel + report
 const MAX_CAPTURES = 50;            // cap memory/localStorage footprint
+// Backpressure: the local VLM serves explanations serially, so firing one fetch
+// per detection during a busy sweep floods it and the tail request times out.
+// Run at most EXPLAIN_CONCURRENCY at a time; the rest wait in a FIFO queue.
+const EXPLAIN_CONCURRENCY = 1;
+const EXPLAIN_CLIENT_TIMEOUT_MS = 185_000; // just above the server's 180s hard cap
 
 // Capture resolutions offered to the doctor. "auto" lets the dongle decide.
 const RES_OPTIONS = [
@@ -70,6 +83,9 @@ export function BrowserCaptureLive() {
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const sendingRef = useRef(false);
   const capIdRef = useRef(0);
+  // FIFO queue + in-flight counter for serialized lesion explanations.
+  const explainQueueRef = useRef<Array<{ id: number; b64: string; box: LiveBox }>>([]);
+  const explainActiveRef = useRef(0);
 
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [deviceId, setDeviceId] = useState('');
@@ -82,9 +98,13 @@ export function BrowserCaptureLive() {
   const [actualRes, setActualRes] = useState(''); // e.g. "1920×1080" from the track
   const [showHint, setShowHint] = useState(true);
   const [aiOn, setAiOn] = useState(false);
+  // True after "Dừng phiên": switches the bottom controls into the finalize
+  // panel (loading → "Tạo báo cáo"). Reset when the source is started again.
+  const [stopped, setStopped] = useState(false);
   const [boxes, setBoxes] = useState<LiveBox[]>([]);
   const [captures, setCaptures] = useState<LiveCapture[]>([]);
   const [err, setErr] = useState('');
+  const [patientCtx, setPatientCtx] = useState<PatientContextData>(emptyPatientContext);
 
   const refreshDevices = useCallback(async () => {
     try {
@@ -112,6 +132,7 @@ export function BrowserCaptureLive() {
         await videoRef.current.play().catch(() => {});
       }
       setPreviewing(true);
+      setStopped(false);
       await refreshDevices();
       const settings = stream.getVideoTracks()[0]?.getSettings?.();
       if (settings?.deviceId) setDeviceId(settings.deviceId);
@@ -123,18 +144,44 @@ export function BrowserCaptureLive() {
   }, [refreshDevices, resolution]);
 
   // Ask the VLM to describe one captured frame; fill the panel item when it returns.
-  const explainCapture = useCallback(async (id: number, b64: string, box: LiveBox) => {
+  // Aborts at EXPLAIN_CLIENT_TIMEOUT_MS so a stuck request never hangs the queue.
+  const runExplain = useCallback(async (id: number, b64: string, box: LiveBox) => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), EXPLAIN_CLIENT_TIMEOUT_MS);
     try {
       const qs = new URLSearchParams({ label: box.label, conf: String(box.confidence) });
-      const r = await fetch(`${API_BASE}/live/explain?${qs.toString()}`, { method: 'POST', body: b64ToJpegBlob(b64) });
+      const r = await fetch(`${API_BASE}/live/explain?${qs.toString()}`, { method: 'POST', body: b64ToJpegBlob(b64), signal: ctrl.signal });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
       const data = await r.json();
       setCaptures((prev) => prev.map((c) => c.id === id ? { ...c, report: data.report ?? null, explaining: false } : c));
     } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Giải thích thất bại';
+      const msg = ctrl.signal.aborted
+        ? 'Hết thời gian chờ AI — nhấn để thử lại.'
+        : (e instanceof Error ? e.message : 'Giải thích thất bại');
       setCaptures((prev) => prev.map((c) => c.id === id ? { ...c, explaining: false, error: msg } : c));
+    } finally {
+      clearTimeout(timer);
     }
   }, []);
+
+  // Drain the queue, keeping at most EXPLAIN_CONCURRENCY explains in flight so we
+  // never flood the serial VLM. Re-pumps as each one settles.
+  const pumpExplainQueue = useCallback(() => {
+    while (explainActiveRef.current < EXPLAIN_CONCURRENCY && explainQueueRef.current.length > 0) {
+      const job = explainQueueRef.current.shift()!;
+      explainActiveRef.current += 1;
+      void runExplain(job.id, job.b64, job.box).finally(() => {
+        explainActiveRef.current -= 1;
+        pumpExplainQueue();
+      });
+    }
+  }, [runExplain]);
+
+  // Enqueue instead of firing immediately — backpressure for the serial VLM.
+  const explainCapture = useCallback((id: number, b64: string, box: LiveBox) => {
+    explainQueueRef.current.push({ id, b64, box });
+    pumpExplainQueue();
+  }, [pumpExplainQueue]);
 
   // Snapshot the current frame, draw the detection boxes onto it (same overlay
   // the doctor sees live), push it to the panel, then kick off the VLM. `box` is
@@ -250,6 +297,7 @@ export function BrowserCaptureLive() {
     streamRef.current = null;
     if (videoRef.current) videoRef.current.srcObject = null;
     setPreviewing(false);
+    setStopped(true);
   }, [stopAi]);
 
   const removeCapture = useCallback((id: number) => {
@@ -262,7 +310,7 @@ export function BrowserCaptureLive() {
   const pendingExplain = captures.filter((c) => c.explaining).length;
   const canReport = captures.length > 0 && pendingExplain === 0;
 
-  const createReport = useCallback(() => {
+  const createReport = useCallback(async () => {
     if (captures.length === 0 || captures.some((c) => c.explaining)) return;
     stopSession();   // end the live mirror/detector — the report popup takes over
     const base = Math.min(...captures.map((c) => c.ts));
@@ -281,8 +329,27 @@ export function BrowserCaptureLive() {
     // renders its SessionReportModal (the stop→report popup). We intentionally do
     // NOT navigate to /report here — the doctor reviews the popup first, then the
     // modal's "Xem báo cáo đầy đủ" button routes to /report.
-    saveLiveSession(name, dets);
-  }, [captures, saveLiveSession, stopSession]);
+    const sessionId = saveLiveSession(name, dets);
+
+    // Phase 1 — persist patient context (PHI) FIRST so the summary (which reads it)
+    // sees it. Non-fatal: on failure the summary just degrades to no patient context.
+    if (hasPatientContext(patientCtx)) {
+      await fetch(`${API_BASE}/sessions/${sessionId}/patient-context`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patientContextToBody(patientCtx)),
+      }).catch(() => { /* non-fatal — summary degrades to no patient context */ });
+    }
+
+    // Persist captures as lesion_reports + kick off the SAME AI summary the upload
+    // path runs, so the live report is identical. Fire-and-forget: the backend
+    // generates in the background and the Report page polls for the result.
+    fetch(`${API_BASE}/live/sessions/${sessionId}/finalize`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ detections: dets }),
+    }).catch(() => { /* non-fatal — report still shows detections; summary stays pending */ });
+  }, [captures, patientCtx, saveLiveSession, stopSession]);
 
   // Cleanup on unmount.
   useEffect(() => () => {
@@ -299,6 +366,11 @@ export function BrowserCaptureLive() {
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+      {/* Patient context — filled before starting; saved on "Tạo báo cáo" */}
+      {!aiOn && (
+        <PatientContextForm data={patientCtx} onChange={setPatientCtx} />
+      )}
+
       {/* Duplicate-mode notice — an Extend (mở rộng) signal arrives squished/cropped */}
       {showHint && (
         <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 1, px: 1.5, py: 1, borderRadius: '10px', border: '1px solid #FCD34D', backgroundColor: '#FFFBEB' }}>
@@ -407,19 +479,50 @@ export function BrowserCaptureLive() {
                 </Box>
               </>
             )}
-            {captures.length > 0 && (
-              <Box component="button" onClick={createReport} disabled={!canReport}
-                sx={{ ...btnSx('#00838F'),
-                  opacity: canReport ? 1 : 0.55,
-                  cursor: canReport ? 'pointer' : 'not-allowed',
-                  '&:hover': { filter: canReport ? 'brightness(1.08)' : 'none' } }}
-              >
-                {canReport
-                  ? <><FileText size={16} /> Tạo báo cáo ({captures.length})</>
-                  : <><CircularProgress size={15} sx={{ color: '#fff' }} /> Đang phân tích LLM… ({pendingExplain})</>}
-              </Box>
-            )}
           </Box>
+
+          {/* Finalize panel — appears after "Dừng phiên". While the VLM is still
+              explaining captured lesions it shows a calm loading state with
+              progress; once every explanation settles it swaps to the primary
+              "Tạo báo cáo" action. Replaces the old disabled-button-with-counter,
+              which looked broken (blurred + counting down). */}
+          {stopped && captures.length > 0 && (
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, px: 2, py: 1.75, borderRadius: '12px', border: `1px solid ${canReport ? '#A7D8DC' : '#E2EAE8'}`, backgroundColor: canReport ? 'rgba(0,131,143,0.05)' : '#F8FAFB' }}>
+              {canReport ? (
+                <>
+                  <CheckCircle2 size={26} color="#00838F" style={{ flexShrink: 0 }} />
+                  <Box sx={{ flex: 1, minWidth: 0 }}>
+                    <Typography sx={{ fontSize: '0.9rem', fontWeight: 800, color: '#0D1B2A' }}>
+                      Đã phân tích xong {captures.length} tổn thương
+                    </Typography>
+                    <Typography sx={{ fontSize: '0.78rem', color: 'text.secondary' }}>
+                      AI đã hoàn tất giải thích — bạn có thể tạo báo cáo ngay.
+                    </Typography>
+                  </Box>
+                  <Box component="button" onClick={createReport} sx={{ ...btnSx('#00838F'), flexShrink: 0 }}>
+                    <FileText size={16} /> Tạo báo cáo
+                  </Box>
+                </>
+              ) : (
+                <>
+                  <CircularProgress size={26} sx={{ color: '#00838F', flexShrink: 0 }} />
+                  <Box sx={{ flex: 1, minWidth: 0 }}>
+                    <Typography sx={{ fontSize: '0.9rem', fontWeight: 800, color: '#0D1B2A' }}>
+                      Đang phân tích tổn thương bằng AI…
+                    </Typography>
+                    <Typography sx={{ fontSize: '0.78rem', color: 'text.secondary', mb: 0.75 }}>
+                      Đã xong {captures.length - pendingExplain}/{captures.length} — vui lòng đợi trước khi tạo báo cáo.
+                    </Typography>
+                    <LinearProgress
+                      variant="determinate"
+                      value={((captures.length - pendingExplain) / captures.length) * 100}
+                      sx={{ height: 6, borderRadius: 3, backgroundColor: 'rgba(0,131,143,0.12)', '& .MuiLinearProgress-bar': { backgroundColor: '#00838F' } }}
+                    />
+                  </Box>
+                </>
+              )}
+            </Box>
+          )}
 
           {/* Display tuning — resolution, fit mode, zoom (fixes a squished signal) */}
           {previewing && (

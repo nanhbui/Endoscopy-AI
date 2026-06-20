@@ -44,6 +44,13 @@ export interface DetectionData {
   frame_b64?: string;
 }
 
+// Phase 3 — guideline citation shape (Phase 2 persists these into report/summary JSON).
+export interface Citation {
+  label: string;
+  source_guideline?: string;
+  year?: number;
+}
+
 // Structured lesion report (Phase A) — 3-section bilingual VN+EN format.
 // Backend sends this as a single LESION_REPORT_DONE event after the LLM
 // finishes; no chunk streaming for JSON-schema responses.
@@ -60,6 +67,8 @@ export interface LesionReport {
     recommendations: string[];
     ai_confidence: number;
   };
+  /** Phase 3 — optional guideline citations from Phase-2 grounding. */
+  citations?: Citation[];
 }
 
 // Session summary (Phase B) — emitted once when VIDEO_FINISHED fires.
@@ -83,6 +92,8 @@ export interface SessionSummary {
     action: string;
   }[];
   overall_risk: "thấp" | "trung bình" | "cao";
+  /** Phase 3 — optional guideline citations from Phase-2 grounding. */
+  citations?: Citation[];
 }
 
 export type ServerEvent =
@@ -290,6 +301,22 @@ export async function listDbSessions(): Promise<DbSessionRow[]> {
     return Array.isArray(j.sessions) ? (j.sessions as DbSessionRow[]) : [];
   } catch {
     return [];
+  }
+}
+
+/** Fetch a single session's persisted AI summary from the DB. Used by the Report
+ *  page to recover a summary that finished generating AFTER the user left the
+ *  workspace mid-generation — the WS push (SESSION_SUMMARY_DONE) was lost, but
+ *  the backend saves the summary to the DB before sending it, so it's here.
+ *  Returns null when not (yet) available or on any error. */
+export async function fetchSessionSummary(sessionId: string): Promise<SessionSummary | null> {
+  try {
+    const res = await fetch(`${API_BASE}/session/${sessionId}/summary`);
+    if (!res.ok) return null;
+    const j = await res.json();
+    return (j.summary ?? null) as SessionSummary | null;
+  } catch {
+    return null;
   }
 }
 

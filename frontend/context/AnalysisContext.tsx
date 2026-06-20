@@ -134,6 +134,9 @@ export interface Session {
   qaMessages?: QaMessage[];
   /** Phase B — true while the LLM is streaming a Q&A response. */
   qaStreaming?: boolean;
+  /** Phase B — set when the user pressed "stop": incoming Q&A chunks are
+   *  ignored and the input unlocks. Reset when the next question is sent. */
+  qaCancelled?: boolean;
   /** Phase 02 — StrongSORT track ids the doctor "Xác nhận luôn"-ed.
    *  Worker emits CONFIRMED_CAPTURE for these instead of pausing. */
   confirmedTrackIds?: number[];
@@ -208,6 +211,9 @@ interface AnalysisContextType {
    *  HTTP fallback when WS closed (e.g. browsing /report page). Optional
    *  `sessionId` targets a specific session — default is currentSessionId. */
   sendSessionQA: (text: string, sessionId?: string) => void;
+  /** Phase B — stop an in-flight Q&A turn (abort HTTP / ignore further WS chunks)
+   *  so the input unlocks and the user can ask something else. */
+  stopSessionQA: (sessionId?: string) => void;
   /** Phase C1 — latest LLM/system error for UI surfacing. Cleared via dismissError(). */
   lastError: { message: string; code?: string; context?: string } | null;
   dismissError: () => void;
@@ -587,6 +593,8 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
         // append the chunk to its content.
         const chunk = evt.data.chunk;
         updateCurrentSession((sess) => {
+          // User pressed stop — drop any further streamed chunks for this turn.
+          if (sess.qaCancelled) return sess;
           const list = sess.qaMessages ?? [];
           const last = list[list.length - 1];
           if (last && last.role === "assistant" && sess.qaStreaming) {
@@ -945,6 +953,9 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
   //     /session/{videoId}/qa, wait for the full reply, append both turns
   //     locally. Server still persists the conversation to qa_messages so
   //     the next page open sees the same history.
+  // In-flight HTTP Q&A requests, keyed by session id, so stopSessionQA can abort.
+  const qaAbortRef = useRef<Map<string, AbortController>>(new Map());
+
   const sendSessionQA = useCallback((text: string, sessionId?: string) => {
     const t = text.trim();
     if (!t) return;
@@ -960,7 +971,8 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       setSessions((prev) =>
         prev.map((s) =>
           s.id === targetId
-            ? { ...s, qaStreaming: streaming, qaMessages: [...(s.qaMessages ?? []), msg] }
+            ? { ...s, qaStreaming: streaming, qaCancelled: false,
+                qaMessages: [...(s.qaMessages ?? []), msg] }
             : s,
         ),
       );
@@ -976,29 +988,50 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
     }
 
     // HTTP fallback — used at /report (no WS) or when chatting about a
-    // session that isn't currently active.
+    // session that isn't currently active. The Q&A endpoint keys everything
+    // (summary, reports, history) by the session id everything was persisted
+    // under: that's `videoId` for an uploaded video, but the session id itself
+    // for a live (Trực tuyến) session and for any DB-loaded session (where
+    // videoId isn't set) — so fall back to targetId.
     const sess = sessions.find((s) => s.id === targetId);
-    const vid = sess?.videoId;
-    if (!vid) {
-      appendToTarget({ role: "assistant", content: "Không thể kết nối phiên — thiếu video id.", ts: Date.now() }, false);
-      return;
-    }
+    const vid = sess?.videoId ?? targetId;
 
+    const controller = new AbortController();
+    qaAbortRef.current.set(targetId, controller);
     (async () => {
       try {
         const res = await fetch(`${API_BASE}/session/${vid}/qa`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text: t }),
+          signal: controller.signal,
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json() as { reply: string };
         appendToTarget({ role: "assistant", content: data.reply, ts: Date.now() }, false);
       } catch (err) {
+        // User pressed stop → request aborted; leave no error bubble.
+        if ((err as Error)?.name === "AbortError") return;
         appendToTarget({ role: "assistant", content: `Lỗi gọi AI: ${String(err)}`, ts: Date.now() }, false);
+      } finally {
+        qaAbortRef.current.delete(targetId);
       }
     })();
   }, [sessions, currentSessionId]);
+
+  const stopSessionQA = useCallback((sessionId?: string) => {
+    const targetId = sessionId ?? currentSessionId;
+    if (!targetId) return;
+    // Abort any in-flight HTTP request for this session.
+    qaAbortRef.current.get(targetId)?.abort();
+    qaAbortRef.current.delete(targetId);
+    // Mark cancelled (WS chunks dropped) and unlock the input immediately.
+    setSessions((prev) =>
+      prev.map((s) =>
+        s.id === targetId ? { ...s, qaStreaming: false, qaCancelled: true } : s,
+      ),
+    );
+  }, [currentSessionId]);
 
   const setIsPlaying = useCallback((v: boolean) => {
     if (!v) {
@@ -1123,6 +1156,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       closeRecheckModal,
       removeCapture,
       sendSessionQA,
+      stopSessionQA,
       lastError,
       dismissError: () => setLastError(null),
       setIsPlaying,
@@ -1144,7 +1178,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       addConfirmedTrack, addMutedTrack,
       recheckResult, isRecheckModalOpen, openRecheckModal, closeRecheckModal,
       removeCapture,
-      sendSessionQA, lastError, setIsPlaying,
+      sendSessionQA, stopSessionQA, lastError, setIsPlaying,
       addDetection, removeDetection, resetAnalysis, finalizeSession, saveLiveSession, removeSession, clearSessions,
     ],
   );

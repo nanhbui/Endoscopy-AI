@@ -857,7 +857,7 @@ export default function Workspace() {
   useEffect(() => {
     const check = async () => {
       try {
-        const res = await fetch(`${API_BASE}/health`, { signal: AbortSignal.timeout(3000) });
+        const res = await fetch(`${API_BASE}/health`, { signal: AbortSignal.timeout(8000) });
         const ok = res.ok;
         // Detect offline → online transition
         if (ok && prevBackendReachable.current === false) {
@@ -1118,8 +1118,10 @@ export default function Workspace() {
           </Box>
         </Box>
 
-        {/* Backend offline banner */}
-        {backendReachable === false && (
+        {/* Backend offline banner — hidden while the WS is connected (an active
+            analysis stream proves the backend is reachable; a stale health-poll
+            failure must not contradict it). */}
+        {backendReachable === false && !isConnected && (
           <Box sx={{ mb: 2, px: 2, py: 1.25, borderRadius: '12px', backgroundColor: 'rgba(211,47,47,0.08)', border: '1px solid rgba(211,47,47,0.3)', display: 'flex', alignItems: 'center', gap: 1.5 }}>
             <AlertTriangle size={16} color="#D32F2F" />
             <Typography sx={{ fontSize: '0.85rem', color: '#D32F2F', fontWeight: 500, flex: 1 }}>
