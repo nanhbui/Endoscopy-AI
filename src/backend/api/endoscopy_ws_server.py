@@ -76,11 +76,14 @@ from db import (                                                       # noqa: E
     list_all_sessions, delete_session,
     save_session_summary, get_session_summary,
     append_qa_message, get_qa_history,
+    save_patient_context, get_patient_context,
 )
+from patient_context import PatientContext, format_patient_context  # noqa: E402
 from summary_prompts import (                                          # noqa: E402
     SESSION_SUMMARY_SCHEMA, SESSION_SUMMARY_PROMPT,
     build_session_summary_input, build_session_qa_messages,
 )
+import kb_rag  # noqa: E402 — Phase 2 RAG grounding; warm() called in startup hook
 
 # ── Config ───────────────────────────────────────────────────────────────────
 # ENDOSCOPY_UPLOAD_DIR env var overrides default (needed on GPU server)
@@ -97,6 +100,15 @@ LIBRARY_DIR.mkdir(parents=True, exist_ok=True)
 # region overlapping 0.5–0.6 with a "Báo sai" report leaks into the panel.
 _CONFIRM_FP_IOU = float(os.getenv("ENDOSCOPY_CONFIRM_IOU", "0.5"))
 
+# Phase 4 — Auto key-frame analysis.
+# Default OFF (0) so the manual pause→Giải thích flow is unchanged.
+# Set AUTO_KEYFRAME_ENABLED=1 (env) or pass auto_keyframe=True per-session
+# via POST /sessions/{id}/config to enable automatic Tier-A reports on each
+# new representative track_id. The session dict key always wins over the env.
+_AUTO_KEYFRAME_DEFAULT: bool = os.getenv("AUTO_KEYFRAME_ENABLED", "0").lower() in (
+    "1", "true", "yes", "on"
+)
+
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 LLM_MODEL_VISION  = os.getenv("OPENAI_MODEL_VISION",  "gpt-4o")
 LLM_MODEL_FOLLOWUP = os.getenv("OPENAI_MODEL_FOLLOWUP", "gpt-4o-mini")
@@ -108,6 +120,11 @@ LLM_MODEL_FOLLOWUP = os.getenv("OPENAI_MODEL_FOLLOWUP", "gpt-4o-mini")
 LLM_BACKEND     = os.getenv("LLM_BACKEND", "openai").lower()
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL", "medgemma-4b")
+# Q&A chatbot model (Ollama). MedGemma-4B over-refuses valid medical questions
+# (intrinsic safety bias), so the conversational Q&A path uses a stronger general
+# model. Lesion report + session summary keep OLLAMA_MODEL (MedGemma) — it gives a
+# much more detailed lesion analysis and raises the early-cancer differential.
+QA_MODEL        = os.getenv("QA_MODEL", "qwen2.5vl:7b")
 
 # ── Runtime config (Settings panel) ───────────────────────────────────────────
 # Detection-sensitivity tunables that the (spawned) pipeline worker reads from
@@ -166,6 +183,28 @@ _load_runtime_config()
 # hanging indefinitely when Ollama is stuck / OOM / context overflow. 90s
 # covers Phase B summary (~15s typical, 30s worst-case) with headroom.
 LLM_CALL_TIMEOUT_SEC = float(os.getenv("LLM_CALL_TIMEOUT_SEC", "180"))
+
+# Root-cause fix for live LLM_TIMEOUT: the local VLM (one model in VRAM) serves
+# requests serially, but a busy scope fires many lesion explanations at once.
+# Without gating, request N waits behind N-1 others while its own wait_for clock
+# already runs → the tail blows past LLM_CALL_TIMEOUT_SEC. Gate every VLM call
+# through this semaphore and start the timeout clock only AFTER acquiring it, so
+# 180s measures real inference time, not queue-wait time. Default 1 = match
+# Ollama's serial nature; raise via env if OLLAMA_NUM_PARALLEL is increased.
+VLM_MAX_CONCURRENCY = int(os.getenv("VLM_MAX_CONCURRENCY", "1"))
+# Live (Trực tiếp) reports favour speed over length — a shorter cap means each
+# inference finishes sooner, so the serial queue drains faster. The upload path
+# keeps its full 1500-token budget (richer report, no live latency pressure).
+LIVE_EXPLAIN_MAX_TOKENS = int(os.getenv("LIVE_EXPLAIN_MAX_TOKENS", "800"))
+_vlm_semaphore: Optional[asyncio.Semaphore] = None
+
+
+def _get_vlm_semaphore() -> asyncio.Semaphore:
+    """Lazy-init so the semaphore binds to the running event loop, not import time."""
+    global _vlm_semaphore
+    if _vlm_semaphore is None:
+        _vlm_semaphore = asyncio.Semaphore(VLM_MAX_CONCURRENCY)
+    return _vlm_semaphore
 
 
 def _classify_llm_error(exc: Exception) -> tuple[str, str]:
@@ -398,6 +437,17 @@ def _llm_model_name(role: str = "vision") -> str:
     return LLM_MODEL_VISION if role == "vision" else LLM_MODEL_FOLLOWUP
 
 
+def _qa_model_name() -> str:
+    """Model for the conversational Q&A chatbot ONLY (not lesion report / summary).
+
+    On Ollama this returns QA_MODEL (Qwen by default) because MedGemma-4B
+    intrinsically over-refuses valid medical questions; on OpenAI it falls back to
+    the normal vision model. Lesion report + summary still use _llm_model_name()."""
+    if LLM_BACKEND == "ollama":
+        return QA_MODEL
+    return LLM_MODEL_VISION
+
+
 @app.on_event("startup")
 async def _warm_vlm() -> None:
     """Pre-load the local VLM into VRAM at startup so the FIRST live/explain call
@@ -424,6 +474,12 @@ async def _warm_vlm() -> None:
             logger.warning("VLM pre-warm skipped: {}", exc)
 
     asyncio.create_task(_warm())
+
+    # Phase 2: pre-load KB chunks into RAM — best-effort, never blocks boot.
+    try:
+        kb_rag.warm()
+    except Exception as _kb_exc:  # pragma: no cover - best effort
+        logger.warning("kb_rag.warm skipped at startup: {}", _kb_exc)
 
 
 # ── CJK leakage guard ─────────────────────────────────────────────────────────
@@ -833,6 +889,9 @@ async def upload_video(request: Request, filename: str = "video.mp4"):
         "library_id": None,
         "conv_history": [],
         "llm_cache": {},
+        # Phase 4: auto key-frame; default from env (OFF). Override per-session.
+        "auto_keyframe": _AUTO_KEYFRAME_DEFAULT,
+        "auto_reported_track_ids": set(),
     }
     logger.info("Video uploaded: {} ({:.1f} MB) → session {}", filename, size / 1_048_576, video_id)
     return {"video_id": video_id, "filename": filename, "size_bytes": size}
@@ -854,6 +913,9 @@ async def connect_stream(request: Request):
         "library_id": None,
         "conv_history": [],
         "llm_cache": {},
+        # Phase 4: auto key-frame; default from env (OFF).
+        "auto_keyframe": _AUTO_KEYFRAME_DEFAULT,
+        "auto_reported_track_ids": set(),
     }
     logger.info("Live stream registered: {} → session {}", source, video_id)
     return {"video_id": video_id, "source": source}
@@ -941,6 +1003,9 @@ async def session_from_library(library_id: str):
         "library_id": library_id,
         "conv_history": [],
         "llm_cache": {},
+        # Phase 4: auto key-frame; default from env (OFF).
+        "auto_keyframe": _AUTO_KEYFRAME_DEFAULT,
+        "auto_reported_track_ids": set(),
     }
     logger.info("Session from library: library_id={} → video_id={}", library_id, video_id)
     return {"video_id": video_id, "library_id": library_id, "filename": entry["filename"]}
@@ -989,6 +1054,40 @@ async def delete_session_endpoint(session_id: str):
     trash / bulk-delete). The browser removes its localStorage copy separately."""
     removed = delete_session(session_id)
     return {"deleted": True, "session_id": session_id, "rows": removed}
+
+
+@app.post("/sessions/{session_id}/patient-context")
+async def upsert_patient_context(session_id: str, request: Request):
+    """Store patient context (PHI) for a session. All fields optional.
+    Validates and clamps via PatientContext before persisting to DB.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    try:
+        ctx = PatientContext(
+            age=body.get("age"),
+            sex=body.get("sex"),
+            indication=body.get("indication"),
+            history=body.get("history"),
+            meds=body.get("meds"),
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    ok = save_patient_context(session_id, ctx.to_dict(), int(time.time() * 1000))
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to save patient context")
+    return {"ok": True, "session_id": session_id}
+
+
+@app.get("/sessions/{session_id}/patient-context")
+async def get_patient_context_endpoint(session_id: str):
+    """Return the stored patient context for a session.
+    Returns {} when not set (backward compatible — print page & overview tab guard with ?./).
+    """
+    ctx_dict = get_patient_context(session_id)
+    return ctx_dict if ctx_dict else {}
 
 
 @app.get("/live/{video_id}/mjpeg")
@@ -1042,6 +1141,33 @@ async def ws_live_detect(websocket: WebSocket, video_id: str):
         logger.warning("Live-detect WS closed ({}): {}", video_id, e)
 
 
+@app.post("/live/sessions/{session_id}/finalize")
+async def finalize_live_session(session_id: str, request: Request):
+    """Trực tuyến (live): persist the browser-collected captures as lesion_reports
+    and kick off the SAME Phase B summary the upload path runs, so a live session's
+    report is identical to an uploaded video's. The summary runs in the background
+    (no WS to push to here) — the Report page polls GET /session/{id}/summary."""
+    body = await request.json()
+    detections = body.get("detections") or []
+    now_ms = int(time.time() * 1000)
+    model = _llm_model_name("vision")
+    # Only captures that carry a structured report are summarizable.
+    with_report = [d for d in detections
+                   if isinstance(d.get("lesionReport") or d.get("report"), dict)]
+    persisted = 0
+    for idx, d in enumerate(with_report):
+        report = d.get("lesionReport") or d.get("report")
+        if save_lesion_report(session_id, idx, report, model, now_ms, d.get("frame_b64")):
+            persisted += 1
+    if persisted == 0:
+        raise HTTPException(status_code=400, detail="no analyzable detections to summarize")
+    # Live findings are all doctor-kept captures → count the persisted ones as
+    # confirmed so the summary's overview counts match the reports actually stored.
+    sess = {"confirmed_detections": with_report[:persisted], "confirmed_captures": []}
+    asyncio.ensure_future(_finalize_live_summary(session_id, sess))
+    return {"ok": True, "persisted": persisted}
+
+
 @app.post("/live/explain")
 async def live_explain(request: Request, label: str = "", conf: float = 0.0):
     """On-demand VLM lesion report for live (Trực tiếp) mode. Body = JPEG frame
@@ -1066,11 +1192,14 @@ async def live_explain(request: Request, label: str = "", conf: float = 0.0):
     response_format = {"type": "json_schema",
                        "json_schema": {"name": "endoscopy_lesion_report", "schema": LESION_REPORT_SCHEMA}}
     try:
-        completion = await asyncio.wait_for(
-            client.chat.completions.create(
-                model=_llm_model_name("vision"), messages=messages,
-                response_format=response_format, max_tokens=1500),
-            timeout=LLM_CALL_TIMEOUT_SEC)
+        # Serialize through the VLM gate; only start the 180s clock once we hold
+        # it, so a queued request never times out on queue-wait alone.
+        async with _get_vlm_semaphore():
+            completion = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=_llm_model_name("vision"), messages=messages,
+                    response_format=response_format, max_tokens=LIVE_EXPLAIN_MAX_TOKENS),
+                timeout=LLM_CALL_TIMEOUT_SEC)
         report = _sanitize_llm_output(json.loads(completion.choices[0].message.content or "{}"))
         return {"report": report}
     except Exception as e:
@@ -1124,7 +1253,7 @@ async def post_session_qa(video_id: str, request: Request):
     try:
         completion = await asyncio.wait_for(
             client.chat.completions.create(
-                model=_llm_model_name("vision"),
+                model=_qa_model_name(),
                 messages=messages,
                 max_tokens=1000,
                 extra_body={"options": {"num_ctx": 6144}},
@@ -1292,6 +1421,39 @@ async def ws_analysis(websocket: WebSocket, video_id: str):
                     # paused on a detection the user already classified as wrong.
                     ctrl.send_action("ACTION_IGNORE")
                     continue  # don't forward to FE
+
+            # Phase 4 — Auto key-frame: if enabled, auto-run Tier-A report for each
+            # new representative track_id without requiring a manual ACTION_EXPLAIN.
+            # Guards: (1) flag must be on, (2) track_id not yet reported this session,
+            # (3) no concurrent LLM streaming already in progress.
+            # The pipeline stays PAUSED after DETECTION_FOUND (same as manual flow);
+            # we resume it via ACTION_IGNORE after enqueuing the background report so
+            # the video continues without waiting for user input.
+            # Manual flow (default OFF) is byte-for-byte unchanged — this block is
+            # never entered when auto_keyframe is False.
+            if evt["event"] == "DETECTION_FOUND" and sess.get("auto_keyframe"):
+                det = evt["data"]
+                lesion = det.get("lesion", {})
+                track_id = lesion.get("track_id", -1)
+                reported_ids: set = sess.setdefault("auto_reported_track_ids", set())
+                # Guard: track_id=-1 means no tracker active; skip to avoid
+                # reporting every single detection when dedup is spatial-temporal.
+                if isinstance(track_id, int) and track_id >= 0:
+                    if track_id not in reported_ids:
+                        reported_ids.add(track_id)
+                        logger.info(
+                            "Auto key-frame: new track_id={} {} — enqueuing Tier-A report",
+                            track_id, lesion.get("label", "?"),
+                        )
+                        # Reuse the exact same _stream_lesion_report path as ACTION_EXPLAIN.
+                        # Carries its own llm_cache dedup so repeated calls for the same
+                        # bbox-signature are served from cache, not re-invoking the LLM.
+                        asyncio.ensure_future(
+                            _stream_lesion_report(websocket, det, sess, video_id, _ws_lock)
+                        )
+                        # Resume pipeline immediately — auto mode doesn't wait for user.
+                        ctrl.send_action("ACTION_IGNORE")
+                        # Forward the DETECTION_FOUND to the FE so the overlay renders.
 
             # "Báo sai" overrides "Xác nhận luôn": a confirmed-capture whose region
             # the user has reported as a false-positive must NOT show in the
@@ -1663,7 +1825,22 @@ async def _stream_lesion_report(websocket: WebSocket, detection: dict,
                      "data": {"frame_index": frame_index, "report": mock}})
         return
 
-    user_text = build_lesion_user_message(label, conf, timestamp_ms, frame_index)
+    # Load and format patient context once; "" when not set (backward compat).
+    _ctx_dict = get_patient_context(video_id)
+    _patient_ctx = format_patient_context(
+        PatientContext.from_dict(_ctx_dict) if _ctx_dict else None
+    )
+
+    # Phase 2: retrieve guideline evidence for this lesion label.
+    # Query combines label + Paris classification hint for best recall.
+    _rag_query = label
+    _evidence_chunks = kb_rag.retrieve_evidence(_rag_query, k=3, min_sim=0.3)
+    _evidence_block = kb_rag.format_evidence_block(_evidence_chunks)
+    _valid_labels = kb_rag.valid_citation_labels(_evidence_chunks)
+
+    user_text = build_lesion_user_message(label, conf, timestamp_ms, frame_index,
+                                          patient_ctx=_patient_ctx,
+                                          evidence_block=_evidence_block)
     if frame_b64:
         user_content = [
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{frame_b64}", "detail": "high"}},
@@ -1689,15 +1866,19 @@ async def _stream_lesion_report(websocket: WebSocket, detection: dict,
     try:
         # No streaming for JSON schema — must wait for full response then parse.
         # Hard timeout via asyncio.wait_for so we never hang the UI forever.
-        completion = await asyncio.wait_for(
-            client.chat.completions.create(
-                model=_llm_model_name("vision"),
-                messages=messages,
-                response_format=response_format,
-                max_tokens=1500,
-            ),
-            timeout=LLM_CALL_TIMEOUT_SEC,
-        )
+        # Gate through the shared VLM semaphore (start the 180s clock only after
+        # acquiring it) so a burst of auto key-frame reports queues instead of
+        # piling onto the one local model and timing out at the tail.
+        async with _get_vlm_semaphore():
+            completion = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=_llm_model_name("vision"),
+                    messages=messages,
+                    response_format=response_format,
+                    max_tokens=1500,
+                ),
+                timeout=LLM_CALL_TIMEOUT_SEC,
+            )
         raw_json = completion.choices[0].message.content or "{}"
         try:
             report = _sanitize_llm_output(json.loads(raw_json))
@@ -1736,10 +1917,36 @@ async def _stream_lesion_report(websocket: WebSocket, detection: dict,
         elif "primary_dx" in conclusion:
             conclusion["primary_dx"] = _dedup_bilingual(conclusion["primary_dx"])
 
+        # Phase 2 post-check: validate model-returned citations against retrieved set.
+        # Drop any model-hallucinated [label] not in the injected evidence block.
+        if _valid_labels:
+            model_cits = conclusion.get("citations", [])
+            if isinstance(model_cits, list):
+                conclusion["citations"] = [
+                    c for c in model_cits
+                    if isinstance(c, dict) and c.get("label") in _valid_labels
+                ]
+
+        # Phase 2: attach DETERMINISTIC structured citations from retrieved evidence.
+        # These are always correct (ground truth of what was injected) regardless
+        # of whether the model echoed the tags. Overwrites model field to ensure
+        # no hallucinated labels survive.
+        if _evidence_chunks:
+            report["citations"] = [
+                {
+                    "label": ch["citation_label"],
+                    "source_guideline": ch.get("source_guideline", ""),
+                    "year": ch.get("year"),
+                    "body_region": ch.get("body_region", ""),
+                }
+                for ch in _evidence_chunks
+            ]
+
         latency = time.monotonic() - t0
-        logger.info("Lesion report generated: model={} latency={:.2f}s severity={}",
+        logger.info("Lesion report generated: model={} latency={:.2f}s severity={} citations={}",
                     _llm_model_name("vision"), latency,
-                    report.get("conclusion", {}).get("severity", "?"))
+                    report.get("conclusion", {}).get("severity", "?"),
+                    len(report.get("citations", [])))
 
         sess.setdefault("llm_cache", {})[cache_key] = report
 
@@ -1753,6 +1960,7 @@ async def _stream_lesion_report(websocket: WebSocket, detection: dict,
             report=report,
             model=_llm_model_name("vision"),
             generated_at_ms=int(time.time() * 1000),
+            frame_b64=frame_b64,
         )
 
         # Maintain conv_history for follow-up Q&A on this detection — store the
@@ -1892,31 +2100,21 @@ def _mock_llm_response(label: str, location: str) -> str:
 
 # ── Phase B: Session summary + Q&A chatbot ───────────────────────────────────
 
-async def _stream_session_summary(websocket: WebSocket, sess: dict,
-                                   video_id: str,
-                                   ws_lock: asyncio.Lock | None = None) -> None:
-    """Generate session-level summary at EOS — gộp toàn bộ lesion_reports
-    của session thành 1 structured summary theo SESSION_SUMMARY_SCHEMA.
+async def _generate_session_summary(sess: dict, video_id: str) -> dict | None:
+    """Build + persist the Phase B session summary from a session's lesion_reports.
 
-    Triggered when VIDEO_FINISHED fires. Reads all per-detection reports
-    from SQLite (Phase A persistence), runs them through the summary LLM
-    call (text-only — no images needed since reports already analyzed them),
-    saves the summary, sends SESSION_SUMMARY_DONE event to FE.
+    Single source of truth shared by BOTH report paths so an uploaded-video and a
+    live (Trực tuyến) session produce an identical summary: reads per-detection
+    reports from SQLite, runs them through the summary LLM (with top-5 thumbnails +
+    RAG evidence), applies deterministic counts, saves to DB, and returns the
+    summary dict. Returns None when the session has nothing to summarize. Raises on
+    LLM/parse failure so the caller can surface a friendly error.
     """
-    async def _send(data: dict) -> None:
-        if ws_lock:
-            async with ws_lock:
-                await websocket.send_json(data)
-        else:
-            await websocket.send_json(data)
-
     reports = get_lesion_reports_for_session(video_id)
     quick_confirmed = sess.get("confirmed_captures", [])
     if not reports and not quick_confirmed:
         logger.info("Session summary skipped: no reports for {}", video_id)
-        await _send({"event": "SESSION_SUMMARY_DONE",
-                     "data": {"summary": None, "reason": "no_reports"}})
-        return
+        return None
 
     # Quick-confirmed ("Xác nhận luôn") lesions never create a lesion_report, so
     # fold them into the confirmed count + summary input explicitly.
@@ -1924,14 +2122,28 @@ async def _stream_session_summary(websocket: WebSocket, sess: dict,
     confirmed_count = paused_confirmed + len(quick_confirmed)
     ignored_count = max(0, len(reports) - paused_confirmed)
 
+    # Load patient context (Phase 1). "" when not set — backward compatible.
+    _ctx_dict = get_patient_context(video_id)
+    _patient_ctx = format_patient_context(
+        PatientContext.from_dict(_ctx_dict) if _ctx_dict else None
+    )
+
+    # Phase 2: aggregate primary_dx labels from reports as the RAG query.
+    _dx_list = [
+        r.get("report", {}).get("conclusion", {}).get("primary_dx", "")
+        for r in reports if r.get("report", {}).get("conclusion", {}).get("primary_dx")
+    ]
+    _summary_rag_query = " ".join(_dx_list[:5]) or "endoscopy gastritis lesion"
+    _summary_evidence_chunks = kb_rag.retrieve_evidence(_summary_rag_query, k=3, min_sim=0.3)
+    _summary_evidence_block = kb_rag.format_evidence_block(_summary_evidence_chunks)
+    _summary_valid_labels = kb_rag.valid_citation_labels(_summary_evidence_chunks)
+
     client = _get_llm_client()
     if client is None:
-        logger.warning("Session summary: no LLM client, sending mock")
+        logger.warning("Session summary: no LLM client, saving mock")
         mock = _mock_session_summary(reports, confirmed_count, ignored_count)
         save_session_summary(video_id, mock, "mock", int(time.time() * 1000))
-        await _send({"event": "SESSION_SUMMARY_DONE",
-                     "data": {"summary": mock}})
-        return
+        return mock
 
     user_text = build_session_summary_input(
         reports,
@@ -1939,11 +2151,39 @@ async def _stream_session_summary(websocket: WebSocket, sess: dict,
         ignored_count=ignored_count,
         duration_seconds=0,  # TODO: track session start_ts to compute duration
         quick_confirmed=quick_confirmed,
+        patient_ctx=_patient_ctx,
+        evidence_block=_summary_evidence_block,
     )
+
+    # Phase 1 — multi-image summary: attach top-5 priority finding thumbnails.
+    # Severity rank: cao > trung bình > thấp; tie-break by ai_confidence desc.
+    _SEV_RANK = {"cao": 0, "trung bình": 1, "thấp": 2}
+    _top5 = sorted(
+        reports,
+        key=lambda r: (
+            _SEV_RANK.get(r.get("severity", "thấp"), 3),
+            -r.get("report", {}).get("conclusion", {}).get("ai_confidence", 0),
+        ),
+    )[:5]
+    _thumbnails = [r["frame_b64"] for r in _top5 if r.get("frame_b64")]
+
+    if _thumbnails:
+        # Multi-image content: N image_url blocks followed by the text block.
+        # Same shape as the per-detection lesion call (reuse infra, DRY).
+        user_content: list[dict] | str = [
+            {"type": "image_url",
+             "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "high"}}
+            for b64 in _thumbnails
+        ] + [{"type": "text", "text": user_text}]
+        _num_ctx = 8192
+    else:
+        # Graceful degradation: no stored thumbnails → text-only call.
+        user_content = user_text
+        _num_ctx = 8192  # bump regardless; large context helps text-only too
 
     messages = [
         {"role": "system", "content": SESSION_SUMMARY_PROMPT},
-        {"role": "user",   "content": user_text},
+        {"role": "user",   "content": user_content},
     ]
     response_format = {
         "type": "json_schema",
@@ -1951,44 +2191,100 @@ async def _stream_session_summary(websocket: WebSocket, sess: dict,
     }
 
     t0 = time.monotonic()
+    completion = await asyncio.wait_for(
+        client.chat.completions.create(
+            model=_llm_model_name("vision"),
+            messages=messages,
+            response_format=response_format,
+            max_tokens=2000,
+            extra_body={"options": {"num_ctx": _num_ctx}},
+        ),
+        timeout=LLM_CALL_TIMEOUT_SEC,
+    )
+    raw_json = completion.choices[0].message.content or "{}"
+    summary = _sanitize_llm_output(json.loads(raw_json))  # JSONDecodeError → caller handles
+    latency = time.monotonic() - t0
+
+    # Phase 2 post-check: validate model-returned citations against retrieved set.
+    if _summary_valid_labels:
+        model_cits_sum = summary.get("citations", [])
+        if isinstance(model_cits_sum, list):
+            summary["citations"] = [
+                c for c in model_cits_sum
+                if isinstance(c, dict) and c.get("label") in _summary_valid_labels
+            ]
+
+    # Phase 2: attach deterministic structured citations from retrieved evidence.
+    if _summary_evidence_chunks:
+        summary["citations"] = [
+            {
+                "label": ch["citation_label"],
+                "source_guideline": ch.get("source_guideline", ""),
+                "year": ch.get("year"),
+                "body_region": ch.get("body_region", ""),
+            }
+            for ch in _summary_evidence_chunks
+        ]
+
+    # Deterministic overview counts — the LLM is unreliable at arithmetic
+    # (it produced e.g. total=1 while confirmed=4). We already know the real
+    # numbers from the session, so override whatever the model wrote.
+    _ov = summary.get("overview")
+    if not isinstance(_ov, dict):
+        _ov = {}
+    _ov["total_findings"] = len(reports) + len(quick_confirmed)
+    _ov["confirmed_count"] = confirmed_count
+    _ov["ignored_count"] = ignored_count
+    _ov.setdefault("duration_seconds", 0)
+    summary["overview"] = _ov
+
+    logger.info("Session summary generated: latency={:.2f}s findings={} risk={} citations={}",
+                latency, len(reports),
+                summary.get("overall_risk", "?"),
+                len(summary.get("citations", [])))
+
+    save_session_summary(video_id, summary, _llm_model_name("vision"),
+                         int(time.time() * 1000))
+    return summary
+
+
+async def _stream_session_summary(websocket: WebSocket, sess: dict,
+                                   video_id: str,
+                                   ws_lock: asyncio.Lock | None = None) -> None:
+    """WS wrapper around _generate_session_summary: pushes SESSION_SUMMARY_DONE (or
+    ERROR) to the FE. Triggered when VIDEO_FINISHED fires (uploaded-video path)."""
+    async def _send(data: dict) -> None:
+        if ws_lock:
+            async with ws_lock:
+                await websocket.send_json(data)
+        else:
+            await websocket.send_json(data)
+
     try:
-        completion = await asyncio.wait_for(
-            client.chat.completions.create(
-                model=_llm_model_name("vision"),  # same model, text-only call
-                messages=messages,
-                response_format=response_format,
-                max_tokens=2000,
-                extra_body={"options": {"num_ctx": 6144}},
-            ),
-            timeout=LLM_CALL_TIMEOUT_SEC,
-        )
-        raw_json = completion.choices[0].message.content or "{}"
-        try:
-            summary = _sanitize_llm_output(json.loads(raw_json))
-        except json.JSONDecodeError as je:
-            code, friendly = _classify_llm_error(je)
-            logger.error("Session summary JSON parse failed: {}", je)
-            await _send({"event": "ERROR",
-                         "data": {"code": code, "message": friendly,
-                                  "context": "session_summary"}})
-            return
-
-        latency = time.monotonic() - t0
-        logger.info("Session summary generated: latency={:.2f}s findings={} risk={}",
-                    latency, len(reports),
-                    summary.get("overall_risk", "?"))
-
-        save_session_summary(video_id, summary, _llm_model_name("vision"),
-                             int(time.time() * 1000))
-        await _send({"event": "SESSION_SUMMARY_DONE",
-                     "data": {"summary": summary}})
-
+        summary = await _generate_session_summary(sess, video_id)
     except Exception as exc:
         code, friendly = _classify_llm_error(exc)
         logger.error("Session summary stream error [{}]: {}", code, exc)
         await _send({"event": "ERROR",
                      "data": {"code": code, "message": friendly,
                               "context": "session_summary"}})
+        return
+
+    if summary is None:
+        await _send({"event": "SESSION_SUMMARY_DONE",
+                     "data": {"summary": None, "reason": "no_reports"}})
+        return
+    await _send({"event": "SESSION_SUMMARY_DONE", "data": {"summary": summary}})
+
+
+async def _finalize_live_summary(session_id: str, sess: dict) -> None:
+    """Background summary for a live (Trực tuyến) session. No WS to push to — the
+    Report page polls GET /session/{id}/summary for the result; errors are logged
+    and the poll simply keeps showing the loading state until it times out."""
+    try:
+        await _generate_session_summary(sess, session_id)
+    except Exception as exc:
+        logger.error("Live session summary failed for {}: {}", session_id, exc)
 
 
 async def _stream_session_qa(websocket: WebSocket, user_text: str,
@@ -2029,7 +2325,29 @@ async def _stream_session_qa(websocket: WebSocket, user_text: str,
     # as the current turn inside build_session_qa_messages).
     history = history[:-1] if history else []
 
-    messages = build_session_qa_messages(summary, reports, history, user_text)
+    # Load patient context (Phase 1). "" when not set — backward compatible.
+    _ctx_dict_qa = get_patient_context(video_id)
+    _patient_ctx_qa = format_patient_context(
+        PatientContext.from_dict(_ctx_dict_qa) if _ctx_dict_qa else None
+    )
+
+    # Phase 3 — inject guideline evidence into Q&A (best-effort; never crashes chat).
+    _evidence_block_qa = ""
+    try:
+        # Build a query from the user question + primary diagnoses for better retrieval.
+        _dx_hints = " ".join(
+            r.get("report", {}).get("conclusion", {}).get("primary_dx", "")
+            for r in reports if r.get("report")
+        )[:200]
+        _qa_query = f"{user_text} {_dx_hints}".strip()
+        _qa_chunks = kb_rag.retrieve_evidence(_qa_query, k=3, min_sim=0.3)
+        _evidence_block_qa = kb_rag.format_evidence_block(_qa_chunks)
+    except Exception as _rag_exc:
+        logger.warning("Q&A RAG evidence retrieval skipped: {}", _rag_exc)
+
+    messages = build_session_qa_messages(summary, reports, history, user_text,
+                                         patient_ctx=_patient_ctx_qa,
+                                         evidence_block=_evidence_block_qa)
 
     full_response = ""
     t0 = time.monotonic()
@@ -2040,7 +2358,7 @@ async def _stream_session_qa(websocket: WebSocket, user_text: str,
         # keep KV-cache footprint comfortably within the 16GB GPU after
         # loading the ~5GB medgemma-4b (Q8) vision model.
         stream = await client.chat.completions.create(
-            model=_llm_model_name("vision"),
+            model=_qa_model_name(),
             messages=messages,
             stream=True,
             max_tokens=1000,
@@ -2049,6 +2367,11 @@ async def _stream_session_qa(websocket: WebSocket, user_text: str,
         async for ev in stream:
             delta = ev.choices[0].delta.content if ev.choices else None
             if delta:
+                # Strip any stray CJK glyphs per chunk — the Q&A model (Qwen) can
+                # occasionally leak Chinese characters into Vietnamese output.
+                delta = _strip_cjk(delta)
+                if not delta:
+                    continue
                 full_response += delta
                 await _send({"event": "SESSION_QA_CHUNK", "data": {"chunk": delta}})
 
