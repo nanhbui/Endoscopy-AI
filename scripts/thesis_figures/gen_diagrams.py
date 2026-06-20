@@ -301,6 +301,61 @@ def fig_vlm():
     render_dot("fig_4_8_vlm_factory", body)
 
 
+# ── 4.9 RAG-grounded AI synthesis pipeline ──────────────────────────────────────
+def fig_rag_pipeline():
+    body = (
+        'rankdir=LR;\n'
+        'node [shape=box, style="rounded,filled", fillcolor="#eef3fb", color="#2c5fa8", fontsize=11];\n'
+        'pc [label="Patient context\\n(age, sex, indication,\\nhistory, meds)", fillcolor="#fff3e0", color="#e08a2c"];\n'
+        'frame [label="Lesion key-frame\\n+ YOLO label"];\n'
+        'kb [label="Guideline KB\\nParis / Sydney / Kyoto /\\nESGE / biopsy", shape=cylinder, fillcolor="#ede7f6", color="#5e35b1"];\n'
+        'emb [label="BGE-M3 embed\\n+ cosine top-k", fillcolor="#e8f5e9", color="#2e7d32"];\n'
+        'ev [label="cited evidence\\nblock", shape=note, fillcolor="#f5f5f5", color="#888888"];\n'
+        'vlm [label="MedGemma-4B\\n(local, schema JSON)", fillcolor="#e8f5e9", color="#2e7d32"];\n'
+        'rep [label="lesion report\\n+ attached citations", shape=note, fillcolor="#f5f5f5", color="#888888"];\n'
+        'sum [label="multi-frame\\nsession summary\\n(re-attaches thumbnails)"];\n'
+        'pdf [label="MST report / PDF\\nindication...recommendations", shape=note, fillcolor="#e3f2fd", color="#1565c0"];\n'
+        'kb -> emb [label="embed once"];\n'
+        'frame -> emb [label="query"];\n'
+        'emb -> ev;\n'
+        'pc -> vlm; frame -> vlm; ev -> vlm;\n'
+        'vlm -> rep;\n'
+        'rep -> sum [label="all findings"];\n'
+        'pc -> sum; rep -> pdf; sum -> pdf;\n'
+    )
+    render_dot("fig_4_9_rag_pipeline", body)
+
+
+# ── 2.5 RAG retrieval model (two-phase: offline index + online retrieval) ────────
+def fig_rag_model():
+    body = (
+        'rankdir=LR; fontsize=11;\n'
+        'node [shape=box, style="rounded,filled", fillcolor="#eef3fb", color="#2c5fa8", fontsize=11];\n'
+        'subgraph cluster_idx {\n'
+        '  label="Offline indexing (once)"; style="rounded,filled"; fillcolor="#f3eafc"; color="#5e35b1";\n'
+        '  kb [label="Guideline passages\\nParis / Sydney / Kyoto /\\nESGE / biopsy (bilingual)", fillcolor="white"];\n'
+        '  enc1 [label="BGE-M3 encoder\\n(Ollama)", fillcolor="#e8f5e9", color="#2e7d32"];\n'
+        '  store [label="kb_chunks\\n1024-d vectors\\n(SQLite)", shape=cylinder, fillcolor="white"];\n'
+        '  kb -> enc1 -> store;\n'
+        '}\n'
+        'subgraph cluster_q {\n'
+        '  label="Online retrieval (per report)"; style="rounded,filled"; fillcolor="#fff8e1"; color="#e08a2c";\n'
+        '  q [label="lesion description /\\naggregated diagnoses", fillcolor="white"];\n'
+        '  enc2 [label="BGE-M3 encoder", fillcolor="#e8f5e9", color="#2e7d32"];\n'
+        '  sim [label="cosine top-k\\n(threshold)", shape=diamond, fillcolor="white", color="#e08a2c"];\n'
+        '  q -> enc2 -> sim;\n'
+        '}\n'
+        'store -> sim [label="compare", style=dashed];\n'
+        'ev [label="cited evidence block\\n[Paris] ... [Kyoto]", shape=note, fillcolor="#f5f5f5", color="#888888"];\n'
+        'llm [label="MedGemma-4B\\n(prompt + evidence)", fillcolor="#e8f5e9", color="#2e7d32"];\n'
+        'out [label="report + attached\\ncitations (deterministic)", shape=note, fillcolor="#e3f2fd", color="#1565c0"];\n'
+        'sim -> ev [label="top-k passages"];\n'
+        'ev -> llm [label="inject"];\n'
+        'llm -> out [label="cited report"];\n'
+    )
+    render_dot("fig_2_5_rag", body)
+
+
 # ── 4.17 Deployment topology ────────────────────────────────────────────────────
 def fig_deploy():
     body = (
@@ -783,9 +838,9 @@ def fig_viewport():
 def main():
     print(f"Output dir: {OUT.resolve()}")
     print("Graphviz diagrams:")
-    fig_yolo(); fig_strongsort(); fig_gstreamer(); fig_usecase()
+    fig_yolo(); fig_strongsort(); fig_gstreamer(); fig_rag_model(); fig_usecase()
     fig_architecture(); fig_subprocess_ipc(); fig_fsm(); fig_er()
-    fig_detection_flow(); fig_voice(); fig_vlm(); fig_deploy(); fig_lora()
+    fig_detection_flow(); fig_voice(); fig_vlm(); fig_rag_pipeline(); fig_deploy(); fig_lora()
     fig_bench_method(); fig_capture(); fig_browser_live(); fig_dedup(); fig_modules(); fig_userflow(); fig_sitemap()
     fig_dual_modality(); fig_hardware()
     print("Matplotlib figures:")
