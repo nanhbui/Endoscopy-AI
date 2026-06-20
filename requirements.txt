@@ -16,6 +16,9 @@ faster-whisper>=1.0.0
 # LLM & Embeddings
 openai>=1.0.0
 tiktoken>=0.5.0
+# KB RAG (Phase 2) embeddings are served by Ollama (/api/embeddings, bge-m3) via
+# httpx — see embeddings.py. sentence-transformers was dropped: its transformers
+# dep pins regex>=2025 which conflicts with boxmot's regex<2025 in one process.
 
 # LangChain / LangGraph — RAG workflow
 langchain>=0.1.0

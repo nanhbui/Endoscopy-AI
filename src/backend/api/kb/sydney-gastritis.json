@@ -1,0 +1,9 @@
+{
+  "_note": "Hand-authored summary for RAG grounding. Requires expert clinical review before clinical deployment.",
+  "citation_label": "[Sydney 1994]",
+  "source_guideline": "Updated Sydney System for Classification of Gastritis, 1994",
+  "year": 1994,
+  "body_region": "stomach",
+  "text_vi": "Hệ thống Sydney phân loại viêm dạ dày dựa trên nội soi và mô học. Vị trí: antrum, corpus, fundus, incisura angularis. Phân loại nội soi: viêm đỏ lan tỏa, nốt lymphoid (nodular), trợt (erosive), xuất huyết (hemorrhagic). Viêm nốt lymphoid (dạng nodular) ở antrum mạnh gợi ý nhiễm H. pylori đặc biệt ở bệnh nhân trẻ. Sinh thiết chuẩn: 2 mảnh antrum + 2 mảnh corpus + 1 mảnh incisura angularis để đánh giá toàn diện (OLGA/OLGIM staging). Tổn thương trợt (erosions) và xuất huyết cần loại trừ NSAIDs và ức chế COX.",
+  "text_en": "Sydney system classifies gastritis by endoscopic and histological criteria. Sites: antrum, corpus, fundus, incisura angularis. Endoscopic types: diffuse erythema, nodular (lymphoid follicles), erosive, hemorrhagic. Nodular antrum pattern strongly suggests H. pylori especially in young patients. Standard biopsy protocol: 2 antrum + 2 corpus + 1 incisura angularis for comprehensive OLGA/OLGIM staging. Erosive and hemorrhagic patterns require exclusion of NSAIDs and COX-inhibitor use."
+}

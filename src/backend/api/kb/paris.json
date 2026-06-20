@@ -1,0 +1,9 @@
+{
+  "_note": "Hand-authored summary for RAG grounding. Requires expert clinical review before clinical deployment.",
+  "citation_label": "[Paris 2002]",
+  "source_guideline": "Paris Workshop on Superficial Neoplastic Lesions, 2002",
+  "year": 2002,
+  "body_region": "upper_gi",
+  "text_vi": "Phân loại Paris cho tổn thương tân sinh bề mặt đường tiêu hóa: Dạng nhô (0-I): 0-Ip (cuống), 0-Is (không cuống). Dạng phẳng (0-II): 0-IIa (nhô thấp <2.5mm), 0-IIb (phẳng hoàn toàn), 0-IIc (lõm nông). Dạng lõm sâu (0-III): loét sâu >1.2mm. Tổn thương 0-IIc và 0-III có nguy cơ xâm lấn submucosa cao nhất, cần sinh thiết bắt buộc. Tổn thương kết hợp 0-IIa+IIc hoặc 0-Is+IIc gợi ý xâm lấn sớm — ưu tiên hội chẩn cắt nội soi (ESD/EMR). Kích thước >20mm dạng phẳng cần đánh giá EUS trước quyết định cắt.",
+  "text_en": "Paris classification for superficial neoplastic GI lesions: Protruded (0-I): pedunculated 0-Ip, sessile 0-Is. Flat (0-II): slightly elevated 0-IIa (<2.5mm), flat 0-IIb, slightly depressed 0-IIc. Excavated (0-III): deep ulcer >1.2mm. Type 0-IIc and 0-III carry highest submucosal invasion risk, mandatory biopsy indicated. Combined 0-IIa+IIc or 0-Is+IIc suggests early invasion — prioritise endoscopic resection (ESD/EMR) consultation. Flat lesions >20mm require EUS before resection decision."
+}

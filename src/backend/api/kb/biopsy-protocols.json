@@ -1,0 +1,9 @@
+{
+  "_note": "Hand-authored summary for RAG grounding. Requires expert clinical review before clinical deployment.",
+  "citation_label": "[Biopsy 2017]",
+  "source_guideline": "ASGE/ACG Guideline on Role of Endoscopy in the Surveillance of Premalignant Conditions, 2017",
+  "year": 2017,
+  "body_region": "upper_gi",
+  "text_vi": "Giao thức sinh thiết nội soi đường tiêu hóa trên theo khuyến cáo ASGE/ACG: Đối với tổn thương nghi ngờ ác tính Paris 0-IIc/0-III: sinh thiết bờ và đáy tổn thương để đánh giá xâm lấn — số mảnh cụ thể do bác sĩ nội soi quyết định tùy hình thái. Đối với viêm dạ dày (Sydney protocol): lấy mẫu có hệ thống tại antrum, corpus và incisura. CLO-test (rapid urease test) nên được thực hiện tại thời điểm nội soi trước khi dùng kháng sinh hoặc PPI. Khi dùng kẹp sinh thiết chuẩn (2.4mm), mỗi lần cắt lấy được 1-3 mg mô — độ sâu đạt submucosa khi kỹ thuật đúng. Không dùng formalin 10% lạnh — bảo quản mô ngay sau lấy để tránh giả tạo hoại tử.",
+  "text_en": "Upper GI endoscopic biopsy protocols per ASGE/ACG recommendations: For suspected malignant lesions Paris 0-IIc/0-III: biopsy margin and base to assess invasion — exact number of samples at endoscopist discretion based on morphology. For gastritis (Sydney protocol): systematic sampling at antrum, corpus, and incisura angularis. CLO-test (rapid urease test) should be performed at endoscopy before antibiotic or PPI use. Standard biopsy forceps (2.4mm) yield 1-3 mg tissue per bite — submucosal depth achieved with correct technique. Do not use cold 10% formalin — fix tissue immediately after collection to avoid necrotic artefact."
+}

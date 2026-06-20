@@ -1,0 +1,9 @@
+{
+  "_note": "Hand-authored summary for RAG grounding. Requires expert clinical review before clinical deployment.",
+  "citation_label": "[Kyoto 2015]",
+  "source_guideline": "Kyoto Global Consensus on Helicobacter pylori Gastritis, 2015",
+  "year": 2015,
+  "body_region": "stomach",
+  "text_vi": "Đồng thuận Kyoto: viêm dạ dày H. pylori là bệnh truyền nhiễm cần điều trị triệt căn ở mọi ca nhiễm có thể phát hiện. Dấu hiệu nội soi gợi ý HP: viêm xung huyết (diffuse redness), nốt lymphoid (fundic gland atrophy), vết trợt nông (erosions), màu sắc nhạt (atrophic mucosa). Sau điều trị triệt căn thành công: viêm xung huyết giảm trong 1-2 năm, nguy cơ ung thư dạ dày giảm nhưng không về 0 nếu đã teo niêm mạc. Phân tầng nguy cơ ung thư: OLGA/OLGIM stage III-IV = nguy cơ cao, theo dõi nội soi 1-3 năm. CLO-test dương tính tại chỗ + mô học là tiêu chuẩn vàng chẩn đoán.",
+  "text_en": "Kyoto consensus: H. pylori gastritis is an infectious disease requiring eradication therapy in all detectable cases. Endoscopic features suggesting HP: diffuse redness, nodular antrum (lymphoid follicles), shallow erosions, atrophic/pale mucosa. Post-successful eradication: diffuse redness resolves in 1-2 years; gastric cancer risk reduces but not to zero if atrophy established. Cancer risk stratification: OLGA/OLGIM stage III-IV = high risk, endoscopic surveillance every 1-3 years. CLO-test on-site plus histology is the gold standard for diagnosis."
+}

@@ -1,0 +1,9 @@
+{
+  "_note": "Hand-authored summary for RAG grounding. Requires expert clinical review before clinical deployment.",
+  "citation_label": "[ESGE 2019]",
+  "source_guideline": "ESGE/EHMSG Guideline on Management of Precancerous Conditions and Lesions, 2019",
+  "year": 2019,
+  "body_region": "stomach",
+  "text_vi": "Hướng dẫn ESGE về theo dõi tổn thương tiền ung thư dạ dày. Teo niêm mạc (atrophy) và dị sản ruột (intestinal metaplasia) là tổn thương tiền ung thư chính. Theo dõi nội soi: OLGA/OLGIM stage I-II → theo dõi 3 năm/lần; stage III-IV → theo dõi 1 năm/lần với NBI hoặc CE-EGD. Loạn sản (dysplasia) mức độ thấp (LGD) xác nhận qua 2 bác sĩ giải phẫu bệnh: tái nội soi 6 tháng hoặc cắt nội soi (EMR/ESD). Loạn sản mức độ cao (HGD): cắt nội soi bắt buộc, không trì hoãn. Phân loại Kimura-Takemoto cho teo tuyến nền là công cụ phân tầng nguy cơ quan trọng cần ghi nhận.",
+  "text_en": "ESGE guideline for surveillance of gastric precancerous conditions. Atrophy and intestinal metaplasia are the main precancerous lesions. Surveillance schedule: OLGA/OLGIM stage I-II → 3-yearly endoscopy; stage III-IV → 1-yearly with NBI or CE-EGD. Low-grade dysplasia (LGD) confirmed by two pathologists: repeat endoscopy at 6 months or endoscopic resection (EMR/ESD). High-grade dysplasia (HGD): mandatory endoscopic resection without delay. Kimura-Takemoto classification for fundic gland atrophy extent is an important risk stratification tool to record."
+}
