@@ -6,13 +6,18 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   AlertTriangle, CheckCircle2, CircleX, Clock, Download, FileText,
-  ScanSearch, Sparkles, Trash2, Video, X, Zap, Radio, FolderOpen, Upload, ChevronLeft, Flag,
+  ScanSearch, Sparkles, Trash2, Video, X, Zap, Radio, FolderOpen, Upload, ChevronLeft, ChevronRight, Flag,
 } from 'lucide-react';
 import { useAnalysis, sessionFindings, type Detection, type DetectionStatus, type Session } from '@/context/AnalysisContext';
-import { listDbSessions, deleteDbSession, type DbSessionRow } from '@/lib/ws-client';
+import { listDbSessions, deleteDbSession, fetchSessionSummary, type DbSessionRow, type SessionSummary } from '@/lib/ws-client';
 import { labelToColor } from '@/lib/lesion-colors';
 import { fmtDateTime as fmtDate, fmtClock as fmtTs } from '@/lib/format';
 import { SessionSummaryPanel } from '@/components/session-summary-panel';
+
+// AI summary recovery poll: a summary generates in ~10-15s, so poll every 3s up
+// to 10 times (~30s) before giving up — covers the worst case with headroom.
+const SUMMARY_POLL_INTERVAL_MS = 3000;
+const SUMMARY_POLL_MAX_TRIES = 10;
 
 /** Map a DB-backed session row to the UI Session shape. DB rows have no frame
  *  thumbnails (not stored server-side) — the card falls back to a placeholder.
@@ -121,10 +126,20 @@ function DetectionModal({
   det,
   onClose,
   onBack,
+  index,
+  total,
+  onPrev,
+  onNext,
 }: {
   det: Detection;
   onClose: () => void;
   onBack: () => void;
+  // 0-based position of this lesion within the session + total count, plus
+  // prev/next handlers. Handlers are undefined at the list ends (disabled).
+  index: number;
+  total: number;
+  onPrev?: () => void;
+  onNext?: () => void;
 }) {
   const sev = getSeverity(det.confidence);
   const pct = det.confidence * 100;
@@ -199,6 +214,24 @@ function DetectionModal({
           <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', backgroundColor: 'background.paper' }}>
             <Box sx={{ px: 3, pt: 2.5, pb: 2, borderBottom: '1px solid #EEF2F0', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 1 }}>
               <Box sx={{ flex: 1, minWidth: 0 }}>
+                {/* Back-to-session sits top-left of the header (the conventional
+                    spot the eye lands on) instead of being buried in the footer
+                    below a long scroll of LLM text. */}
+                <Box
+                  component="button"
+                  onClick={onBack}
+                  sx={{
+                    display: 'inline-flex', alignItems: 'center', gap: 0.4,
+                    mb: 1, ml: -0.75, px: 1, py: 0.4, borderRadius: '7px',
+                    border: 'none', background: 'none', cursor: 'pointer',
+                    color: 'text.secondary', fontWeight: 600, fontSize: '0.78rem',
+                    transition: 'background 0.15s, color 0.15s',
+                    '&:hover': { backgroundColor: '#F0F4F3', color: '#006064' },
+                  }}
+                >
+                  <ChevronLeft size={15} />
+                  Quay lại phiên
+                </Box>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
                   <Typography sx={{ fontSize: '0.7rem', fontWeight: 700, color: '#006064', textTransform: 'uppercase', letterSpacing: '0.07em' }}>
                     Kết quả phát hiện
@@ -276,20 +309,37 @@ function DetectionModal({
               )}
             </Box>
 
-            <Box sx={{ px: 3, py: 2, borderTop: '1px solid #EEF2F0', display: 'flex', gap: 1.5 }}>
+            {/* Back lives in the header now (top-left). Footer carries the
+                prev/next pager (so you can flip through every lesion in the
+                session without bouncing back to the grid) + the close action. */}
+            <Box sx={{ px: 3, py: 2, borderTop: '1px solid #EEF2F0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1.5 }}>
+              {total > 1 ? (
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                  <IconButton
+                    onClick={onPrev}
+                    disabled={!onPrev}
+                    aria-label="Tổn thương trước"
+                    sx={{ border: '1px solid #E2EAE8', borderRadius: '10px', color: '#006064', '&:hover': { backgroundColor: 'rgba(0,96,100,0.06)' }, '&.Mui-disabled': { color: '#CBD5D3' } }}
+                  >
+                    <ChevronLeft size={18} />
+                  </IconButton>
+                  <Typography sx={{ minWidth: 56, textAlign: 'center', fontSize: '0.8rem', fontWeight: 700, color: 'text.secondary', fontFamily: 'monospace' }}>
+                    {index + 1} / {total}
+                  </Typography>
+                  <IconButton
+                    onClick={onNext}
+                    disabled={!onNext}
+                    aria-label="Tổn thương kế tiếp"
+                    sx={{ border: '1px solid #E2EAE8', borderRadius: '10px', color: '#006064', '&:hover': { backgroundColor: 'rgba(0,96,100,0.06)' }, '&.Mui-disabled': { color: '#CBD5D3' } }}
+                  >
+                    <ChevronRight size={18} />
+                  </IconButton>
+                </Box>
+              ) : <Box />}
               <MuiButton
-                variant="outlined"
-                startIcon={<ChevronLeft size={14} />}
-                onClick={onBack}
-                sx={{ borderRadius: '10px', fontWeight: 700, px: 2.5 }}
-              >
-                Quay lại
-              </MuiButton>
-              <MuiButton
-                fullWidth
                 variant="contained"
                 onClick={onClose}
-                sx={{ borderRadius: '10px', fontWeight: 700, backgroundColor: '#006064', '&:hover': { backgroundColor: '#004D51' } }}
+                sx={{ borderRadius: '10px', fontWeight: 700, px: 4, backgroundColor: '#006064', '&:hover': { backgroundColor: '#004D51' } }}
               >
                 Đóng
               </MuiButton>
@@ -308,12 +358,14 @@ function SessionDetailModal({
   onClose,
   onSelectDetection,
   onSendSessionQA,
+  onStopSessionQA,
   onDeleteSession,
 }: {
   session: Session;
   onClose: () => void;
   onSelectDetection: (d: Detection) => void;
   onSendSessionQA: (text: string, sessionId?: string) => void;
+  onStopSessionQA: (sessionId?: string) => void;
   onDeleteSession: () => void;
 }) {
   const sourceCfg = SOURCE_CFG[session.source];
@@ -424,7 +476,9 @@ function SessionDetailModal({
                 qaMessages={session.qaMessages ?? []}
                 qaStreaming={session.qaStreaming ?? false}
                 onSendQA={(text) => onSendSessionQA(text, session.id)}
+                onStopQA={() => onStopSessionQA(session.id)}
                 onClose={onClose}
+                sessionId={session.id}
               />
             </Box>
           ) : total === 0 ? (
@@ -677,10 +731,13 @@ function SessionCard({ session, idx, onClick, selected, onToggleSelect, onDelete
 // ── Page ──
 
 export default function ReportPage() {
-  const { sessions, removeSession, clearSessions, sendSessionQA } = useAnalysis();
+  const { sessions, removeSession, clearSessions, sendSessionQA, stopSessionQA } = useAnalysis();
   const [openSessionId, setOpenSessionId] = useState<string | null>(null);
   const [openDetection, setOpenDetection] = useState<Detection | null>(null);
   const [dbSessions, setDbSessions] = useState<Session[]>([]);
+  // Summaries recovered by polling the DB for a session whose WS push was lost
+  // (workspace closed mid-generation). Applied as an override in allSessions.
+  const [polledSummaries, setPolledSummaries] = useState<Record<string, SessionSummary>>({});
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
   const toggleSelect = (id: string) => setSelectedIds((prev) => {
@@ -732,14 +789,38 @@ export default function ReportPage() {
     // Fold quick-confirmed ("Xác nhận luôn") captures into detections so cards,
     // stats, the detail modal and PDF all include them.
     return [...byId.values()]
-      .map((s) => ({ ...s, detections: sessionFindings(s) }))
+      .map((s) => ({ ...s, detections: sessionFindings(s), summary: s.summary ?? polledSummaries[s.id] }))
       .sort((a, b) => b.startedAt - a.startedAt);
-  }, [dbSessions, sessions]);
+  }, [dbSessions, sessions, polledSummaries]);
 
   const openSession = useMemo(
     () => allSessions.find((s) => s.id === openSessionId) ?? null,
     [allSessions, openSessionId],
   );
+
+  // Recover a still-loading summary: if the opened session has no summary yet,
+  // poll the DB (the backend persists it before the WS push that may have been
+  // lost when the workspace closed mid-generation — and the live path generates
+  // it server-side with no WS at all). Stops on success or after MAX tries.
+  useEffect(() => {
+    if (!openSessionId || openSession?.summary) return;
+    let alive = true;
+    let tries = 0;
+    let timer: ReturnType<typeof setTimeout>;
+    const tick = async () => {
+      if (!alive || tries >= SUMMARY_POLL_MAX_TRIES) return;
+      tries += 1;
+      const summary = await fetchSessionSummary(openSessionId);
+      if (!alive) return;
+      if (summary) {
+        setPolledSummaries((prev) => ({ ...prev, [openSessionId]: summary }));
+        return;
+      }
+      timer = setTimeout(tick, SUMMARY_POLL_INTERVAL_MS);
+    };
+    timer = setTimeout(tick, SUMMARY_POLL_INTERVAL_MS);
+    return () => { alive = false; clearTimeout(timer); };
+  }, [openSessionId, openSession?.summary]);
 
   if (allSessions.length === 0) {
     return (
@@ -902,6 +983,7 @@ export default function ReportPage() {
           onClose={() => setOpenSessionId(null)}
           onSelectDetection={(d) => setOpenDetection(d)}
           onSendSessionQA={sendSessionQA}
+          onStopSessionQA={stopSessionQA}
           onDeleteSession={() => {
             if (window.confirm(`Xoá phiên "${openSession.name}"?`)) {
               deleteSessions([openSession.id]);
@@ -911,13 +993,24 @@ export default function ReportPage() {
         />
       )}
 
-      {openSession && openDetection && (
-        <DetectionModal
-          det={openDetection}
-          onClose={() => { setOpenDetection(null); setOpenSessionId(null); }}
-          onBack={() => setOpenDetection(null)}
-        />
-      )}
+      {openSession && openDetection && (() => {
+        // Position of the open lesion within its session drives the footer
+        // pager. indexOf works because openDetection is the same object ref
+        // stored in the session's detections array.
+        const dets = openSession.detections;
+        const curIdx = dets.indexOf(openDetection);
+        return (
+          <DetectionModal
+            det={openDetection}
+            index={curIdx}
+            total={dets.length}
+            onPrev={curIdx > 0 ? () => setOpenDetection(dets[curIdx - 1]) : undefined}
+            onNext={curIdx < dets.length - 1 ? () => setOpenDetection(dets[curIdx + 1]) : undefined}
+            onClose={() => { setOpenDetection(null); setOpenSessionId(null); }}
+            onBack={() => setOpenDetection(null)}
+          />
+        );
+      })()}
     </Box>
   );
 }

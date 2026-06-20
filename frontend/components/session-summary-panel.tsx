@@ -3,408 +3,42 @@
 /**
  * session-summary-panel.tsx — Phase B end-of-session UI.
  *
- * Renders the structured SessionSummary (from SESSION_SUMMARY_DONE event)
- * plus an embedded Q&A chat (SESSION_QA_* event flow). Shown when pipeline
- * state is EOS_SUMMARY.
+ * Tab components split into session-summary/ sub-directory (Phase 3) to keep
+ * each file under 200 lines.
  *
- * Layout: tabs Overview / Detail / Chat — Overview is the headline at-a-glance
- * (overall risk + counts + top 3 priorities), Detail is the full priority
- * list + patterns + checklist, Chat is the streaming Q&A.
+ * Layout: tabs Overview / Detail / Chat
+ * Props: {summary, qaMessages, qaStreaming, onSendQA, onClose, sessionId?}
  */
 
-import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
-import { ChevronRight, MessageSquare, Send, Sparkles, X } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import { useState } from 'react';
+import { Sparkles, X } from 'lucide-react';
 import Box from '@mui/material/Box';
-import Chip from '@mui/material/Chip';
 import CircularProgress from '@mui/material/CircularProgress';
 import IconButton from '@mui/material/IconButton';
 import Tab from '@mui/material/Tab';
 import Tabs from '@mui/material/Tabs';
-import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import MuiButton from '@mui/material/Button';
 import type { QaMessage } from '@/context/AnalysisContext';
 import type { SessionSummary } from '@/lib/ws-client';
-
-// ── Severity / risk visual mapping (kept consistent with LesionReportCard) ──
-
-const RISK_STYLE = {
-  'thấp':       { color: '#2E7D32', bg: 'rgba(46,125,50,0.10)',  emoji: '🟢' },
-  'trung bình': { color: '#ED6C02', bg: 'rgba(237,108,2,0.10)',  emoji: '🟡' },
-  'cao':        { color: '#D32F2F', bg: 'rgba(211,47,47,0.10)',  emoji: '🔴' },
-} as const;
-
-const CATEGORY_LABEL = {
-  sinh_thiet: 'Sinh thiết',
-  test:       'Xét nghiệm',
-  dieu_tri:   'Điều trị',
-  tai_kham:   'Tái khám',
-} as const;
-
-// ── Overview tab ─────────────────────────────────────────────────────────────
-
-function OverviewTab({ summary }: { summary: SessionSummary }) {
-  const risk = RISK_STYLE[summary.overall_risk];
-  const top3 = summary.priority_findings.slice(0, 3);
-
-  return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-      {/* Hero — overall risk badge + counts grid */}
-      <Box sx={{
-        px: 2, py: 1.75, borderRadius: '12px',
-        backgroundColor: risk.bg,
-        border: `1px solid ${risk.color}33`,
-        borderLeft: `4px solid ${risk.color}`,
-      }}>
-        <Typography sx={{
-          fontSize: '0.7rem', fontWeight: 700, color: risk.color,
-          textTransform: 'uppercase', letterSpacing: '0.08em', mb: 0.5,
-        }}>
-          {risk.emoji} Nguy cơ tổng thể: {summary.overall_risk}
-        </Typography>
-        <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 1.25, mt: 1.25 }}>
-          {[
-            ['Tổn thương', summary.overview.total_findings],
-            ['Xác nhận', summary.overview.confirmed_count],
-            ['Bỏ qua', summary.overview.ignored_count],
-            ['Thời lượng', `${summary.overview.duration_seconds}s`],
-          ].map(([k, v]) => (
-            <Box key={String(k)}>
-              <Typography sx={{ fontSize: '0.66rem', color: 'text.secondary', fontWeight: 600 }}>
-                {k}
-              </Typography>
-              <Typography sx={{ fontSize: '1.1rem', fontWeight: 700, color: 'text.primary', lineHeight: 1.2 }}>
-                {v}
-              </Typography>
-            </Box>
-          ))}
-        </Box>
-      </Box>
-
-      {/* Top 3 priority findings */}
-      {top3.length > 0 && (
-        <Box>
-          <Typography sx={{
-            fontSize: '0.7rem', fontWeight: 700, color: 'text.secondary',
-            textTransform: 'uppercase', letterSpacing: '0.08em', mb: 1,
-          }}>
-            Top {top3.length} phát hiện ưu tiên
-          </Typography>
-          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.75 }}>
-            {top3.map((f, i) => {
-              const s = RISK_STYLE[f.severity];
-              return (
-                <Box key={i} sx={{
-                  display: 'flex', alignItems: 'flex-start', gap: 1, px: 1.25, py: 1,
-                  borderRadius: '8px', backgroundColor: '#F8FAFB',
-                  border: '1px solid #E2EAE8',
-                }}>
-                  <Chip
-                    label={`${s.emoji} ${f.severity}`}
-                    size="small"
-                    sx={{ fontSize: '0.66rem', height: 20, fontWeight: 700, color: s.color, backgroundColor: s.bg, flexShrink: 0 }}
-                  />
-                  <Box sx={{ flex: 1, minWidth: 0 }}>
-                    <Typography sx={{ fontSize: '0.82rem', fontWeight: 700, color: 'text.primary', lineHeight: 1.35 }}>
-                      {f.primary_dx}
-                    </Typography>
-                    <Typography sx={{ fontSize: '0.72rem', color: 'text.secondary', mt: 0.25 }}>
-                      Frame {f.frame_index} · {f.rationale}
-                    </Typography>
-                  </Box>
-                </Box>
-              );
-            })}
-          </Box>
-        </Box>
-      )}
-    </Box>
-  );
-}
-
-// ── Detail tab — full priority list + patterns + checklist ──────────────────
-
-function DetailTab({ summary }: { summary: SessionSummary }) {
-  return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-      {/* All priority findings */}
-      {summary.priority_findings.length > 0 && (
-        <Box>
-          <Typography sx={{ fontSize: '0.7rem', fontWeight: 700, color: 'text.secondary', textTransform: 'uppercase', letterSpacing: '0.08em', mb: 1 }}>
-            Tất cả phát hiện ưu tiên ({summary.priority_findings.length})
-          </Typography>
-          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.75 }}>
-            {summary.priority_findings.map((f, i) => {
-              const s = RISK_STYLE[f.severity];
-              return (
-                <Box key={i} sx={{
-                  display: 'flex', gap: 1, px: 1.25, py: 1,
-                  borderRadius: '8px', backgroundColor: '#F8FAFB',
-                  border: '1px solid #E2EAE8',
-                }}>
-                  <Box sx={{ width: 3, backgroundColor: s.color, borderRadius: 1, flexShrink: 0 }} />
-                  <Box sx={{ flex: 1, minWidth: 0 }}>
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, mb: 0.25 }}>
-                      <Typography sx={{ fontSize: '0.66rem', fontWeight: 700, color: s.color }}>
-                        {s.emoji} {f.severity}
-                      </Typography>
-                      <Typography sx={{ fontSize: '0.66rem', color: 'text.secondary', fontFamily: 'monospace' }}>
-                        frame {f.frame_index}
-                      </Typography>
-                    </Box>
-                    <Typography sx={{ fontSize: '0.82rem', fontWeight: 700, color: 'text.primary' }}>
-                      {f.primary_dx}
-                    </Typography>
-                    <Typography sx={{ fontSize: '0.74rem', color: 'text.secondary', mt: 0.25, lineHeight: 1.5 }}>
-                      {f.rationale}
-                    </Typography>
-                  </Box>
-                </Box>
-              );
-            })}
-          </Box>
-        </Box>
-      )}
-
-      {/* Patterns */}
-      {summary.patterns.length > 0 && (
-        <Box>
-          <Typography sx={{ fontSize: '0.7rem', fontWeight: 700, color: 'text.secondary', textTransform: 'uppercase', letterSpacing: '0.08em', mb: 1 }}>
-            Pattern xuyên suốt
-          </Typography>
-          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
-            {summary.patterns.map((p, i) => (
-              <Box key={i} sx={{ display: 'flex', alignItems: 'flex-start', gap: 0.75 }}>
-                <ChevronRight size={14} style={{ marginTop: 3, flexShrink: 0, color: '#006064' }} />
-                <Typography sx={{ fontSize: '0.8rem', color: 'text.primary', lineHeight: 1.5 }}>
-                  {p}
-                </Typography>
-              </Box>
-            ))}
-          </Box>
-        </Box>
-      )}
-
-      {/* Checklist by category */}
-      {summary.checklist.length > 0 && (
-        <Box>
-          <Typography sx={{ fontSize: '0.7rem', fontWeight: 700, color: 'text.secondary', textTransform: 'uppercase', letterSpacing: '0.08em', mb: 1 }}>
-            Checklist hành động
-          </Typography>
-          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.6 }}>
-            {summary.checklist.map((c, i) => (
-              <Box key={i} sx={{ display: 'flex', gap: 0.75, alignItems: 'flex-start' }}>
-                <Chip
-                  label={CATEGORY_LABEL[c.category]}
-                  size="small"
-                  sx={{ fontSize: '0.62rem', height: 18, fontWeight: 700, backgroundColor: 'rgba(0,96,100,0.1)', color: '#006064', flexShrink: 0 }}
-                />
-                <Typography sx={{ fontSize: '0.8rem', color: 'text.primary', lineHeight: 1.5, flex: 1 }}>
-                  {c.action}
-                </Typography>
-              </Box>
-            ))}
-          </Box>
-        </Box>
-      )}
-    </Box>
-  );
-}
-
-// ── Chat tab — Q&A streaming interface ──────────────────────────────────────
-
-interface ChatTabProps {
-  messages: QaMessage[];
-  streaming: boolean;
-  onSend: (text: string) => void;
-}
-
-function ChatTab({ messages, streaming, onSend }: ChatTabProps) {
-  const [draft, setDraft] = useState('');
-  const listRef = useRef<HTMLDivElement>(null);
-
-  // Auto-scroll to bottom on new message / chunk.
-  useEffect(() => {
-    listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: 'smooth' });
-  }, [messages.length, messages[messages.length - 1]?.content.length]);
-
-  const submit = () => {
-    const t = draft.trim();
-    if (!t || streaming) return;
-    onSend(t);
-    setDraft('');
-  };
-
-  const onKey = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      submit();
-    }
-  };
-
-  return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 360 }}>
-      {/* Message list */}
-      <Box ref={listRef} sx={{
-        flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 1,
-        pr: 0.5, py: 0.5,
-      }}>
-        {messages.length === 0 && (
-          <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 1, color: 'text.disabled', py: 3 }}>
-            <MessageSquare size={28} />
-            <Typography sx={{ fontSize: '0.8rem', textAlign: 'center', maxWidth: 280 }}>
-              Hỏi AI về phiên này. Ví dụ:<br />
-              <em>“Tổn thương nào nguy hiểm nhất?”</em><br />
-              <em>“Có cần sinh thiết frame 214 không?”</em>
-            </Typography>
-          </Box>
-        )}
-        {messages.map((m, i) => {
-          const isUser = m.role === 'user';
-          const isStreamingThis = !isUser && streaming && i === messages.length - 1;
-          return (
-            <Box key={i} sx={{
-              alignSelf: isUser ? 'flex-end' : 'flex-start',
-              maxWidth: '88%',
-              px: 1.5, py: 1, borderRadius: '12px',
-              backgroundColor: isUser ? '#006064' : '#F0F4F3',
-              color: isUser ? '#fff' : 'text.primary',
-              fontSize: '0.84rem',
-              lineHeight: 1.6,
-              wordBreak: 'break-word',
-              // Assistant gets markdown rendering — bold, lists, code, etc.
-              // Styled inline so it inherits the bubble's color/size and looks
-              // tight without leaking the global markdown styles.
-              ...(isUser ? { whiteSpace: 'pre-wrap' } : {
-                '& p':        { margin: '0 0 6px', '&:last-child': { marginBottom: 0 } },
-                '& strong':   { fontWeight: 700, color: '#004D40' },
-                '& em':       { fontStyle: 'italic', color: '#00695C' },
-                '& code':     { backgroundColor: 'rgba(0,96,100,0.08)', borderRadius: '4px', padding: '1px 5px', fontSize: '0.78rem', fontFamily: 'ui-monospace, monospace' },
-                '& ul, & ol': { paddingLeft: '1.1rem', margin: '4px 0 6px' },
-                '& li':       { marginBottom: '2px' },
-                '& h1, & h2, & h3, & h4': {
-                  fontSize: '0.82rem', fontWeight: 700, color: '#004D40',
-                  margin: '10px 0 4px',
-                  paddingBottom: '3px',
-                  borderBottom: '1px solid rgba(0,77,64,0.15)',
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.04em',
-                  // First heading doesn't need the top margin since it'd be the bubble's first child.
-                  // :first-of-type instead of :first-child to satisfy
-                  // Emotion / Next.js SSR — :first-child is unsafe across
-                  // server/client boundaries (different sibling order).
-                  '&:first-of-type': { marginTop: 0 },
-                },
-                '& blockquote': { borderLeft: '3px solid #00897B', backgroundColor: 'rgba(0,137,123,0.06)', padding: '4px 8px', margin: '4px 0', borderRadius: '0 6px 6px 0', '& p': { margin: 0 } },
-                '& a':        { color: '#0277BD', textDecoration: 'underline' },
-                '& hr':       { border: 0, borderTop: '1px dashed #C8D8D6', margin: '6px 0' },
-                '& table':    { borderCollapse: 'collapse', fontSize: '0.78rem', margin: '4px 0' },
-                '& th, & td': { border: '1px solid #C8D8D6', padding: '3px 6px' },
-                '& th':       { backgroundColor: 'rgba(0,96,100,0.05)', fontWeight: 700 },
-              }),
-            }}>
-              {isUser ? (
-                m.content
-              ) : (
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
-              )}
-              {/* Cursor blink while streaming the assistant's last message */}
-              {isStreamingThis && (
-                <Box component="span" sx={{
-                  display: 'inline-block', width: 6, height: 14, ml: 0.5,
-                  backgroundColor: 'currentColor', verticalAlign: 'middle',
-                  animation: 'blink 0.9s steps(2) infinite',
-                  '@keyframes blink': { '0%,100%': { opacity: 1 }, '50%': { opacity: 0 } },
-                }} />
-              )}
-            </Box>
-          );
-        })}
-
-        {/* Typing indicator — shown when waiting for assistant reply but no
-            chunks have arrived yet (HTTP fallback path) or before the first
-            WS chunk lands. Hidden once assistant has started streaming text. */}
-        {streaming && (messages.length === 0 || messages[messages.length - 1].role === 'user') && (
-          <Box sx={{
-            alignSelf: 'flex-start',
-            display: 'flex', alignItems: 'center', gap: 0.75,
-            px: 1.5, py: 1, borderRadius: '12px',
-            backgroundColor: '#F0F4F3', color: 'text.secondary',
-            fontSize: '0.82rem',
-          }}>
-            <Typography component="span" sx={{ fontSize: 'inherit', fontStyle: 'italic' }}>
-              AI đang suy nghĩ
-            </Typography>
-            <Box sx={{
-              display: 'inline-flex', gap: 0.4,
-              '& > span': {
-                width: 5, height: 5, borderRadius: '50%',
-                backgroundColor: 'currentColor',
-                animation: 'qaTypingDot 1.2s ease-in-out infinite',
-              },
-              '& > span:nth-of-type(2)': { animationDelay: '0.2s' },
-              '& > span:nth-of-type(3)': { animationDelay: '0.4s' },
-              '@keyframes qaTypingDot': {
-                '0%, 80%, 100%': { opacity: 0.25, transform: 'translateY(0)' },
-                '40%':           { opacity: 1,    transform: 'translateY(-3px)' },
-              },
-            }}>
-              <span /><span /><span />
-            </Box>
-          </Box>
-        )}
-      </Box>
-
-      {/* Input */}
-      <Box sx={{ display: 'flex', gap: 0.75, mt: 1, alignItems: 'flex-end' }}>
-        <TextField
-          size="small"
-          fullWidth
-          placeholder={streaming ? 'AI đang trả lời…' : 'Hỏi về phiên này…'}
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={onKey}
-          disabled={streaming}
-          multiline
-          maxRows={3}
-          sx={{
-            '& .MuiOutlinedInput-root': {
-              borderRadius: '10px', fontSize: '0.85rem',
-              backgroundColor: '#FAFCFB',
-            },
-          }}
-        />
-        <IconButton
-          onClick={submit}
-          disabled={!draft.trim() || streaming}
-          sx={{
-            color: '#fff', backgroundColor: '#006064', borderRadius: '10px',
-            width: 38, height: 38, flexShrink: 0,
-            '&:hover': { backgroundColor: '#004D40' },
-            '&.Mui-disabled': { backgroundColor: '#E2EAE8', color: '#9AA5B1' },
-          }}
-        >
-          {streaming ? <CircularProgress size={16} sx={{ color: '#fff' }} /> : <Send size={16} />}
-        </IconButton>
-      </Box>
-    </Box>
-  );
-}
-
-// ── Main panel with tabs ────────────────────────────────────────────────────
+import { OverviewTab } from './session-summary/overview-tab';
+import { DetailTab }   from './session-summary/detail-tab';
+import { ChatTab }     from './session-summary/chat-tab';
 
 export interface SessionSummaryPanelProps {
   summary: SessionSummary | undefined;
   qaMessages: QaMessage[];
   qaStreaming: boolean;
   onSendQA: (text: string) => void;
+  /** Stop the in-flight Q&A answer (unlocks the chat input). */
+  onStopQA?: () => void;
   onClose: () => void;
+  /** Optional: session id used by OverviewTab to fetch patient context. */
+  sessionId?: string;
 }
 
 export function SessionSummaryPanel({
-  summary, qaMessages, qaStreaming, onSendQA, onClose,
+  summary, qaMessages, qaStreaming, onSendQA, onStopQA, onClose, sessionId,
 }: SessionSummaryPanelProps) {
   const [tab, setTab] = useState<'overview' | 'detail' | 'chat'>('overview');
 
@@ -437,8 +71,7 @@ export function SessionSummaryPanel({
         value={tab}
         onChange={(_, v) => setTab(v)}
         sx={{
-          borderBottom: '1px solid #E2EAE8',
-          minHeight: 36,
+          borderBottom: '1px solid #E2EAE8', minHeight: 36,
           '& .MuiTab-root': { minHeight: 36, fontSize: '0.78rem', fontWeight: 600, textTransform: 'none', py: 0.5 },
           '& .Mui-selected': { color: '#006064 !important' },
           '& .MuiTabs-indicator': { backgroundColor: '#006064' },
@@ -452,79 +85,23 @@ export function SessionSummaryPanel({
       {/* Body */}
       <Box sx={{ flex: 1, overflowY: 'auto', px: 2, py: 2 }}>
         {!summary ? (
-          // Phase C2 — skeleton instead of single spinner. Three placeholder
-          // rows match OverviewTab's badge + counts grid + top findings so
-          // the transition to real content feels seamless.
-          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5, color: '#006064' }}>
-              <CircularProgress size={14} thickness={5} sx={{ color: '#006064' }} />
-              <Typography sx={{ fontSize: '0.78rem', fontWeight: 600 }}>
-                AI đang tổng hợp phiên… (10–15s)
-              </Typography>
-            </Box>
-            {/* Hero placeholder — overall risk badge + 4 counts grid */}
-            <Box sx={{ p: 2, borderRadius: '12px', border: '1px solid #E2EAE8', backgroundColor: '#F8FAFB' }}>
-              <Box sx={{
-                width: '50%', height: 11, borderRadius: '4px', mb: 1.5,
-                background: 'linear-gradient(90deg, #E2EAE8 0%, #F0F4F3 50%, #E2EAE8 100%)',
-                backgroundSize: '200% 100%',
-                animation: 'sumSkele 1.4s ease-in-out infinite',
-              }} />
-              <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 1.25 }}>
-                {[0, 1, 2, 3].map((i) => (
-                  <Box key={i}>
-                    <Box sx={{ width: '60%', height: 8, mb: 0.5, borderRadius: '3px',
-                      background: 'linear-gradient(90deg, #E2EAE8 0%, #F0F4F3 50%, #E2EAE8 100%)',
-                      backgroundSize: '200% 100%', animation: 'sumSkele 1.4s ease-in-out infinite' }} />
-                    <Box sx={{ width: '80%', height: 16, borderRadius: '4px',
-                      background: 'linear-gradient(90deg, #E2EAE8 0%, #F0F4F3 50%, #E2EAE8 100%)',
-                      backgroundSize: '200% 100%', animation: 'sumSkele 1.4s ease-in-out infinite' }} />
-                  </Box>
-                ))}
-              </Box>
-            </Box>
-            {/* 3 priority finding rows */}
-            {[0, 1, 2].map((i) => (
-              <Box key={i} sx={{ p: 1.25, borderRadius: '8px', backgroundColor: '#F8FAFB', border: '1px solid #E2EAE8',
-                display: 'flex', gap: 1, alignItems: 'flex-start' }}>
-                <Box sx={{ width: 50, height: 18, borderRadius: '4px',
-                  background: 'linear-gradient(90deg, #E2EAE8 0%, #F0F4F3 50%, #E2EAE8 100%)',
-                  backgroundSize: '200% 100%', animation: 'sumSkele 1.4s ease-in-out infinite' }} />
-                <Box sx={{ flex: 1 }}>
-                  <Box sx={{ width: '70%', height: 12, mb: 0.5, borderRadius: '3px',
-                    background: 'linear-gradient(90deg, #E2EAE8 0%, #F0F4F3 50%, #E2EAE8 100%)',
-                    backgroundSize: '200% 100%', animation: 'sumSkele 1.4s ease-in-out infinite' }} />
-                  <Box sx={{ width: '50%', height: 8, borderRadius: '3px',
-                    background: 'linear-gradient(90deg, #E2EAE8 0%, #F0F4F3 50%, #E2EAE8 100%)',
-                    backgroundSize: '200% 100%', animation: 'sumSkele 1.4s ease-in-out infinite' }} />
-                </Box>
-              </Box>
-            ))}
-            {/* Shared keyframes for the shimmer animation. */}
-            <Box sx={{ '@keyframes sumSkele': {
-              '0%': { backgroundPosition: '200% 0' },
-              '100%': { backgroundPosition: '-200% 0' },
-            } }} />
-          </Box>
+          <SummarySkeleton />
         ) : tab === 'overview' ? (
-          <OverviewTab summary={summary} />
+          <OverviewTab summary={summary} sessionId={sessionId} />
         ) : tab === 'detail' ? (
           <DetailTab summary={summary} />
         ) : (
-          <ChatTab messages={qaMessages} streaming={qaStreaming} onSend={onSendQA} />
+          <ChatTab messages={qaMessages} streaming={qaStreaming} onSend={onSendQA} onStop={onStopQA} />
         )}
       </Box>
 
       {/* Disclaimer footer */}
-      <Box sx={{
-        px: 2, py: 1, borderTop: '1px solid #E2EAE8', backgroundColor: '#FAFCFB',
-      }}>
+      <Box sx={{ px: 2, py: 1, borderTop: '1px solid #E2EAE8', backgroundColor: '#FAFCFB' }}>
         <Typography sx={{ fontSize: '0.66rem', color: 'text.disabled', textAlign: 'center', lineHeight: 1.4 }}>
-          Báo cáo do AI gợi ý · Không thay thế chẩn đoán bác sĩ · Powered by Qwen2.5-VL
+          Báo cáo do AI gợi ý · Không thay thế chẩn đoán bác sĩ · Powered by MedGemma
         </Typography>
       </Box>
 
-      {/* Helper hint when there's no summary entirely (e.g. session had 0 findings) */}
       {summary && summary.overview.total_findings === 0 && (
         <Box sx={{ px: 2, pb: 1, display: 'flex', justifyContent: 'center' }}>
           <MuiButton size="small" variant="outlined" onClick={onClose}
@@ -533,6 +110,52 @@ export function SessionSummaryPanel({
           </MuiButton>
         </Box>
       )}
+    </Box>
+  );
+}
+
+// ── Loading skeleton (extracted to keep main component lean) ─────────────────
+
+function SummarySkeleton() {
+  const shimmer = {
+    background: 'linear-gradient(90deg, #E2EAE8 0%, #F0F4F3 50%, #E2EAE8 100%)',
+    backgroundSize: '200% 100%',
+    animation: 'sumSkele 1.4s ease-in-out infinite',
+  } as const;
+
+  return (
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5, color: '#006064' }}>
+        <CircularProgress size={14} thickness={5} sx={{ color: '#006064' }} />
+        <Typography sx={{ fontSize: '0.78rem', fontWeight: 600 }}>
+          AI đang tổng hợp phiên… (10–15s)
+        </Typography>
+      </Box>
+      <Box sx={{ p: 2, borderRadius: '12px', border: '1px solid #E2EAE8', backgroundColor: '#F8FAFB' }}>
+        <Box sx={{ width: '50%', height: 11, borderRadius: '4px', mb: 1.5, ...shimmer }} />
+        <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 1.25 }}>
+          {[0, 1, 2, 3].map((i) => (
+            <Box key={i}>
+              <Box sx={{ width: '60%', height: 8, mb: 0.5, borderRadius: '3px', ...shimmer }} />
+              <Box sx={{ width: '80%', height: 16, borderRadius: '4px', ...shimmer }} />
+            </Box>
+          ))}
+        </Box>
+      </Box>
+      {[0, 1, 2].map((i) => (
+        <Box key={i} sx={{ p: 1.25, borderRadius: '8px', backgroundColor: '#F8FAFB',
+          border: '1px solid #E2EAE8', display: 'flex', gap: 1, alignItems: 'flex-start' }}>
+          <Box sx={{ width: 50, height: 18, borderRadius: '4px', ...shimmer }} />
+          <Box sx={{ flex: 1 }}>
+            <Box sx={{ width: '70%', height: 12, mb: 0.5, borderRadius: '3px', ...shimmer }} />
+            <Box sx={{ width: '50%', height: 8, borderRadius: '3px', ...shimmer }} />
+          </Box>
+        </Box>
+      ))}
+      <Box sx={{ '@keyframes sumSkele': {
+        '0%': { backgroundPosition: '200% 0' },
+        '100%': { backgroundPosition: '-200% 0' },
+      } }} />
     </Box>
   );
 }
