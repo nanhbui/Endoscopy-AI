@@ -109,6 +109,7 @@ async def _process_sample(
     model: str,
     judge_model: str,
     skip_judge: bool,
+    no_rag: bool = False,
 ) -> dict:
     """Process one HyperKvasir sample end-to-end and return a scored record."""
     import kb_rag  # noqa: PLC0415
@@ -127,9 +128,13 @@ async def _process_sample(
     label = kvasir_class.replace("-", " ")
     conf = 1.0  # ground-truth label → 100% "confidence" for prompt context
 
-    # Retrieve KB evidence (same as production path)
-    evidence_chunks = kb_rag.retrieve_evidence(label, k=3, min_sim=0.3)
-    evidence_block = kb_rag.format_evidence_block(evidence_chunks)
+    # Retrieve KB evidence (same as production path). For the RAG ablation
+    # (--no-rag) we suppress the evidence block to measure its contribution.
+    if no_rag:
+        evidence_block = ""
+    else:
+        evidence_chunks = kb_rag.retrieve_evidence(label, k=3, min_sim=0.3)
+        evidence_block = kb_rag.format_evidence_block(evidence_chunks)
 
     t0 = time.monotonic()
     report = await _run_report(
@@ -281,7 +286,7 @@ async def _main(args: argparse.Namespace) -> None:
         try:
             record = await _process_sample(
                 sample, client, model, judge_model,
-                skip_judge=args.no_judge,
+                skip_judge=args.no_judge, no_rag=args.no_rag,
             )
             records.append(record)
         except Exception as exc:
@@ -324,6 +329,8 @@ def _parse_args() -> argparse.Namespace:
                         "(e.g. in-domain: barretts,esophagitis-a). Default: all EVAL_CLASSES.")
     p.add_argument("--no-judge", action="store_true",
                    help="Skip LLM-as-judge faithfulness scoring (faster for dx/rec-only runs)")
+    p.add_argument("--no-rag", action="store_true",
+                   help="Suppress KB evidence block (RAG ablation — measure RAG's contribution)")
     return p.parse_args()
 
 
