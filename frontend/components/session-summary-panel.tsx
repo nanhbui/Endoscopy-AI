@@ -98,7 +98,7 @@ export function SessionSummaryPanel({
       {/* Disclaimer footer */}
       <Box sx={{ px: 2, py: 1, borderTop: '1px solid #E2EAE8', backgroundColor: '#FAFCFB' }}>
         <Typography sx={{ fontSize: '0.66rem', color: 'text.disabled', textAlign: 'center', lineHeight: 1.4 }}>
-          Báo cáo do AI gợi ý · Không thay thế chẩn đoán bác sĩ · Powered by MedGemma
+          Báo cáo do AI gợi ý · Không thay thế chẩn đoán bác sĩ · Powered by {tab === 'chat' ? 'Qwen2.5 7B' : 'MedGemma'}
         </Typography>
       </Box>
 

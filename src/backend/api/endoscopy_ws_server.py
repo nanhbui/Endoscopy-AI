@@ -120,11 +120,14 @@ LLM_MODEL_FOLLOWUP = os.getenv("OPENAI_MODEL_FOLLOWUP", "gpt-4o-mini")
 LLM_BACKEND     = os.getenv("LLM_BACKEND", "openai").lower()
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL", "medgemma-4b")
-# Q&A chatbot model (Ollama). MedGemma-4B over-refuses valid medical questions
-# (intrinsic safety bias), so the conversational Q&A path uses a stronger general
-# model. Lesion report + session summary keep OLLAMA_MODEL (MedGemma) — it gives a
-# much more detailed lesion analysis and raises the early-cancer differential.
-QA_MODEL        = os.getenv("QA_MODEL", "qwen2.5vl:7b")
+# Q&A chatbot model (Ollama). MedGemma-4B intrinsically over-refuses valid medical
+# questions, so the conversational Q&A path uses a stronger general model. A TEXT
+# model (no vision tower) is used on purpose: the Q&A is text-only, and a vision
+# model's image buffers blow up VRAM (qwen2.5vl:3b needs ~11GB → crashes when loaded
+# next to MedGemma + YOLO during a live session). qwen2.5:7b-instruct is ~4.9GB —
+# same footprint as MedGemma — so both fit on the 16GB GPU. Lesion report + session
+# summary keep OLLAMA_MODEL (MedGemma) for its richer, image-grounded lesion analysis.
+QA_MODEL        = os.getenv("QA_MODEL", "qwen2.5:7b-instruct")
 
 # ── Runtime config (Settings panel) ───────────────────────────────────────────
 # Detection-sensitivity tunables that the (spawned) pipeline worker reads from
@@ -498,6 +501,39 @@ def _strip_cjk(text: str) -> str:
     cleaned = re.sub(r'\s{2,}', ' ', cleaned)          # collapse doubled spaces
     cleaned = re.sub(r'\s+([,.;:)\]])', r'\1', cleaned)  # drop space before punctuation
     return cleaned.strip()
+
+
+def _fix_frame_placeholder(text: str, summary: dict | None, reports: list[dict]) -> str:
+    """The Q&A model occasionally copies the literal 'Frame N' placeholder from the
+    prompt examples instead of substituting the real frame. Replace it with the
+    session's top-finding frame_index, or a neutral phrase when none is known, so the
+    user never sees 'Frame N'."""
+    if not text or not re.search(r"[Ff]rame N\b", text):
+        return text
+    fi = None
+    if summary and summary.get("priority_findings"):
+        fi = (summary["priority_findings"][0] or {}).get("frame_index")
+    if fi is None and reports:
+        fi = reports[0].get("frame_index")
+    if fi is not None:
+        text = re.sub(r"Frame N\b", f"Frame {fi}", text)
+        text = re.sub(r"frame N\b", f"frame {fi}", text)
+        return text
+    return re.sub(r"[Ff]rame N\b", "tổn thương", text)
+
+
+def _qa_sources_footer(chunks: list[dict]) -> str:
+    """Compact 'Nguồn' footer built from the retrieved evidence labels. Appended to
+    Q&A answers so the guideline grounding is ALWAYS visible — the chat model does
+    not reliably echo the [label] tags itself. Empty when no evidence was used."""
+    labels: list[str] = []
+    for ch in chunks or []:
+        lbl = ch.get("citation_label")
+        if lbl and lbl not in labels:
+            labels.append(lbl)
+    if not labels:
+        return ""
+    return "\n\n*Nguồn tham khảo: " + " · ".join(labels) + "*"
 
 
 def _sanitize_llm_output(obj):
@@ -1247,7 +1283,27 @@ async def post_session_qa(video_id: str, request: Request):
     # Drop the just-persisted user turn — build_session_qa_messages appends
     # it as the current turn inside.
     history = history[:-1] if history else []
-    messages = build_session_qa_messages(summary, reports, history, user_text)
+
+    # Patient context (Phase 1) + guideline evidence (Phase 2/3) — same grounding
+    # the WS path uses; this was previously MISSING on the HTTP path, so the
+    # /report Q&A had no guideline evidence to cite.
+    _ctx_dict = get_patient_context(video_id)
+    _patient_ctx = format_patient_context(PatientContext.from_dict(_ctx_dict) if _ctx_dict else None)
+    _qa_chunks: list[dict] = []
+    _evidence_block = ""
+    try:
+        _dx_hints = " ".join(
+            r.get("report", {}).get("conclusion", {}).get("primary_dx", "")
+            for r in reports if r.get("report")
+        )[:200]
+        _qa_chunks = kb_rag.retrieve_evidence(f"{user_text} {_dx_hints}".strip(), k=3, min_sim=0.3)
+        _evidence_block = kb_rag.format_evidence_block(_qa_chunks)
+    except Exception as _rag_exc:
+        logger.warning("Q&A RAG (HTTP) evidence retrieval skipped: {}", _rag_exc)
+
+    messages = build_session_qa_messages(summary, reports, history, user_text,
+                                         patient_ctx=_patient_ctx,
+                                         evidence_block=_evidence_block)
 
     t0 = time.monotonic()
     try:
@@ -1255,12 +1311,14 @@ async def post_session_qa(video_id: str, request: Request):
             client.chat.completions.create(
                 model=_qa_model_name(),
                 messages=messages,
-                max_tokens=1000,
-                extra_body={"options": {"num_ctx": 6144}},
+                max_tokens=1500,
+                extra_body={"options": {"num_ctx": 8192}},
             ),
             timeout=LLM_CALL_TIMEOUT_SEC,
         )
         reply = _strip_cjk(completion.choices[0].message.content or "")
+        reply = _fix_frame_placeholder(reply, summary, reports)
+        reply += _qa_sources_footer(_qa_chunks)
         logger.info("Session Q&A (HTTP): latency={:.2f}s chars={}",
                     time.monotonic() - t0, len(reply))
     except Exception as exc:
@@ -2361,8 +2419,8 @@ async def _stream_session_qa(websocket: WebSocket, user_text: str,
             model=_qa_model_name(),
             messages=messages,
             stream=True,
-            max_tokens=1000,
-            extra_body={"options": {"num_ctx": 6144}},
+            max_tokens=1500,
+            extra_body={"options": {"num_ctx": 8192}},
         )
         async for ev in stream:
             delta = ev.choices[0].delta.content if ev.choices else None
@@ -2376,6 +2434,11 @@ async def _stream_session_qa(websocket: WebSocket, user_text: str,
                 await _send({"event": "SESSION_QA_CHUNK", "data": {"chunk": delta}})
 
         latency = time.monotonic() - t0
+        full_response = _fix_frame_placeholder(full_response, summary, reports)
+        _footer = _qa_sources_footer(_qa_chunks)
+        if _footer:
+            full_response += _footer
+            await _send({"event": "SESSION_QA_CHUNK", "data": {"chunk": _footer}})
         logger.info("Session Q&A done: latency={:.2f}s chars={}", latency, len(full_response))
         append_qa_message(video_id, "assistant", full_response, int(time.time() * 1000))
         await _send({"event": "SESSION_QA_DONE", "data": {}})
