@@ -175,7 +175,7 @@ function Hero({
               Phát hiện tổn thương real-time,
               <br />
               <span style={{ color: C.teal100 }}>
-                điều khiển hoàn toàn bằng giọng nói.
+                phân tích &amp; báo cáo bằng AI.
               </span>
             </h1>
             <p
