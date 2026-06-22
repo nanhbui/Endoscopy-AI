@@ -1219,9 +1219,13 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                                 if _is_recently_reported(timestamp_ms, xyxy_norm, label,
                                                          iou_thr=_DIFFUSE_IOU,
                                                          window_ms=_DIFFUSE_WINDOW_MS):
+                                    print(f"[Worker] Dedup-skip (diffuse/region): {label} "
+                                          f"conf={det_conf:.2f} track_id={track_id} ts_ms={timestamp_ms}", flush=True)
                                     continue
                             elif _diffuse_mode == "once":
                                 if label in reported_diffuse_labels:
+                                    print(f"[Worker] Dedup-skip (diffuse/once): {label} "
+                                          f"conf={det_conf:.2f} track_id={track_id} ts_ms={timestamp_ms}", flush=True)
                                     continue
                             else:  # "cooldown" (default) — position-aware by box
                                 # CENTRE distance (robust to box-size jitter):
@@ -1231,6 +1235,8 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                                 # same spot becomes reportable again once it passes.
                                 if _diffuse_same_spot(timestamp_ms, xyxy_norm, label,
                                                       window_ms=_DIFFUSE_COOLDOWN_MS):
+                                    print(f"[Worker] Dedup-skip (diffuse/cooldown {_DIFFUSE_COOLDOWN_MS}ms): {label} "
+                                          f"conf={det_conf:.2f} track_id={track_id} ts_ms={timestamp_ms}", flush=True)
                                     continue
                         # Track-ID dedup (UTR-Track + OSNet-DCN ReID): a focal
                         # lesion already reported keeps its ID when the scope
@@ -1241,9 +1247,14 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                         # suppress ALL later ones. Falls through to spatial-temporal.
                         elif _dedup_by_track_id and use_tracker and track_id >= 0:
                             if track_id in reported_track_ids:
+                                print(f"[Worker] Dedup-skip (track_id/ReID): {label} "
+                                      f"conf={det_conf:.2f} track_id={track_id} (already reported) "
+                                      f"ts_ms={timestamp_ms}", flush=True)
                                 continue
                         # Spatial-temporal dedup (fallback / StrongSORT mode)
                         elif _is_recently_reported(timestamp_ms, xyxy_norm, label):
+                            print(f"[Worker] Dedup-skip (spatial-temporal {_DEDUP_WINDOW_MS}ms/IoU≥{_DEDUP_IOU}): "
+                                  f"{label} conf={det_conf:.2f} track_id={track_id} ts_ms={timestamp_ms}", flush=True)
                             continue
 
                         print(f"[Worker] Detection track_id={track_id} {label} conf={det_conf:.2f} bbox={[round(v,1) for v in xyxy]}", flush=True)
