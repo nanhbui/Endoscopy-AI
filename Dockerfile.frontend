@@ -2,6 +2,7 @@
 # next build needs tailwindcss, postcss, typescript etc. The standalone output
 # in Stage 3 strips dev deps anyway, so installing them here costs nothing at
 # runtime but is REQUIRED for the build step.
+# Node 20-alpine satisfies next@16's engines requirement (node >=20.9.0).
 FROM node:20-alpine AS deps
 
 WORKDIR /app
@@ -15,9 +16,11 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY frontend/ .
 
-# NEXT_PUBLIC_API_BASE is baked into the static build at build time.
-# Override with --build-arg if the backend URL differs from the default.
-ARG NEXT_PUBLIC_API_BASE=http://backend:8001
+# NEXT_PUBLIC_API_BASE is inlined into the client bundle at build time, so it
+# must be a URL the BROWSER can reach (not a Docker-internal hostname).
+# Default targets the host-mapped backend port; override via --build-arg for
+# other deployments (e.g. the public tunnel host).
+ARG NEXT_PUBLIC_API_BASE=http://localhost:8001
 ENV NEXT_PUBLIC_API_BASE=${NEXT_PUBLIC_API_BASE}
 
 RUN npm run build
@@ -26,12 +29,25 @@ RUN npm run build
 FROM node:20-alpine AS runtime
 
 ENV NODE_ENV=production \
-    LOG_LEVEL=info
+    PORT=3000 \
+    HOSTNAME=0.0.0.0
 
 WORKDIR /app
+
+# Run as an unprivileged user (Next.js standalone convention).
+RUN addgroup --system --gid 1001 nodejs \
+ && adduser --system --uid 1001 nextjs
+
+# Standalone output: server.js + minimal node_modules, then static assets.
 COPY --from=builder /app/public ./public
-COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/.next/static ./.next/static
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+
+USER nextjs
 
 EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD wget -qO- http://127.0.0.1:3000/ >/dev/null 2>&1 || exit 1
+
 CMD ["node", "server.js"]

@@ -9,12 +9,13 @@ so it runs safely in the main process (PyTorch releases the GIL during inference
 Returned boxes are normalized to a 1920×1080 virtual canvas so the frontend can
 overlay them with the same percentage system used for uploaded video.
 
-Parity with the upload path (pipeline_controller._pipeline_worker): the raw YOLO
-output is filtered (viewport-centre + whole-frame suppression) AND de-duplicated
-(spatial-temporal + diffuse cooldown) so the live feed does not report the SAME
-lingering lesion on every frame the way raw per-frame YOLO did. Each call returns
-both the boxes to OVERLAY (filtered, not deduped — the box must keep tracking the
-lesion live) and the subset that is a genuinely NEW detection to CAPTURE/report.
+The raw YOLO output can optionally be filtered (viewport-centre + whole-frame
+suppression) and de-duplicated (spatial-temporal + diffuse cooldown), but these are
+OPT-IN for the live path (env LIVE_VIEWPORT_FILTER / LIVE_DEDUP, default OFF): on
+screen-mirror / capture-card sources the auto viewport detector is unreliable and was
+cropping real lesions, so by default live behaves like permissive per-frame YOLO and
+does not miss detections. Each call returns both the boxes to OVERLAY and the subset
+that is a genuinely NEW detection to CAPTURE/report (identical when dedup is off).
 """
 from __future__ import annotations
 
@@ -47,10 +48,13 @@ _DIFFUSE_CENTER_FRAC = float(_os.environ.get("ENDOSCOPY_DIFFUSE_CENTER_FRAC", "0
 _DIFFUSE_KW = [k.strip().lower()
                for k in _os.environ.get("ENDOSCOPY_DIFFUSE_KEYWORDS", "viêm").split(",")
                if k.strip()]
-# Kill-switches (default on). VIEWPORT filter is the one to flip off if a live
-# source is viewport-only and auto-detect ever crops a real detection.
-_LIVE_DEDUP = _os.environ.get("LIVE_DEDUP", "1").lower() in ("1", "true", "yes", "on")
-_LIVE_VIEWPORT = _os.environ.get("LIVE_VIEWPORT_FILTER", "1").lower() in ("1", "true", "yes", "on")
+# Filters are OPT-IN for live (default OFF). Screen-mirror / capture-card sources
+# confuse the auto viewport detector, which then crops real lesions and inflates the
+# whole-frame ratio, so the streaming feed under-detected. By default live behaves like
+# permissive per-frame YOLO and does not miss detections; set the env var to 1 to
+# re-enable a given filter on a clean scope-on-black feed.
+_LIVE_DEDUP = _os.environ.get("LIVE_DEDUP", "0").lower() in ("1", "true", "yes", "on")
+_LIVE_VIEWPORT = _os.environ.get("LIVE_VIEWPORT_FILTER", "0").lower() in ("1", "true", "yes", "on")
 
 
 def _ensure_model() -> None:
@@ -192,8 +196,11 @@ class LiveDetector:
                     cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
                     if _LIVE_VIEWPORT and not (vx <= cx <= vx + vw and vy <= cy <= vy + vh):
                         continue
-                    # Suppress egregious whole-frame detections (area vs viewport).
-                    if (x2 - x1) * (y2 - y1) / max(vw * vh, 1) > MAX_BBOX_AREA_RATIO:
+                    # Suppress egregious whole-frame detections. Size the cap against
+                    # the viewport only when the viewport filter is on/trusted; else use
+                    # the full frame so a mis-detected viewport cannot drop real boxes.
+                    _wf_base = (vw * vh) if _LIVE_VIEWPORT else (w * h)
+                    if (x2 - x1) * (y2 - y1) / max(_wf_base, 1) > MAX_BBOX_AREA_RATIO:
                         continue
 
                     bbox = [x1 / w * FRAME_W, y1 / h * FRAME_H,
