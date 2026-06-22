@@ -359,6 +359,7 @@ function SessionDetailModal({
   onSelectDetection,
   onSendSessionQA,
   onStopSessionQA,
+  onClearSessionQA,
   onDeleteSession,
 }: {
   session: Session;
@@ -366,6 +367,7 @@ function SessionDetailModal({
   onSelectDetection: (d: Detection) => void;
   onSendSessionQA: (text: string, sessionId?: string) => void;
   onStopSessionQA: (sessionId?: string) => void;
+  onClearSessionQA: (sessionId?: string) => void;
   onDeleteSession: () => void;
 }) {
   const sourceCfg = SOURCE_CFG[session.source];
@@ -384,9 +386,9 @@ function SessionDetailModal({
       onClose={onClose}
       maxWidth={false}
       fullWidth
-      slotProps={{ paper: { sx: { borderRadius: '20px', overflow: 'hidden', width: '94vw', maxWidth: 1280, maxHeight: '90vh' } } }}
+      slotProps={{ paper: { sx: { borderRadius: '20px', overflow: 'hidden', width: '94vw', maxWidth: 1280, height: '90vh', maxHeight: '90vh' } } }}
     >
-      <MuiDialogContent sx={{ p: 0, display: 'flex', flexDirection: 'column' }}>
+      <MuiDialogContent sx={{ p: 0, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
 
         <Box sx={{ px: 3.5, py: 2.5, borderBottom: '1px solid #E2EAE8', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 2, backgroundColor: '#F8FAFB' }}>
           <Box sx={{ flex: 1, minWidth: 0 }}>
@@ -465,7 +467,7 @@ function SessionDetailModal({
           </Box>
         </Box>
 
-        <Box sx={{ flex: 1, overflowY: 'auto', px: tab === 'summary' ? 0 : 3.5, py: tab === 'summary' ? 0 : 3, backgroundColor: 'background.default' }}>
+        <Box sx={{ flex: 1, minHeight: 0, overflowY: tab === 'summary' ? 'hidden' : 'auto', px: tab === 'summary' ? 0 : 3.5, py: tab === 'summary' ? 0 : 3, backgroundColor: 'background.default' }}>
           {tab === 'summary' ? (
             // AI summary + chat — full-height inline (not a nested dialog).
             // Bind the session id explicitly so HTTP fallback addresses the
@@ -477,6 +479,7 @@ function SessionDetailModal({
                 qaStreaming={session.qaStreaming ?? false}
                 onSendQA={(text) => onSendSessionQA(text, session.id)}
                 onStopQA={() => onStopSessionQA(session.id)}
+                onClearQA={() => onClearSessionQA(session.id)}
                 onClose={onClose}
                 sessionId={session.id}
               />
@@ -731,7 +734,7 @@ function SessionCard({ session, idx, onClick, selected, onToggleSelect, onDelete
 // ── Page ──
 
 export default function ReportPage() {
-  const { sessions, removeSession, clearSessions, sendSessionQA, stopSessionQA } = useAnalysis();
+  const { sessions, removeSession, clearSessions, sendSessionQA, stopSessionQA, clearSessionQA } = useAnalysis();
   const [openSessionId, setOpenSessionId] = useState<string | null>(null);
   const [openDetection, setOpenDetection] = useState<Detection | null>(null);
   const [dbSessions, setDbSessions] = useState<Session[]>([]);
@@ -984,6 +987,7 @@ export default function ReportPage() {
           onSelectDetection={(d) => setOpenDetection(d)}
           onSendSessionQA={sendSessionQA}
           onStopSessionQA={stopSessionQA}
+          onClearSessionQA={clearSessionQA}
           onDeleteSession={() => {
             if (window.confirm(`Xoá phiên "${openSession.name}"?`)) {
               deleteSessions([openSession.id]);

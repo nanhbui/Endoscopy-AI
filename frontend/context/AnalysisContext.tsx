@@ -214,6 +214,9 @@ interface AnalysisContextType {
   /** Phase B — stop an in-flight Q&A turn (abort HTTP / ignore further WS chunks)
    *  so the input unlocks and the user can ask something else. */
   stopSessionQA: (sessionId?: string) => void;
+  /** Reset the Q&A conversation (wipe chat history only — keeps detections + summary)
+   *  so the user can start a fresh chat. */
+  clearSessionQA: (sessionId?: string) => void;
   /** Phase C1 — latest LLM/system error for UI surfacing. Cleared via dismissError(). */
   lastError: { message: string; code?: string; context?: string } | null;
   dismissError: () => void;
@@ -375,6 +378,14 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
   const llmInsightRef = useRef("");
   // Prevents duplicate ACTION_EXPLAIN before server STATE_CHANGE PROCESSING_LLM arrives
   const explainInFlightRef = useRef(false);
+  // True once the report for the CURRENT detection has arrived. Guards against a
+  // STATE_CHANGE→PROCESSING_LLM that the backend relays AFTER LESION_REPORT_DONE
+  // (the report is sent directly while STATE_CHANGE goes through the ctrl queue —
+  // a cache-hit report arrives instantly and loses the race). Without this guard
+  // the late PROCESSING_LLM wipes llmInsight + re-arms the spinner, which then
+  // never clears (no further event comes) → the card shows the report but the
+  // session spins forever. Reset on a new detection / resume.
+  const reportArrivedRef = useRef(false);
 
   const detectionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const llmTypingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -459,10 +470,15 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
     switch (evt.event) {
       case "STATE_CHANGE": {
         const s = evt.data.state as PipelineState;
+        // Ignore a stale PROCESSING_LLM that the ctrl queue relays AFTER the
+        // report already arrived (cache-hit race) — honoring it would wipe
+        // llmInsight + re-arm the spinner with no closing event to follow.
+        if (s === "PROCESSING_LLM" && reportArrivedRef.current) break;
         setPipelineState(s);
         if (s === "PLAYING") {
           setCurrentDetection(null);
           setIsListeningVoice(false);
+          reportArrivedRef.current = false;
         }
         if (s === "PROCESSING_LLM") {
           setIsListeningVoice(true);
@@ -472,6 +488,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       }
       case "DETECTION_FOUND": {
         const det = toDetection(evt.data);
+        reportArrivedRef.current = false;  // new detection → new report cycle
         setCurrentDetection(det);
         updateCurrentSession((sess) => ({ ...sess, detections: [det, ...sess.detections] }));
         break;
@@ -482,6 +499,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
         break;
       case "LLM_DONE": {
         explainInFlightRef.current = false;
+        reportArrivedRef.current = true;
         setIsListeningVoice(false);
         setPipelineState("PAUSED_WAITING_INPUT");
         const insight = llmInsightRef.current;
@@ -499,6 +517,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
         // The card prefers `lesionReport`; falls back to `llmInsight` when
         // only the legacy field exists.
         explainInFlightRef.current = false;
+        reportArrivedRef.current = true;
         setIsListeningVoice(false);
         setPipelineState("PAUSED_WAITING_INPUT");
         const report = evt.data.report;
@@ -1033,6 +1052,26 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
     );
   }, [currentSessionId]);
 
+  const clearSessionQA = useCallback((sessionId?: string) => {
+    const targetId = sessionId ?? currentSessionId;
+    if (!targetId) return;
+    // Abort any in-flight request and unlock the input.
+    qaAbortRef.current.get(targetId)?.abort();
+    qaAbortRef.current.delete(targetId);
+    // Optimistically wipe local chat history (keeps detections + summary).
+    setSessions((prev) =>
+      prev.map((s) =>
+        s.id === targetId
+          ? { ...s, qaMessages: [], qaStreaming: false, qaCancelled: true }
+          : s,
+      ),
+    );
+    // Wipe server-side history (best-effort — local reset already happened).
+    const sess = sessions.find((s) => s.id === targetId);
+    const vid = sess?.videoId ?? targetId;
+    fetch(`${API_BASE}/session/${vid}/qa`, { method: "DELETE" }).catch(() => {});
+  }, [sessions, currentSessionId]);
+
   const setIsPlaying = useCallback((v: boolean) => {
     if (!v) {
       clearMockTimers();
@@ -1157,6 +1196,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       removeCapture,
       sendSessionQA,
       stopSessionQA,
+      clearSessionQA,
       lastError,
       dismissError: () => setLastError(null),
       setIsPlaying,
@@ -1178,7 +1218,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       addConfirmedTrack, addMutedTrack,
       recheckResult, isRecheckModalOpen, openRecheckModal, closeRecheckModal,
       removeCapture,
-      sendSessionQA, stopSessionQA, lastError, setIsPlaying,
+      sendSessionQA, stopSessionQA, clearSessionQA, lastError, setIsPlaying,
       addDetection, removeDetection, resetAnalysis, finalizeSession, saveLiveSession, removeSession, clearSessions,
     ],
   );

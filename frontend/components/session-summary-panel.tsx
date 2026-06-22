@@ -32,13 +32,15 @@ export interface SessionSummaryPanelProps {
   onSendQA: (text: string) => void;
   /** Stop the in-flight Q&A answer (unlocks the chat input). */
   onStopQA?: () => void;
+  /** Reset the Q&A conversation (wipe chat history, keep detections + summary). */
+  onClearQA?: () => void;
   onClose: () => void;
   /** Optional: session id used by OverviewTab to fetch patient context. */
   sessionId?: string;
 }
 
 export function SessionSummaryPanel({
-  summary, qaMessages, qaStreaming, onSendQA, onStopQA, onClose, sessionId,
+  summary, qaMessages, qaStreaming, onSendQA, onStopQA, onClearQA, onClose, sessionId,
 }: SessionSummaryPanelProps) {
   const [tab, setTab] = useState<'overview' | 'detail' | 'chat'>('overview');
 
@@ -83,7 +85,7 @@ export function SessionSummaryPanel({
       </Tabs>
 
       {/* Body */}
-      <Box sx={{ flex: 1, overflowY: 'auto', px: 2, py: 2 }}>
+      <Box sx={{ flex: 1, minHeight: 0, overflowY: tab === 'chat' ? 'hidden' : 'auto', px: 2, py: 2 }}>
         {!summary ? (
           <SummarySkeleton />
         ) : tab === 'overview' ? (
@@ -91,7 +93,7 @@ export function SessionSummaryPanel({
         ) : tab === 'detail' ? (
           <DetailTab summary={summary} />
         ) : (
-          <ChatTab messages={qaMessages} streaming={qaStreaming} onSend={onSendQA} onStop={onStopQA} />
+          <ChatTab messages={qaMessages} streaming={qaStreaming} onSend={onSendQA} onStop={onStopQA} onClear={onClearQA} sessionId={sessionId} />
         )}
       </Box>
 

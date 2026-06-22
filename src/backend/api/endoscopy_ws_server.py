@@ -75,7 +75,7 @@ from db import (                                                       # noqa: E
     clear_false_positives, clear_confirmed_lesions, memory_counts,
     list_all_sessions, delete_session,
     save_session_summary, get_session_summary,
-    append_qa_message, get_qa_history,
+    append_qa_message, get_qa_history, clear_qa_history,
     save_patient_context, get_patient_context,
 )
 from patient_context import PatientContext, format_patient_context  # noqa: E402
@@ -490,7 +490,7 @@ async def _warm_vlm() -> None:
 # output, e.g. "nốt淋巴oid" instead of "nốt lymphoid" (淋巴 = "lymph"). Vietnamese
 # uses only Latin script, so any CJK ideograph in LLM output is a defect. We strip
 # it as a hard safety net regardless of backend, prompt wording, or temperature.
-_CJK_RE = re.compile(r'[㐀-䶿一-鿿豈-﫿＀-￯]+')
+_CJK_RE = re.compile(r'[\u3000-\u303f㐀-䶿一-鿿豈-﫿＀-￯]+')
 
 
 def _strip_cjk(text: str) -> str:
@@ -498,8 +498,8 @@ def _strip_cjk(text: str) -> str:
     if not text or not isinstance(text, str) or not _CJK_RE.search(text):
         return text
     cleaned = _CJK_RE.sub('', text)
-    cleaned = re.sub(r'\s{2,}', ' ', cleaned)          # collapse doubled spaces
-    cleaned = re.sub(r'\s+([,.;:)\]])', r'\1', cleaned)  # drop space before punctuation
+    cleaned = re.sub(r'[ \t]{2,}', ' ', cleaned)         # collapse doubled spaces (keep newlines)
+    cleaned = re.sub(r'[ \t]+([,.;:)\]])', r'\1', cleaned)  # drop space before punctuation
     return cleaned.strip()
 
 
@@ -522,10 +522,144 @@ def _fix_frame_placeholder(text: str, summary: dict | None, reports: list[dict])
     return re.sub(r"[Ff]rame N\b", "tổn thương", text)
 
 
-def _qa_sources_footer(chunks: list[dict]) -> str:
+_QA_REFUSAL_MARKERS = (
+    "chỉ hỗ trợ các câu hỏi y tế", "ngoài phạm vi", "không có khả năng",
+    "không thể hỗ trợ", "tôi chỉ hỗ trợ",
+)
+
+# Canned redirect for off-topic questions — returned WITHOUT generating an answer.
+_QA_CANNED_REDIRECT = "Xin lỗi, tôi chỉ hỗ trợ các câu hỏi y tế và phiên nội soi này."
+
+# A binary yes/no classification is far more reliable than asking the chat model to
+# refuse mid-answer (which Qwen ignores, sometimes replying in Chinese). One cheap
+# call decides scope before we spend tokens on the real answer.
+_QA_SCOPE_CLASSIFIER_PROMPT = (
+    "You are a strict topic classifier for a gastrointestinal endoscopy assistant.\n"
+    "Decide whether the user's message relates to ANY of: medicine, health, the human "
+    "body, digestion, gastrointestinal endoscopy, diet, symptoms, diseases, medical "
+    "tests/treatment, or the patient's endoscopy session.\n"
+    "Reply with ONE word only — 'yes' or 'no':\n"
+    "  yes = medical / health / body / digestion / endoscopy / this session. This ALSO "
+    "includes any message that mentions a 'frame' number, a lesion/detection, or refers "
+    "to the current session/result (e.g. 'frame 904 thế nào', 'xem tổn thương này', "
+    "'giải thích chi tiết hơn').\n"
+    "  no  = greeting, small-talk, weather, news, sports, politics, programming, math, "
+    "or any other non-medical topic.\n"
+    "Message: {msg}\nAnswer:"
+)
+
+
+async def _qa_in_scope(client, user_text: str) -> bool:
+    """Quick yes/no gate: is the question medical / session-related? Errs toward
+    IN-SCOPE on any error or ambiguous reply, so a flaky classifier never blocks a
+    valid clinical question — only a clear 'no' redirects."""
+    try:
+        resp = await asyncio.wait_for(
+            client.chat.completions.create(
+                model=_qa_model_name(),
+                messages=[{"role": "user",
+                           "content": _QA_SCOPE_CLASSIFIER_PROMPT.format(msg=user_text[:500])}],
+                max_tokens=4,
+                temperature=0,
+                extra_body={"options": {"num_ctx": 1024}},
+            ),
+            timeout=15,
+        )
+        verdict = (resp.choices[0].message.content or "").strip().lower()
+        return not (verdict.startswith("no") or verdict.startswith("không"))
+    except Exception as exc:  # noqa: BLE001 — never block chat on classifier failure
+        logger.warning("Q&A scope classifier failed, defaulting to in-scope: {}", exc)
+        return True
+
+
+# Vietnamese-specific letters — a Vietnamese sentence almost always carries at least
+# one. A 6+ word prose line with NONE of these is an English sentence the chat model
+# (Qwen drifts to English) slipped in, so we drop it to keep the answer Vietnamese.
+_VN_DIACRITICS = set("ăâđêôơưàảãáạằẳẵắặầẩẫấậèẻẽéẹềểễếệìỉĩíịòỏõóọồổỗốộờởỡớợùủũúụừửữứựỳỷỹýỵ")
+
+
+# Emoji (and the severity dots) the chat model sprinkles in — stripped entirely from
+# the clinician-facing Q&A answer.
+_EMOJI_RE = re.compile(
+    "[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF"
+    "\U00002B00-\U00002BFF\U00002190-\U000021FF\U0000FE00-\U0000FE0F\U0001F000-\U0001F0FF]"
+)
+
+
+def _is_english_fragment(s: str) -> bool:
+    """True for a clause/sentence that is English (>=4 words, no Vietnamese diacritic).
+    Vietnamese text almost always carries a diacritic, so this isolates the English
+    sentences the chat model (Qwen drifts to English) slips in mid-answer."""
+    s = s.strip().lstrip("#*-•> ").strip()
+    if len(s.split()) < 4:
+        return False
+    return not any(ch in _VN_DIACRITICS for ch in s.lower())
+
+
+def _fix_bold_markers(line: str) -> str:
+    """Keep only well-formed **bold** spans and strip every leftover '**'. The chat
+    model often drops a closing '**' (e.g. '**Loét ... tại **frame 904'), which then
+    renders as literal asterisks; stripping the unpaired markers yields clean text."""
+    spans: list[str] = []
+
+    def _stash(m: "re.Match") -> str:
+        spans.append(m.group(0))
+        return f"\x00{len(spans) - 1}\x00"
+
+    line = re.sub(r"\*\*(?=\S)(?:.+?)(?<=\S)\*\*", _stash, line)  # protect valid bold
+    line = line.replace("**", "")                                 # drop unpaired markers
+    for i, s in enumerate(spans):
+        line = line.replace(f"\x00{i}\x00", s)
+    return line
+
+
+# A list bullet whose content is empty or just stray punctuation — the residue left
+# after CJK stripping (e.g. '- 表面：。' → '- :' / '- '). Dropped wholesale.
+_EMPTY_BULLET_RE = re.compile(r"^\s*[-*•]\s*[:：.,;。、\s]*$")
+# A line that is nothing but stray punctuation (another CJK-strip residue).
+_PUNCT_ONLY_RE = re.compile(r"^\s*[:：.,;。、_*#-]+\s*$")
+
+
+def _sanitize_qa_markdown(text: str) -> str:
+    """Clean the chat model's Q&A output so no raw/garbage Markdown reaches the chat:
+    strip emoji, drop English sentences (even mid-line) and empty CJK-residue bullets,
+    move inline headings onto their own line, force every heading to '###', and repair
+    unpaired '**'."""
+    if not text:
+        return text
+    text = _EMOJI_RE.sub("", text)
+    # Break a heading that the model glued onto the end of a line ('...0-IIc ### Khuyến
+    # nghị') onto its own line so it renders as a heading instead of literal '###'.
+    text = re.sub(r"(\S)[ \t]+(#{1,6}[ \t]+\S)", r"\1\n\2", text)
+    out: list[str] = []
+    for line in text.split("\n"):
+        # Drop English sentences within the line (keep the Vietnamese ones).
+        sentences = re.split(r"(?<=[.!?])\s+", line)
+        line = " ".join(s for s in sentences if not _is_english_fragment(s)).rstrip()
+        if _EMPTY_BULLET_RE.match(line) or _PUNCT_ONLY_RE.match(line):  # drop CJK residue
+            continue
+        if re.match(r"^\s*#", line):                          # normalise '#'/'##'/'####' → '###'
+            line = re.sub(r"^(\s*)#{1,6}\s*", r"\1### ", line)
+        line = _fix_bold_markers(line)                         # repair malformed bold
+        out.append(line)
+    cleaned = "\n".join(out)
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()         # collapse blank gaps
+
+
+def _qa_sources_footer(chunks: list[dict], reply: str = "") -> str:
     """Compact 'Nguồn' footer built from the retrieved evidence labels. Appended to
     Q&A answers so the guideline grounding is ALWAYS visible — the chat model does
-    not reliably echo the [label] tags itself. Empty when no evidence was used."""
+    not reliably echo the [label] tags itself.
+
+    The footer is attached ONLY to a session-clinical answer — one that references a
+    frame of the current session. Off-topic redirects and general chit-chat never
+    mention a frame, so they correctly carry NO citations (robust against the many
+    redirect phrasings the model invents)."""
+    low = (reply or "").strip().lower()
+    if low.startswith("xin lỗi") or any(m in low for m in _QA_REFUSAL_MARKERS):
+        return ""
+    if not re.search(r"[Ff]rame\s*\d", reply or ""):
+        return ""
     labels: list[str] = []
     for ch in chunks or []:
         lbl = ch.get("citation_label")
@@ -1276,6 +1410,11 @@ async def post_session_qa(video_id: str, request: Request):
         append_qa_message(video_id, "assistant", fallback, int(time.time() * 1000))
         return {"reply": fallback, "history": get_qa_history(video_id)}
 
+    # Off-topic gate — refuse non-medical questions before spending tokens on an answer.
+    if not await _qa_in_scope(client, user_text):
+        append_qa_message(video_id, "assistant", _QA_CANNED_REDIRECT, int(time.time() * 1000))
+        return {"reply": _QA_CANNED_REDIRECT, "history": get_qa_history(video_id)}
+
     summary_row = get_session_summary(video_id)
     summary = summary_row["summary"] if summary_row else None
     reports = get_lesion_reports_for_session(video_id)
@@ -1318,7 +1457,8 @@ async def post_session_qa(video_id: str, request: Request):
         )
         reply = _strip_cjk(completion.choices[0].message.content or "")
         reply = _fix_frame_placeholder(reply, summary, reports)
-        reply += _qa_sources_footer(_qa_chunks)
+        reply = _sanitize_qa_markdown(reply)
+        reply += _qa_sources_footer(_qa_chunks, reply)
         logger.info("Session Q&A (HTTP): latency={:.2f}s chars={}",
                     time.monotonic() - t0, len(reply))
     except Exception as exc:
@@ -1335,6 +1475,34 @@ async def post_session_qa(video_id: str, request: Request):
 async def get_session_qa(video_id: str):
     """Load existing Q&A history for a session (used when opening /report)."""
     return {"history": get_qa_history(video_id)}
+
+
+@app.get("/session/{video_id}/frames")
+async def get_session_frames(video_id: str):
+    """Frame thumbnails keyed by frame_index — backs the chat 'frame N' click-to-view.
+    Each thumbnail already has the lesion box drawn (saved during Phase A). Only frames
+    that actually have a stored image are returned, so the FE links only real frames."""
+    reports = get_lesion_reports_for_session(video_id)
+    frames = [
+        {
+            "frame_index": r["frame_index"],
+            "label": r.get("label"),
+            "severity": r.get("severity"),
+            "primary_dx": (r.get("report") or {}).get("conclusion", {}).get("primary_dx"),
+            "frame_b64": r.get("frame_b64"),
+        }
+        for r in reports if r.get("frame_b64")
+    ]
+    return {"frames": frames}
+
+
+@app.delete("/session/{video_id}/qa")
+async def delete_session_qa(video_id: str):
+    """Reset the Q&A conversation for a session — wipes chat history only, keeping
+    detections and the session summary. Lets the user start a fresh chat without
+    deleting the whole session."""
+    deleted = clear_qa_history(video_id)
+    return {"deleted": deleted, "history": []}
 
 
 @app.get("/session/{video_id}/summary")
@@ -2374,6 +2542,13 @@ async def _stream_session_qa(websocket: WebSocket, user_text: str,
         await _send({"event": "SESSION_QA_DONE", "data": {}})
         return
 
+    # Off-topic gate — refuse non-medical questions before generating an answer.
+    if not await _qa_in_scope(client, user_text):
+        append_qa_message(video_id, "assistant", _QA_CANNED_REDIRECT, int(time.time() * 1000))
+        await _send({"event": "SESSION_QA_CHUNK", "data": {"chunk": _QA_CANNED_REDIRECT}})
+        await _send({"event": "SESSION_QA_DONE", "data": {}})
+        return
+
     summary_row = get_session_summary(video_id)
     summary = summary_row["summary"] if summary_row else None
     reports = get_lesion_reports_for_session(video_id)
@@ -2435,7 +2610,8 @@ async def _stream_session_qa(websocket: WebSocket, user_text: str,
 
         latency = time.monotonic() - t0
         full_response = _fix_frame_placeholder(full_response, summary, reports)
-        _footer = _qa_sources_footer(_qa_chunks)
+        full_response = _sanitize_qa_markdown(full_response)
+        _footer = _qa_sources_footer(_qa_chunks, full_response)
         if _footer:
             full_response += _footer
             await _send({"event": "SESSION_QA_CHUNK", "data": {"chunk": _footer}})

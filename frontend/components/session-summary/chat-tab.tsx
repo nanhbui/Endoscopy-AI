@@ -9,16 +9,29 @@
  *   needed beyond the UI polish here.
  */
 
-import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react';
 import Box from '@mui/material/Box';
+import Button from '@mui/material/Button';
 import Chip from '@mui/material/Chip';
 import IconButton from '@mui/material/IconButton';
+import Popover from '@mui/material/Popover';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
-import { MessageSquare, Send, Square } from 'lucide-react';
+import { MessageSquare, RotateCcw, Send, Square } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { QaMessage } from '@/context/AnalysisContext';
+import { API_BASE } from '@/lib/ws-client';
+
+/** Frame thumbnail (already has the lesion box drawn) keyed by frame_index —
+ *  fetched once so chat "frame N" mentions become click-to-view links. */
+interface FrameInfo {
+  frame_index: number;
+  label?: string;
+  severity?: string;
+  primary_dx?: string;
+  frame_b64?: string;
+}
 
 const EXAMPLE_QUESTIONS = [
   'Tổn thương nào nguy hiểm nhất?',
@@ -33,11 +46,51 @@ interface ChatTabProps {
   onSend: (text: string) => void;
   /** Stop the in-flight answer so the input unlocks (like other chatbots). */
   onStop?: () => void;
+  /** Reset the conversation (wipe history). Shown only when there are messages. */
+  onClear?: () => void;
+  /** Session id — used to fetch frame thumbnails for the "frame N" click-to-view. */
+  sessionId?: string;
 }
 
-export function ChatTab({ messages, streaming, onSend, onStop }: ChatTabProps) {
+export function ChatTab({ messages, streaming, onSend, onStop, onClear, sessionId }: ChatTabProps) {
   const [draft, setDraft] = useState('');
   const listRef = useRef<HTMLDivElement>(null);
+
+  // Frame thumbnails keyed by frame_index — fetched once per session so "frame N"
+  // mentions in answers become clickable previews. Empty until loaded / on error.
+  const [frames, setFrames] = useState<Map<number, FrameInfo>>(new Map());
+  const [frameAnchor, setFrameAnchor] = useState<HTMLElement | null>(null);
+  const [activeFrame, setActiveFrame] = useState<FrameInfo | null>(null);
+
+  useEffect(() => {
+    if (!sessionId || messages.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/session/${sessionId}/frames`);
+        if (!res.ok) return;
+        const data = await res.json() as { frames: FrameInfo[] };
+        if (cancelled) return;
+        setFrames(new Map(data.frames.map((f) => [f.frame_index, f])));
+      } catch { /* no links if fetch fails — graceful */ }
+    })();
+    return () => { cancelled = true; };
+  }, [sessionId, messages.length]);
+
+  const openFrame = (el: HTMLElement, n: number) => {
+    const info = frames.get(n);
+    if (!info) return;
+    setActiveFrame(info);
+    setFrameAnchor(el);
+  };
+
+  // Turn "frame N" / "Frame N" into a markdown link ONLY when that frame has a
+  // thumbnail; the custom `a` renderer below makes it a click-to-view chip.
+  const linkifyFrames = (text: string): string =>
+    frames.size === 0
+      ? text
+      : text.replace(/\b([Ff]rame)\s+(\d+)\b/g, (m, word, num) =>
+          frames.has(Number(num)) ? `[${word} ${num}](#frame-${num})` : m);
 
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: 'smooth' });
@@ -56,6 +109,25 @@ export function ChatTab({ messages, streaming, onSend, onStop }: ChatTabProps) {
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 360 }}>
+      {/* Reset conversation — wipes chat history only (keeps detections + summary). */}
+      {messages.length > 0 && onClear && (
+        <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 0.5, flexShrink: 0 }}>
+          <Button
+            size="small"
+            startIcon={<RotateCcw size={13} />}
+            onClick={() => {
+              if (window.confirm('Xoá toàn bộ hội thoại và bắt đầu lại?')) onClear();
+            }}
+            sx={{
+              fontSize: '0.72rem', textTransform: 'none', color: 'text.secondary',
+              borderRadius: '8px', py: 0.25, px: 1, minWidth: 0,
+              '&:hover': { backgroundColor: 'rgba(0,96,100,0.06)', color: '#006064' },
+            }}
+          >
+            Hỏi lại từ đầu
+          </Button>
+        </Box>
+      )}
       <Box ref={listRef} sx={{
         flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 1,
         pr: 0.5, py: 0.5,
@@ -121,7 +193,35 @@ export function ChatTab({ messages, streaming, onSend, onStop }: ChatTabProps) {
                 '& th':       { backgroundColor: 'rgba(0,96,100,0.05)', fontWeight: 700 },
               }),
             }}>
-              {isUser ? m.content : <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>}
+              {isUser ? m.content : (
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  components={{
+                    a: ({ href, children }) => {
+                      const fm = href?.match(/^#frame-(\d+)$/);
+                      if (!fm) return <a href={href} target="_blank" rel="noreferrer">{children}</a>;
+                      const n = Number(fm[1]);
+                      return (
+                        <Box
+                          component="span"
+                          role="button"
+                          tabIndex={0}
+                          onClick={(e: MouseEvent<HTMLElement>) => openFrame(e.currentTarget, n)}
+                          sx={{
+                            cursor: 'pointer', fontWeight: 700, color: '#00695C',
+                            borderBottom: '1px dashed #00897B', whiteSpace: 'nowrap',
+                            '&:hover': { color: '#006064', backgroundColor: 'rgba(0,137,123,0.08)' },
+                          }}
+                        >
+                          {children}
+                        </Box>
+                      );
+                    },
+                  }}
+                >
+                  {linkifyFrames(m.content)}
+                </ReactMarkdown>
+              )}
               {isStreamingThis && (
                 <Box component="span" sx={{
                   display: 'inline-block', width: 6, height: 14, ml: 0.5,
@@ -189,6 +289,43 @@ export function ChatTab({ messages, streaming, onSend, onStop }: ChatTabProps) {
           {streaming ? <Square size={14} fill="#fff" /> : <Send size={16} />}
         </IconButton>
       </Box>
+
+      {/* Frame preview popover — click a "frame N" mention to see its thumbnail. */}
+      <Popover
+        open={Boolean(frameAnchor && activeFrame)}
+        anchorEl={frameAnchor}
+        onClose={() => { setFrameAnchor(null); setActiveFrame(null); }}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+        transformOrigin={{ vertical: 'top', horizontal: 'center' }}
+        slotProps={{ paper: { sx: { borderRadius: '12px', overflow: 'hidden', maxWidth: 320 } } }}
+      >
+        {activeFrame && (
+          <Box sx={{ width: 300 }}>
+            {activeFrame.frame_b64 ? (
+              <img
+                src={`data:image/jpeg;base64,${activeFrame.frame_b64}`}
+                alt={`Frame ${activeFrame.frame_index}`}
+                style={{ display: 'block', width: '100%', height: 'auto' }}
+              />
+            ) : (
+              <Box sx={{ p: 2, textAlign: 'center', color: 'text.disabled', fontSize: '0.8rem' }}>
+                Không có ảnh cho frame này
+              </Box>
+            )}
+            <Box sx={{ px: 1.5, py: 1 }}>
+              <Typography sx={{ fontSize: '0.8rem', fontWeight: 700, color: 'text.primary' }}>
+                Frame {activeFrame.frame_index}
+                {activeFrame.primary_dx ? ` — ${activeFrame.primary_dx}` : ''}
+              </Typography>
+              {activeFrame.severity && (
+                <Typography sx={{ fontSize: '0.72rem', color: 'text.secondary', mt: 0.25 }}>
+                  Mức độ: <strong>{activeFrame.severity}</strong>
+                </Typography>
+              )}
+            </Box>
+          </Box>
+        )}
+      </Popover>
     </Box>
   );
 }

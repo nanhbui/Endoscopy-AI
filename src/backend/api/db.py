@@ -670,6 +670,20 @@ def append_qa_message(session_id: str, role: str, content: str,
         return -1
 
 
+def clear_qa_history(session_id: str) -> int:
+    """Delete all chat messages for a session (reset the Q&A conversation) while
+    keeping the session's detections and summary. Returns rows deleted, or -1 on error."""
+    try:
+        with _connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM qa_messages WHERE session_id = ?", (session_id,)
+            )
+        return cur.rowcount
+    except sqlite3.Error as e:
+        logger.error("clear_qa_history failed: {}", e)
+        return -1
+
+
 def get_qa_history(session_id: str) -> list[dict]:
     """Fetch full chat history for a session, ordered by sequence."""
     try:
