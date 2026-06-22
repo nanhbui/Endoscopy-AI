@@ -1,52 +1,47 @@
-# CV pipeline
+# ── CV pipeline ───────────────────────────────────────────────────────────────
 opencv-python>=4.8.0
 ultralytics>=8.0.0
 torch>=2.0.0
 torchvision>=0.15.0
 numpy>=1.24.0
 
-# Multi-object tracker (StrongSORT via boxmot) — emits stable per-lesion
-# track_id consumed by FE "Xác nhận luôn" / "Bỏ qua" UX. Without this the
-# worker falls back to no tracker and track_id stays 0 for every detection.
+# ── Multi-object tracker (boxmot) ────────────────────────────────────────────
+# Default tracker = StrongSORT + OSNet (ReID); UTR-Track / XYSR selectable via
+# ENDOSCOPY_TRACKER. Emits the stable per-lesion track_id used by the FE
+# "Xác nhận luôn" / "Bỏ qua" UX. Without it track_id stays 0 for every detection.
 boxmot>=10.0.0
 
-# Voice recognition — faster-whisper (nhẹ hơn openai-whisper, không cần torch)
+# ── Voice (server-side STT) ──────────────────────────────────────────────────
+# The browser Web Speech API (vi-VN) is the primary on-device channel; faster-whisper
+# is the higher-quality server fallback. (No torch dep — uses CTranslate2.)
 faster-whisper>=1.0.0
 
-# LLM & Embeddings
+# ── LLM / VLM client ─────────────────────────────────────────────────────────
+# Single OpenAI-compatible client routed by LLM_BACKEND: local Ollama by default
+# (medgemma-4b → vision lesion report + session summary; qwen2.5:7b-instruct → Q&A),
+# or OpenAI SaaS (gpt-4o / gpt-4o-mini) as a legacy fallback.
 openai>=1.0.0
-tiktoken>=0.5.0
-# KB RAG (Phase 2) embeddings are served by Ollama (/api/embeddings, bge-m3) via
-# httpx — see embeddings.py. sentence-transformers was dropped: its transformers
-# dep pins regex>=2025 which conflicts with boxmot's regex<2025 in one process.
 
-# LangChain / LangGraph — RAG workflow
-langchain>=0.1.0
-langchain-openai>=0.0.2
-langchain-community>=0.0.10
-langchain-core>=0.1.0
-langgraph>=0.0.26
-langsmith>=0.1.0
+# ── RAG embeddings ───────────────────────────────────────────────────────────
+# bge-m3 served by Ollama (/api/embeddings) over httpx (see embeddings.py). Retrieval
+# is brute-force cosine over a few SQLite-stored vectors — no vector DB / LangChain.
+httpx>=0.27.0
 
-# Vector DB (RAG + negative pattern store)
-chromadb>=0.4.0
-faiss-cpu>=1.7.4  # dùng cho Negative Pattern DB (Idea 1)
-
-# Database
-pymongo>=4.0.0
-
-# API server
+# ── API server ───────────────────────────────────────────────────────────────
 fastapi>=0.100.0
 uvicorn[standard]>=0.23.0
 pydantic>=2.0.0
-pydantic-settings>=2.0.0
 
-# Logging
+# Storage = SQLite via the stdlib sqlite3 — no external DB driver required.
+
+# ── Logging & utilities ──────────────────────────────────────────────────────
 loguru>=0.7.0
-
-# Utilities
 python-dotenv>=1.0.0
 python-multipart>=0.0.9
-requests>=2.31.0
 tqdm>=4.66.0
 psutil>=5.9.0
+
+# ── System packages (install via apt, NOT pip) ───────────────────────────────
+# GStreamer 1.0 + python3-gi (PyGObject)  → video pipeline
+# graphviz (the `dot` CLI)                → /pipeline/graph SVG render
+# ffmpeg / ffprobe                        → codec probe + low-bitrate proxy

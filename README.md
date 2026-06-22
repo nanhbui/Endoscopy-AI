@@ -19,7 +19,7 @@
 
 <br/>
 
-<sub>YOLOv8 lesion detection · faster-whisper STT · GPT-4o / Qwen2.5-VL · GStreamer pipeline · WebSocket realtime</sub>
+<sub>YOLOv8 lesion detection · Web Speech API + faster-whisper STT · MedGemma + Qwen2.5 (Ollama) · RAG-grounded reports · GStreamer pipeline · WebSocket realtime</sub>
 
 <br/>
 
@@ -82,10 +82,10 @@
 
 ```mermaid
 flowchart TD
-    A([Video stream]) --> B[YOLO inference<br/>mỗi frame thứ 3]
+    A([Video stream]) --> B[YOLO inference<br/>mỗi frame thứ 2]
     B --> C{Frame quality<br/>filter}
     C -- low quality --> A
-    C -- pass --> D[Smart Ignore<br/>IoU + FAISS dedup]
+    C -- pass --> D[Spatial-temporal dedup<br/>StrongSORT + IoU cooldown]
     D --> E{Confidence<br/>≥ 0.50?}
     E -- no --> A
     E -- yes --> F[PAUSE pipeline<br/>push DETECTION_FOUND]
@@ -129,9 +129,9 @@ flowchart TB
         BE1[Session registry<br/>+ upload + RTSP/V4L2]
         BE2[Video library<br/>reuse uploaded videos]
         BE3[LLM client factory<br/>OpenAI ⇄ Ollama]
-        BE4[Whisper STT<br/>+ Intent classifier]
-        BE5[PDF export<br/>+ Analytics]
-        BE6[(SQLite<br/>sessions · reports · Q&A)]
+        BE4[Web Speech API / faster-whisper STT<br/>+ Intent classifier]
+        BE5[PDF export (browser print)<br/>+ Analytics]
+        BE6[(SQLite<br/>lesion_reports · summaries · Q&A · kb_chunks)]
     end
 
     subgraph PIPE["GStreamer Subprocess · isolated GIL + CUDA"]
@@ -140,7 +140,7 @@ flowchart TB
         P2[avdec_h264 → videoconvert]
         P3[appsink → YOLO inference]
         P4[Frame Quality Filter]
-        P5[Smart Ignore<br/>FAISS + IoU dedup]
+        P5[StrongSORT ReID tracker<br/>spatial-temporal IoU dedup]
         P6([Detection events])
         P1 --> P2 --> P3 --> P4 --> P5 --> P6
     end
@@ -160,14 +160,17 @@ flowchart TB
 
 ### Lưu trữ (SQLite)
 
+> Sessions là **virtual** (aggregated by `session_id`) — không có bảng vật lý. Video library là **JSON index file**, không phải bảng DB.
+
 | Bảng | Mục đích |
 |---|---|
-| `sessions` | metadata mỗi session (id, source, started_at, ended_at, status) |
 | `lesion_reports` | detection events đã được bác sĩ xác nhận hoặc auto-saved |
-| `false_positives` | events bị `BO_QUA` — dùng cho analytics + retraining |
 | `session_summaries` | tổng kết tự sinh sau khi video kết thúc |
 | `qa_messages` | lịch sử chatbot Q&A theo session |
-| `video_library` | đăng ký các video đã upload để tái sử dụng |
+| `patient_context` | thông tin bệnh nhân (PHI tuỳ chọn) mỗi session |
+| `false_positives` | events bị `BO_QUA` — dùng cho analytics + retraining |
+| `confirmed_lesions` | bộ nhớ cross-session "confirm-always" — auto-capture khi track tái xuất hiện |
+| `kb_chunks` | corpus guideline RAG (Paris / Sydney / Kyoto / ESGE / biopsy) — bge-m3 embeddings |
 
 ---
 
@@ -178,14 +181,15 @@ flowchart TB
 <td width="50%" valign="top">
 
 ### Detection Pipeline
-- **Real-time YOLO** — inference mỗi 3rd frame, conf ≥ 0.50
+- **Real-time YOLO** — inference mỗi 2nd frame, conf ≥ 0.50 (cancer 0.75, viêm/loét 0.60)
 - **Frame quality filter** — bỏ qua frame chèn ống, frame tối, bảng thông tin
-- **Smart Ignore** — FAISS + IoU dedup, không re-flag cùng lesion
+- **StrongSORT + OSNet ReID** — tracker qua boxmot, spatial-temporal IoU dedup, không re-flag cùng lesion
+- **Browser-capture live mode** — HDMI dongle qua getUserMedia → JPEG frames → `/ws/live-detect/{id}` ~5fps
 - **Pipeline introspection** — `/pipeline/metrics` + `/pipeline/graph`
 - **Live stream** — RTSP / V4L2 ngoài file upload
 
 ### Voice & Interaction
-- **Hands-free** — MediaRecorder → Whisper GPU (Vietnamese)
+- **Hands-free** — Web Speech API vi-VN (on-device, primary) + faster-whisper server-side (fallback)
 - **4 intents** — `BO_QUA` / `GIAI_THICH` / `XAC_NHAN` / `KIEM_TRA_LAI`
 - **3 detection actions** — quick-confirm / recheck / report-FP
 - **Touch + voice parity** — một chạm hoặc một câu nói
@@ -194,17 +198,18 @@ flowchart TB
 <td width="50%" valign="top">
 
 ### LLM & Reporting
-- **Streaming Vision-LLM** — GPT-4o ⇄ Qwen2.5-VL, từng token
+- **Streaming Vision-LLM** — MedGemma-4b (vision, per-lesion report + session summary), từng token
+- **RAG-grounded reports** — bge-m3 embeddings, 5 guideline chunks (Paris/Sydney/Kyoto/ESGE/biopsy) từ SQLite `kb_chunks`, cosine retrieval, evidence trích dẫn tự động
 - **Paris classification + checklist** — định dạng lâm sàng chuẩn
 - **Session summary** — auto sau khi video kết thúc
-- **Q&A chatbot** — hỏi đáp ngữ cảnh session
-- **Export PDF** — báo cáo lâm sàng đầy đủ
+- **Q&A chatbot** — Qwen2.5:7b-instruct, hỏi đáp ngữ cảnh session
+- **Export PDF** — browser print (`window.print()`) báo cáo lâm sàng đầy đủ
 
 ### Operations
 - **Analytics dashboard** — KPIs + charts + FP review
 - **AI Health Badge** — poll 30s, 4 màu pill
 - **Video library** — reuse video không cần upload lại
-- **OpenAI ⇄ Ollama** — switch backend qua env var
+- **Ollama primary / OpenAI fallback** — switch backend qua env var `LLM_BACKEND`
 - **Mobile responsive** — 3 breakpoints, NavBar collapse
 - **Vietnamese-first** — Inter Vietnamese subset
 
@@ -327,11 +332,15 @@ DATN_ver0/
 | API server | FastAPI + uvicorn (asyncio, uvloop) |
 | Video pipeline | GStreamer 1.0 — `gst-plugins-good`, `gst-plugins-bad`, `gst-libav` |
 | Object detection | YOLOv8 via ultralytics (`models/best_train6.pt` cho dạ dày) |
-| Speech-to-text | faster-whisper (CTranslate2, GPU, Vietnamese) |
-| LLM | **OpenAI GPT-4o / GPT-4o-mini** *hoặc* **Ollama qwen2.5vl:7b** (switchable) |
-| Vector index | FAISS (negative pattern dedup) |
-| Storage | SQLite + filesystem (uploads) |
-| PDF export | reportlab |
+| Speech-to-text | Web Speech API vi-VN (browser, primary) + faster-whisper (CTranslate2, GPU, fallback) |
+| LLM (vision) | **Ollama medgemma-4b** (primary) — per-lesion report + session summary |
+| LLM (chat) | **Ollama qwen2.5:7b-instruct** — Q&A chatbot |
+| LLM (embed) | **bge-m3** — RAG embeddings cho guideline retrieval |
+| LLM (fallback) | OpenAI GPT-4o / GPT-4o-mini (optional, `LLM_BACKEND=openai`) |
+| Tracker | StrongSORT + OSNet ReID via boxmot (UTR-Track / XYSR selectable) |
+| RAG store | SQLite `kb_chunks` table — brute-force cosine retrieval |
+| Storage | SQLite + filesystem (uploads) + JSON video index |
+| PDF export | Browser print (`window.print()` trên print route) |
 | Logging | loguru |
 
 ### Frontend
@@ -363,7 +372,7 @@ DATN_ver0/
 - NVIDIA GPU, CUDA 11.8+ (YOLO + Whisper inference)
 - 16 GB RAM, 50 GB disk
 - nvidia-container-toolkit (cho Docker)
-- Nếu chạy Ollama local: ≥ 16 GB VRAM cho `qwen2.5vl:7b`
+- Nếu chạy Ollama local: ≥ 8 GB VRAM cho `medgemma-4b`; ≥ 8 GB thêm cho `qwen2.5:7b-instruct` + `bge-m3`
 
 ### OS đã test
 
@@ -398,7 +407,7 @@ cd frontend && npm install && cd ..
 # 3. Env config
 cp src/backend/api/.env.example src/backend/api/.env
 cp frontend/.env.local.example frontend/.env.local
-# Mở file .env, điền OPENAI_API_KEY hoặc set LLM_BACKEND=ollama
+# Mở file .env, set LLM_BACKEND=ollama (default) rồi pull models, hoặc LLM_BACKEND=openai + OPENAI_API_KEY
 
 # 4. Verify
 make env-check
@@ -464,11 +473,17 @@ npm run dev
 4. Khi có detection: video tự pause → action bar + mic active → bác sĩ phản hồi bằng giọng nói hoặc click.
 5. Hết video → session summary tự generate → chat Q&A available → export PDF.
 
-#### Mode 2 — Live stream
+#### Mode 2 — Live stream (RTSP / V4L2)
 
 1. Trong Workspace, toggle **"Trực tiếp"**.
 2. Nhập RTSP URL (`rtsp://camera.local:554/stream1`) hoặc V4L2 path (`/dev/video0`).
 3. Click **"Kết nối & Bắt đầu"** — pipeline kết nối stream, đẩy events qua WS y hệt file mode.
+
+#### Mode 4 — Browser-capture live (HDMI dongle)
+
+1. Kết nối đầu thu HDMI vào máy tính (scope output → capture card).
+2. Workspace dùng `getUserMedia` chọn thiết bị capture → gửi JPEG frames qua `/ws/live-detect/{id}` (~5 fps).
+3. YOLO inference ngay trong main process → kết quả trả về realtime; per-capture VLM explain qua `POST /live/explain`.
 
 #### Mode 3 — Reuse video từ library
 
@@ -483,17 +498,19 @@ npm run dev
 <summary><b>Backend — <code>src/backend/api/.env</code></b> (click để mở)</summary>
 
 ```env
-# ── LLM backend (chọn 1) ─────────────────────────────────────────────────────
-LLM_BACKEND=openai                      # "openai" | "ollama"
+# ── LLM backend (Ollama là primary, OpenAI là legacy fallback) ────────────────
+LLM_BACKEND=ollama                      # "ollama" (default) | "openai"
 
-# Nếu openai:
+# Ollama (primary):
+OLLAMA_BASE_URL=http://localhost:11434/v1
+OLLAMA_MODEL=medgemma-4b                # Vision model: per-lesion report + session summary
+QA_MODEL=qwen2.5:7b-instruct           # Text Q&A chatbot
+KB_EMBED_MODEL=bge-m3                  # RAG embeddings cho guideline retrieval
+
+# OpenAI (optional legacy fallback, chỉ dùng khi LLM_BACKEND=openai):
 OPENAI_API_KEY=sk-...
 OPENAI_MODEL_VISION=gpt-4o              # Vision role (detection insight)
-OPENAI_MODEL_FOLLOWUP=gpt-4o-mini       # Follow-up Q&A (rẻ hơn)
-
-# Nếu ollama:
-OLLAMA_BASE_URL=http://localhost:11434/v1
-OLLAMA_MODEL=qwen2.5vl:7b               # Vision + follow-up dùng chung model
+OPENAI_MODEL_FOLLOWUP=gpt-4o-mini       # Follow-up Q&A
 
 LLM_CALL_TIMEOUT_SEC=90
 
@@ -523,10 +540,11 @@ NEXT_PUBLIC_API_BASE=http://localhost:8001
 
 | Constant | Default | File | Mô tả |
 |---|---|---|---|
-| `CONFIDENCE_THRESHOLD` | `0.50` | `pipeline_controller.py` | YOLO conf tối thiểu để trigger detection |
+| `CONFIDENCE_THRESHOLD` | `0.50` (cancer: `0.75`, viêm/loét: `0.60`) | `pipeline_controller.py` | YOLO conf tối thiểu để trigger detection (per-class) |
 | `SKIP_INITIAL_FRAMES` | `90` | `pipeline_controller.py` | Bỏ qua N frame đầu (~3s @ 30fps) |
-| `FRAME_STEP` | `3` | `pipeline_controller.py` | Inference mỗi N frame |
-| `IOU_DEDUP_THRESHOLD` | `0.50` | `frame_skipper.py` | IoU ngưỡng coi là cùng lesion |
+| `FRAME_STEP` | `2` | `pipeline_controller.py` | Inference mỗi N frame |
+| `IOU_DEDUP_THRESHOLD` | `0.50` | `pipeline_controller.py` | IoU ngưỡng spatial-temporal dedup (focal lesions) |
+| `ENDOSCOPY_TRACKER` | `strongsort` | env | Tracker: `strongsort` / `utr` / `xysr` |
 | `POLL_INTERVAL_MS` | `30000` | `ai-health-badge.tsx` | Tần suất check `/health/ollama` |
 | `SLOW_LATENCY_MS` | `3000` | `ai-health-badge.tsx` | Ngưỡng cảnh báo AI chậm |
 
@@ -552,9 +570,22 @@ NEXT_PUBLIC_API_BASE=http://localhost:8001
 | `GET` | `/session/{video_id}/video` | Stream video file để playback |
 | `GET` | `/analytics/overview` | KPI counts + lesion distribution |
 | `GET` | `/analytics/false-positives` | List FP đã report (cho retraining) |
+| `DELETE` | `/analytics/false-positives/{id}` | Xoá FP record |
 | `GET` | `/pipeline/metrics` | Realtime metrics (FPS, queue depth, latency) |
 | `GET` | `/pipeline/graph` | GStreamer pipeline graph snapshot |
-| `POST` | `/voice/command` | Whisper STT + intent classification |
+| `POST` | `/voice/command` | STT + intent classification |
+| `POST` | `/voice/classify` | Intent-only classification (không cần audio, text input) |
+| `GET` | `/live/{id}/mjpeg` | MJPEG stream từ browser-capture session |
+| `POST` | `/live/explain` | Per-capture VLM explain (browser-capture mode) |
+| `POST` | `/live/sessions/{id}/finalize` | Kết thúc browser-capture session + sinh summary |
+| `GET` | `/sessions/{id}/patient-context` | Lấy thông tin bệnh nhân session |
+| `POST` | `/sessions/{id}/patient-context` | Lưu thông tin bệnh nhân session |
+| `DELETE` | `/sessions/{id}` | Xoá session + dữ liệu liên quan |
+| `GET` | `/config` | Lấy cấu hình runtime hiện tại |
+| `POST` | `/config` | Cập nhật cấu hình runtime |
+| `POST` | `/config/reset` | Reset cấu hình về default |
+| `GET` | `/system/status` | Trạng thái hệ thống (GPU, memory, tracker) |
+| `POST` | `/memory/reset` | Reset cross-session confirmed_lesions memory |
 
 ### WebSocket: `ws://localhost:8001/ws/analysis/{video_id}`
 
@@ -564,10 +595,16 @@ NEXT_PUBLIC_API_BASE=http://localhost:8001
 |---|---|---|
 | `STATE_CHANGE` | `{ state }` | Pipeline FSM state update |
 | `DETECTION_FOUND` | `{ frame_index, timestamp_ms, location, lesion, frame_b64, bbox, confidence }` | Tổn thương mới |
+| `CONFIRMED_CAPTURE` | `{ track_id, frame_b64, ... }` | Auto-capture khi track khớp confirmed_lesions |
 | `LLM_CHUNK` | `{ chunk }` | Token streaming từ Vision-LLM |
 | `LLM_DONE` | `{}` | LLM trả lời xong |
+| `LESION_REPORT_DONE` | `{ report_id, content }` | Per-lesion report MedGemma hoàn thành |
 | `LLM_ERROR` | `{ code, message }` | Lỗi LLM (model not found, timeout, ...) |
-| `SUMMARY_READY` | `{ summary }` | Session summary đã sinh xong |
+| `RECHECK_RESULT` | `{ detection_id, findings }` | Kết quả recheck inference |
+| `RECHECK_EMPTY` | `{ detection_id }` | Recheck không tìm thấy thêm |
+| `SESSION_SUMMARY_DONE` | `{ summary }` | Session summary đã sinh xong |
+| `SESSION_QA_CHUNK` | `{ chunk }` | Token streaming Q&A chatbot |
+| `SESSION_QA_DONE` | `{}` | Q&A chatbot trả lời xong |
 | `VIDEO_FINISHED` | `{ detections }` | EOS — tổng kết detections |
 | `ERROR` | `{ message }` | Pipeline error |
 
@@ -576,9 +613,13 @@ NEXT_PUBLIC_API_BASE=http://localhost:8001
 | Action | Payload | Hiệu ứng |
 |---|---|---|
 | `ACTION_IGNORE` | `{ detection_id }` | Đánh dấu FP, lưu vào `false_positives`, resume |
-| `ACTION_EXPLAIN` | `{ detection_id }` | Stream LLM insight cho detection |
+| `ACTION_EXPLAIN` | `{ detection_id }` | Stream Vision-LLM insight cho detection |
 | `ACTION_CONFIRM` | `{ detection_id }` | Lưu vào `lesion_reports`, resume |
+| `ACTION_CONFIRM_TRACK` | `{ track_id }` | Confirm-always: thêm vào `confirmed_lesions` cross-session memory |
+| `ACTION_MUTE_TRACK` | `{ track_id }` | Tắt notifications cho track trong session này |
 | `ACTION_RECHECK` | `{ detection_id }` | Re-run inference với context mở rộng |
+| `ACTION_REPORT_FALSE_POSITIVE` | `{ detection_id, reason }` | Report FP có kèm lý do |
+| `ACTION_SESSION_QA` | `{ question }` | Gửi câu hỏi Q&A chatbot (stream qua `SESSION_QA_CHUNK`) |
 | `ACTION_RESUME` | `{}` | Resume sau khi LLM xong |
 
 #### Pipeline FSM
@@ -603,7 +644,8 @@ Hệ thống có **2 channel** voice:
 
 | Channel | Cơ chế | Use case |
 |---|---|---|
-| **Web (primary)** | Browser MediaRecorder (WebM/OPUS) → `POST /voice/command` → faster-whisper GPU | Workflow chính qua web UI |
+| **Web Speech API (primary)** | Browser `SpeechRecognition` vi-VN — on-device, zero-latency | Workflow chính qua web UI, không cần server round-trip |
+| **faster-whisper (fallback)** | Browser MediaRecorder (WebM/OPUS) → `POST /voice/command` → faster-whisper GPU | Chất lượng cao hơn khi Web Speech không khả dụng |
 | **Desktop standalone** | PyAudio + WebRTC VAD → `WhisperListener` → `VoiceController` | Tích hợp trực tiếp không cần browser |
 
 ### Vietnamese intents
@@ -621,31 +663,40 @@ Hệ thống có **2 channel** voice:
 
 ## 12. LLM backend: OpenAI vs Ollama
 
-Hệ thống có **factory `_llm_model_name(role)`** để route đúng model theo backend, không hardcode tên model trong logic nghiệp vụ.
+**Ollama là primary backend** (deployed default). OpenAI là legacy fallback tuỳ chọn.
 
-```python
-# src/backend/api/endoscopy_ws_server.py
-def _llm_model_name(role: Literal["vision", "followup"]) -> str:
-    if LLM_BACKEND == "ollama":
-        return OLLAMA_MODEL
-    return LLM_MODEL_VISION if role == "vision" else LLM_MODEL_FOLLOWUP
-```
+Hệ thống dùng 3 models riêng biệt theo vai trò:
+
+| Model | Env var | Vai trò |
+|---|---|---|
+| `medgemma-4b` | `OLLAMA_MODEL` | Vision: per-lesion report + session summary (RAG-grounded) |
+| `qwen2.5:7b-instruct` | `QA_MODEL` | Text: Q&A chatbot theo ngữ cảnh session |
+| `bge-m3` | `KB_EMBED_MODEL` | Embeddings: RAG retrieval từ guideline corpus |
+
+### RAG grounding
+
+Báo cáo MedGemma được grounded bằng các đoạn guideline lâm sàng liên quan:
+- **5 nguồn**: Paris classification, Sydney protocol, Kyoto gastritis, ESGE guidelines, biopsy protocols
+- **Lưu trữ**: SQLite `kb_chunks` table với bge-m3 embeddings
+- **Retrieval**: brute-force cosine similarity, top-5 chunks inject vào system prompt
+- **Output**: báo cáo có trích dẫn evidence tự động
 
 | Backend | Pros | Cons |
 |---|---|---|
-| **OpenAI** (`gpt-4o` + `gpt-4o-mini`) | Chất lượng nhất, không cần GPU local, streaming ổn | Cần API key, tốn $$, gửi data ra ngoài |
-| **Ollama** (`qwen2.5vl:7b`) | Privacy 100%, không phí, offline được, vision capable | Cần ≥16GB VRAM, slow first-token, chất lượng hơi kém |
+| **Ollama** (`medgemma-4b` + `qwen2.5:7b-instruct`) | Privacy 100%, không phí, offline, RAG-grounded | Cần GPU local, slow first-token |
+| **OpenAI** (`gpt-4o` + `gpt-4o-mini`) | Chất lượng cao, không cần GPU local | Cần API key, tốn $$, gửi data ra ngoài |
 
 ### Switch backend
 
 ```bash
-# Sang Ollama
-echo "LLM_BACKEND=ollama" >> src/backend/api/.env
-ollama pull qwen2.5vl:7b
+# Ollama (default — đảm bảo đã pull models)
+ollama pull medgemma-4b
+ollama pull qwen2.5:7b-instruct
+ollama pull bge-m3
 ollama serve   # default port 11434
 
-# Quay lại OpenAI
-sed -i 's/LLM_BACKEND=ollama/LLM_BACKEND=openai/' src/backend/api/.env
+# Sang OpenAI (legacy fallback)
+echo "LLM_BACKEND=openai" >> src/backend/api/.env
 ```
 
 `AiHealthBadge` trên NavBar sẽ tự cập nhật trạng thái (3 màu: xanh / cam / đỏ) và hiển thị tên model + latency khi hover.
@@ -707,9 +758,9 @@ Quy trình:
 
 ### Datasets sử dụng
 
-- **HyperKvasir** — labeled images for GI lesion classification
-- **EndoCV 2024** — gastroscopy detection challenge data
-- **Internal clinical data** — labeled in-house (private)
+- **In-house clinical gastroscopy data** — labeled từ thực tế lâm sàng (primary training set, private)
+- **Public GI-endoscopy datasets** — dữ liệu công khai bổ sung cho training
+- **HyperKvasir** — labeled GI images, dùng cho VLM evaluation
 
 ### Pipeline preprocess + train
 
@@ -731,11 +782,11 @@ python scripts/train_llava_lora.py
 
 | Class ID | Label | Mô tả |
 |---|---|---|
-| 0 | `Polyp` | Polyp tiêu hoá |
-| 3 | `3_Viem_da_day_HP_am` | Viêm dạ dày HP âm |
-| 4 | `4_Viem_da_day_HP_duong` | Viêm dạ dày HP dương |
-| 5 | `5_Loet_da_day` | Loét dạ dày |
-| 6 | `6_Ung_thu_da_day` | Ung thư dạ dày |
+| 0 | `2_Viem_thuc_quan` | Viêm thực quản (esophagitis) |
+| 1 | `3_Viem_da_day_HP_am` | Viêm dạ dày HP âm (HP gastritis) |
+| 2 | `5_Ung_thu_thuc_quan` | Ung thư thực quản (esophageal cancer) |
+| 3 | `6_Ung_thu_da_day` | Ung thư dạ dày (gastric cancer) |
+| 4 | `7_Loet_HTT` | Loét hành tá tràng (duodenal ulcer) |
 
 Fallback: `models/yolov8n-seg.pt` (COCO pretrained) nếu model chính không tồn tại.
 
@@ -776,6 +827,19 @@ make remote-down       # docker compose down remote
 ```
 
 > Server GPU mặc định: `emie@10.8.0.7`, project dir: `~/DATN_ver0`. Override bằng env vars trên Makefile.
+
+### Public access (Tailscale Funnel)
+
+Truy cập công khai đi qua: **Tailscale Funnel → Caddy reverse proxy (:8080) → backend :8001 / frontend :3000**
+
+```
+Internet → Tailscale Funnel (server4.tail145f3.ts.net)
+         → Caddy :8080
+         → backend :8001  (API + WS)
+         → frontend :3000 (Next.js)
+```
+
+Data lưu tại `/mnt/disk2` trên server4.
 
 ---
 
@@ -828,11 +892,11 @@ cd frontend && npx tsc --noEmit
 - Server chưa restart sau khi pull code mới → `make be` lại
 - Endpoint nằm ở [`endoscopy_ws_server.py:457`](src/backend/api/endoscopy_ws_server.py#L457)
 
-### LLM error: `model 'gpt-4o-mini' not found`
+### LLM error: model not found
 
-- Đang chạy Ollama backend nhưng code vẫn dùng tên model OpenAI
+- Kiểm tra `LLM_BACKEND` trong `.env` — nếu `ollama`, đảm bảo đã `ollama pull medgemma-4b`, `ollama pull qwen2.5:7b-instruct`, `ollama pull bge-m3`
 - Check: `grep _llm_model_name src/backend/api/endoscopy_ws_server.py` — mọi call LLM phải qua factory này
-- Fix: PR đã commit `f6de603` ([details](src/backend/api/endoscopy_ws_server.py#L1548))
+- Nếu dùng OpenAI fallback (`LLM_BACKEND=openai`): kiểm tra `OPENAI_API_KEY` hợp lệ
 
 ### GStreamer `not-negotiated` error
 
@@ -841,7 +905,7 @@ cd frontend && npx tsc --noEmit
 
 ### CUDA out of memory
 
-- Whisper + YOLO + Ollama cùng GPU rất căng — giảm `WHISPER_MODEL=medium` hoặc move Ollama sang server khác
+- faster-whisper + YOLO + Ollama (medgemma-4b + qwen2.5:7b-instruct) cùng GPU rất căng — giảm `WHISPER_MODEL=medium`, tắt Web Speech fallback, hoặc move Ollama sang server khác
 - Set `CUDA_VISIBLE_DEVICES` riêng cho từng process
 
 ### Hydration warning `:first-child unsafe in SSR`
@@ -883,7 +947,7 @@ Mã nguồn phát hành cho mục đích **học thuật / nghiên cứu** (DATN
 
 ### Built for clinical workflow
 
-<sub>FastAPI · Next.js · YOLOv8 · faster-whisper · GStreamer · GPT-4o · Qwen2.5-VL</sub>
+<sub>FastAPI · Next.js · YOLOv8 · StrongSORT · faster-whisper · GStreamer · MedGemma · Qwen2.5 · bge-m3 (Ollama)</sub>
 
 <br/>
 
