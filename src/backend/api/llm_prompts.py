@@ -344,9 +344,14 @@ LABEL_CLINICAL_META = {
         "grading": "phân độ LA (Los Angeles A–D) cho viêm thực quản trào ngược",
     },
     "Viêm dạ dày HP": {
+        # HP status CANNOT be proven from the image — even real reports diagnose
+        # "viêm dạ dày" from the scope and confirm HP via a separate CLO/biopsy
+        # test. The detector only recognises the HP-suggestive visual PATTERN, so
+        # the diagnosis is phrased as a suspicion + a mandatory confirmatory test.
         "category": "inflammatory",
-        "canonical_dx": "Viêm dạ dày HP (Helicobacter pylori gastritis)",
+        "canonical_dx": "Viêm dạ dày, hình ảnh gợi ý nhiễm H. pylori (H. pylori-associated gastritis pattern)",
         "grading": "phân loại Kyoto / Sydney cập nhật cho viêm dạ dày HP",
+        "confirm_test": "Test HP (CLO test / sinh thiết) để xác nhận nhiễm H. pylori",
     },
     "Ung thư thực quản": {
         "category": "neoplastic",

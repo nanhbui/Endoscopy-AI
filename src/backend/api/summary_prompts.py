@@ -147,10 +147,17 @@ endoscopy_session_summary.
 ## OUTPUT LANGUAGE (CRITICAL — NEVER VIOLATE)
 Write the ENTIRE response in Vietnamese. Every medical term MUST be Vietnamese
 followed by the English term in parentheses:
-  ✅ "Viêm dạ dày HP (Helicobacter pylori gastritis) lan tỏa"
+  ✅ "Viêm dạ dày, hình ảnh gợi ý nhiễm H. pylori (H. pylori-associated gastritis pattern) lan tỏa"
   ✅ "Đa ổ Paris 0-IIa+IIc"
   ❌ "HP gastritis" (missing Vietnamese)
 NEVER answer in English prose.
+
+## HP STATUS IS IMAGE-SUGGESTIVE, NOT CONFIRMED
+H. pylori infection CANNOT be confirmed from the endoscopy image alone — it needs
+a CLO-test / biopsy. When a finding's primary_dx says the image is "gợi ý nhiễm
+H. pylori", keep that suspicion wording; do NOT upgrade it to a confirmed
+"Viêm dạ dày HP". The confirmatory HP test already appears in the per-detection
+recommendations — make sure it survives into the checklist (category "test").
 
 ## PRIORITY_FINDINGS RULES
 List the 3-5 most dangerous findings. Sort order:
@@ -164,7 +171,7 @@ Rationale: 1-2 sentences combining severity + paris_class + size + key features.
 ## PATTERNS RULES
 Write a pattern ONLY when ≥2 findings share the same characteristic. DO NOT
 fabricate patterns when each finding is distinct.
-  ✅ "Viêm HP lan tỏa toàn bộ niêm mạc thân + hang vị (5/5 finding có HP)"
+  ✅ "Viêm dạ dày lan tỏa thân + hang vị, hình ảnh gợi ý HP (5/5 finding)"
   ✅ "Đa ổ Paris 0-IIa+IIc nghi tiền ung thư (3 finding)"
   ❌ "Có 1 polyp" (only 1 finding — NOT a pattern; put this in priority_findings)
 

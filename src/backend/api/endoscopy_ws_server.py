@@ -1145,6 +1145,10 @@ async def upload_to_library(
         tmp_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="Empty file received")
 
+    if source == "live_recording":
+        logger.info("[LIVE] ⬆ recording upload received: {} ({:.1f} MB, {:.0f}s)",
+                    filename, size / 1_048_576, (duration_ms or 0) / 1000)
+
     sha256_prefix = _library.compute_sha256_prefix(tmp_path)
     existing = _library.find_duplicate(sha256_prefix, size)
 
@@ -1175,6 +1179,8 @@ async def upload_to_library(
         if duration_ms > 0:
             entry["duration_ms"] = duration_ms
     _library.add_entry(entry)
+    if source == "live_recording":
+        logger.info("[LIVE] ✓ recording saved → library_id={} ({})", library_id, filename)
     # Build the low-bitrate playback proxy in the background so the first replay
     # of this video streams smoothly over a slow link.
     ensure_proxy_async(dest)
@@ -1349,16 +1355,28 @@ async def ws_live_detect(websocket: WebSocket, video_id: str):
     # One detector per connection → its viewport cache + dedup history span the
     # whole live session (mirrors the upload worker's per-session dedup).
     detector = LiveDetector()
-    logger.info("Live-detect WS connected: {}", video_id)
+    # AI-detect WS connecting == the doctor pressed "Bắt đầu AI" == the browser
+    # started recording this session. Log it clearly so `tail` shows live activity.
+    logger.info("[LIVE] ▶ session started (AI detect + client recording): {}", video_id)
+    _frames = 0
+    _dets = 0
     try:
         while True:
             data = await websocket.receive_bytes()
             result = await asyncio.to_thread(detector.detect, data)
+            _frames += 1
+            _dets += len(result.get("captures") or [])
+            if _frames == 1:
+                logger.info("[LIVE] first frame received → detection running: {}", video_id)
+            elif _frames % 100 == 0:
+                logger.info("[LIVE] {} frames processed, {} detections so far: {}", _frames, _dets, video_id)
             await websocket.send_json(result)
     except WebSocketDisconnect:
         pass
     except Exception as e:
-        logger.warning("Live-detect WS closed ({}): {}", video_id, e)
+        logger.warning("[LIVE] WS error ({}): {}", video_id, e)
+    finally:
+        logger.info("[LIVE] ■ session ended: {} ({} frames, {} detections)", video_id, _frames, _dets)
 
 
 @app.post("/live/sessions/{session_id}/finalize")
@@ -1384,6 +1402,8 @@ async def finalize_live_session(session_id: str, request: Request):
     # Live findings are all doctor-kept captures → count the persisted ones as
     # confirmed so the summary's overview counts match the reports actually stored.
     sess = {"confirmed_detections": with_report[:persisted], "confirmed_captures": []}
+    logger.info("[LIVE] finalize session {}: {} detections persisted → generating summary",
+                session_id, persisted)
     asyncio.ensure_future(_finalize_live_summary(session_id, sess))
     return {"ok": True, "persisted": persisted}
 
@@ -1434,10 +1454,11 @@ async def live_explain(request: Request, label: str = "", conf: float = 0.0):
         # ranked differential, label-aware Paris).
         _postprocess_lesion_report(report, yolo_label=_label)
         _attach_evidence_citations(report, _evidence_chunks, _valid_labels)
+        logger.info("[LIVE] lesion report generated: label={} conf={:.2f}", _label, conf)
         return {"report": report}
     except Exception as e:
         code, friendly = _classify_llm_error(e)
-        logger.warning("live_explain failed [{}]: {}", code, e)
+        logger.warning("[LIVE] lesion report failed [{}]: {}", code, e)
         raise HTTPException(status_code=503, detail=friendly)
 
 
@@ -2127,6 +2148,21 @@ def _postprocess_lesion_report(report: dict, yolo_label: str | None = None) -> d
         has_paris_code = _re.search(r"0-I{1,3}[abc]?\b|0-Is\b|0-Ip\b", pc)
         if (has_paris_code and "không áp dụng" not in pc.lower()) or not pc:
             desc["paris_class"] = "Không áp dụng Paris (viêm lan tỏa)"
+
+    # A diagnosis the image alone cannot prove (e.g. HP status) requires a
+    # confirmatory test — append it deterministically so the recommendation is
+    # always present regardless of whether the model remembered it. Mirrors how a
+    # real report diagnoses "viêm dạ dày" on the scope and confirms HP via a
+    # separate CLO/biopsy test.
+    confirm_test = meta.get("confirm_test")
+    if confirm_test:
+        recs = conclusion.setdefault("recommendations", [])
+        if isinstance(recs, list) and not any(
+            "test hp" in str(r).lower() or "h. pylori" in str(r).lower()
+            or "h.pylori" in str(r).lower() or "clo" in str(r).lower()
+            for r in recs
+        ):
+            recs.insert(0, confirm_test)
     return report
 
 
@@ -2572,6 +2608,43 @@ async def _generate_session_summary(sess: dict, video_id: str) -> dict | None:
     _ov["ignored_count"] = ignored_count
     _ov.setdefault("duration_seconds", 0)
     summary["overview"] = _ov
+
+    # (A) Anchor priority_findings to the SOURCE lesion_report — the summary model
+    # must not re-diagnose / rephrase / re-rate a finding (same guarantee as the
+    # Phase-A primary_dx anchor). Match by frame_index and overwrite primary_dx +
+    # severity with the authoritative per-detection values, then re-sort by severity.
+    _src_by_frame = {
+        r.get("frame_index"): (r.get("report") or {}).get("conclusion", {})
+        for r in reports
+    }
+    _pf = summary.get("priority_findings")
+    if isinstance(_pf, list):
+        for f in _pf:
+            src = _src_by_frame.get(f.get("frame_index")) if isinstance(f, dict) else None
+            if src:
+                if src.get("primary_dx"):
+                    f["primary_dx"] = src["primary_dx"]
+                if src.get("severity"):
+                    f["severity"] = src["severity"]
+        _sev_rank = {"cao": 0, "trung bình": 1, "thấp": 2}
+        _pf.sort(key=lambda f: _sev_rank.get(f.get("severity"), 3) if isinstance(f, dict) else 3)
+        summary["priority_findings"] = _pf
+
+    # (B) Safety floor for overall_risk — a 4B model must never DOWNGRADE a session
+    # that contains a neoplastic finding or any "cao"-severity lesion. Compute the
+    # floor deterministically from the source reports and raise (never lower) the
+    # model's risk to it. Anchors patient safety to ground truth, not the LLM.
+    _has_high = any(
+        (r.get("report") or {}).get("conclusion", {}).get("severity") == "cao"
+        or clinical_meta_for(r.get("label") or
+            (r.get("report") or {}).get("conclusion", {}).get("primary_dx", "")
+        ).get("category") == "neoplastic"
+        for r in reports
+    )
+    if _has_high and summary.get("overall_risk") != "cao":
+        logger.info("overall_risk raised to 'cao' (neoplastic/high-severity finding present); "
+                    "model had: {}", summary.get("overall_risk"))
+        summary["overall_risk"] = "cao"
 
     logger.info("Session summary generated: latency={:.2f}s findings={} risk={} citations={}",
                 latency, len(reports),
