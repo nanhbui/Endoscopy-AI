@@ -1,39 +1,101 @@
-# ── Endoscopy AI Pipeline — Docker Compose ────────────────────────────────────
+# ── Endoscopy AI — self-contained single-host stack ───────────────────────────
 #
-# Usage:
-#   cp src/backend/api/.env.example src/backend/api/.env  # fill in OPENAI_API_KEY
-#   cp frontend/.env.local.example frontend/.env.local
-#   docker compose up --build
+# Backend + Frontend + Ollama, all in one compose. Runs on ANY server with an
+# NVIDIA GPU — nothing from the dev host is needed (no UTR-Track checkout, no
+# host model paths). The tracker fork + model weights are baked into the backend
+# image; data + Ollama models live in named volumes.
 #
-# GPU (NVIDIA):
-#   Requires nvidia-container-toolkit installed on the host.
-#   Run: sudo apt install nvidia-container-toolkit && sudo systemctl restart docker
+#   Browser ─→ frontend :${FRONTEND_PORT}   (UI)
+#   Browser ─→ backend  :8001               (API + WS — FE auto-derives host:8001)
+#   backend ─→ ollama   :11434              (VLM + embeddings, in-stack)
 #
-# CPU-only fallback: comment out the `deploy` block under `backend`.
+# Images are PUBLIC on Docker Hub (ngocanh031004/endoscopy-{backend,frontend}).
+#
+# ── On the OTHER server (only this file needed) ───────────────────────────────
+#   docker compose up -d            # pulls images, starts everything
+#   # custom UI port:  FRONTEND_PORT=8080 docker compose up -d
+#
+# Target host needs ONLY: an NVIDIA GPU + nvidia-container-toolkit + Docker.
+#
+# ── Build & publish (done once on a machine that HAS the UTR-Track fork) ───────
+#   cp -r ~/UTR-Track/boxmot ./vendor/boxmot
+#   docker compose build && docker compose push
+#
+# NOTE on the VLM model: `ollama-init` auto-pulls bge-m3 (embeddings). The
+# medgemma-4b VLM may not be in a public registry — if `ollama pull medgemma-4b`
+# fails, provide it once (see the WARN log) and it persists in the ollama volume.
 
 services:
+  # ── Ollama (VLM + embeddings) ───────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: endoscopy-ollama
+    restart: unless-stopped
+    volumes:
+      - ollama_models:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
 
-  # ── FastAPI + GStreamer + YOLO backend ──────────────────────────────────────
+  # One-shot: pull the required models into the ollama volume on first start.
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: endoscopy-ollama-init
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        ollama pull bge-m3 &&
+        (ollama pull medgemma-4b ||
+         echo 'WARN: medgemma-4b not pullable from a public registry — provide it manually, e.g. ollama create medgemma-4b -f Modelfile; it then persists in the ollama_models volume.')
+    restart: "no"
+
+  # ── FastAPI + GStreamer + YOLO backend (GPU) ────────────────────────────────
   backend:
+    image: docker.io/ngocanh031004/endoscopy-backend:${TAG:-v1}
     build:
       context: .
       dockerfile: Dockerfile.backend
-    image: endoscopy-backend:latest
     container_name: endoscopy-backend
     restart: unless-stopped
     ports:
-      - "8001:8001"
-    env_file:
-      - src/backend/api/.env
+      - "8003:8001"        # host 8003 → container 8001 (the FE calls host:8003)
+    depends_on:
+      ollama:
+        condition: service_healthy
     environment:
-      - ENDOSCOPY_UPLOAD_DIR=/app/data/uploads
-      - PIPELINE_DIR=/app/src/backend/pipeline
-      - LOG_LEVEL=INFO
+      - HOST=0.0.0.0
+      - PORT=8001
+      - LLM_BACKEND=ollama
+      - OLLAMA_BASE_URL=http://ollama:11434/v1
+      - OLLAMA_MODEL=medgemma-4b
+      - DEDUP_BY_TRACK_ID=auto
+      # Data → named volumes (paths inside the container).
+      - ENDOSCOPY_DB_PATH=/data/db/endoscopy.db
+      - ENDOSCOPY_LIBRARY_DIR=/data/library
+      - ENDOSCOPY_UPLOAD_DIR=/data/uploads
+    # Optional secrets (e.g. OPENAI_API_KEY); ignored when the file is absent.
+    env_file:
+      - path: ./backend.env
+        required: false
     volumes:
-      - uploads:/app/data/uploads
-      - ./sample_code:/app/sample_code:ro   # YOLO model files (read-only)
-      - backend_logs:/app/src/backend/api/logs
-    # GPU access — requires nvidia-container-toolkit
+      - endoscopy_db:/data/db
+      - endoscopy_library:/data/library
+      - endoscopy_uploads:/data/uploads
     deploy:
       resources:
         reservations:
@@ -46,38 +108,25 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 20s
+      start_period: 40s
 
-  # ── Next.js frontend ────────────────────────────────────────────────────────
+  # ── Next.js frontend (portable public image) ────────────────────────────────
   frontend:
+    image: docker.io/ngocanh031004/endoscopy-frontend:${TAG:-v1}
     build:
       context: .
       dockerfile: Dockerfile.frontend
       args:
-        # Backend is reachable via Docker internal network at http://backend:8001
-        # For the browser, WebSocket connections use the host-mapped port (8001).
-        NEXT_PUBLIC_API_BASE: http://localhost:8001
-    image: endoscopy-frontend:latest
+        # Empty → the bundle derives the backend URL from its own host:8001 at
+        # runtime, so the image is not pinned to any IP. CORS is "*" on the backend.
+        NEXT_PUBLIC_API_BASE: ""
     container_name: endoscopy-frontend
     restart: unless-stopped
     ports:
-      - "3000:3000"
-    env_file:
-      - frontend/.env.local
-    environment:
-      - NODE_ENV=production
-      - LOG_LEVEL=info
-    volumes:
-      - frontend_logs:/app/logs
-    depends_on:
-      backend:
-        condition: service_healthy
+      - "${FRONTEND_PORT:-3000}:3000"   # the only knob — exposed UI port
 
-# ── Volumes ──────────────────────────────────────────────────────────────────
 volumes:
-  uploads:
-    driver: local
-  backend_logs:
-    driver: local
-  frontend_logs:
-    driver: local
+  endoscopy_db:
+  endoscopy_library:
+  endoscopy_uploads:
+  ollama_models:

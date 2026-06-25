@@ -15,12 +15,16 @@ const nextConfig: NextConfig = {
     '*.ngrok-free.app',
   ],
 
-  // Proxy /api/* to FastAPI backend (development only; Docker uses direct fetch)
+  // Proxy /api/* to FastAPI backend (development only; Docker uses direct fetch).
+  // Skipped when NEXT_PUBLIC_API_BASE is empty (same-origin behind a reverse
+  // proxy) — there is no external backend URL to point at.
   async rewrites() {
+    const apiBase = process.env.NEXT_PUBLIC_API_BASE ?? 'http://localhost:8001';
+    if (!apiBase) return [];
     return [
       {
         source: '/api/:path*',
-        destination: `${process.env.NEXT_PUBLIC_API_BASE ?? 'http://localhost:8001'}/:path*`,
+        destination: `${apiBase}/:path*`,
       },
     ];
   },

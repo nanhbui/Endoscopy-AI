@@ -37,15 +37,26 @@ COPY src/ ./src/
 COPY scripts/ ./scripts/
 COPY models/ ./models/
 
-# Default env (overridden by docker-compose env_file)
+# UTR-Track boxmot fork — provides the custom `tlukf` tracker. It lives OUTSIDE
+# this repo on the dev host, so vendor it into the build context first:
+#     cp -r ~/UTR-Track/boxmot ./vendor/boxmot
+# Baking it in (rather than bind-mounting a host path) keeps the image portable
+# to any server.
+COPY vendor/boxmot/ /opt/boxmot/
+
+# Default env. Model + tracker paths point INSIDE the image (self-contained).
+# Data dirs (db/library/uploads) come from named volumes via docker-compose.
 ENV HOST=0.0.0.0 \
     PORT=8001 \
     LOG_LEVEL=INFO \
-    ENDOSCOPY_UPLOAD_DIR=/app/data/uploads \
+    PYTHONPATH=/opt/boxmot \
+    ENDOSCOPY_TRACKER=tlukf \
+    ENDOSCOPY_REID=/app/models/osnet_dcn_x0_5_endocv.pt \
+    ENDOSCOPY_UPLOAD_DIR=/data/uploads \
     PIPELINE_DIR=/app/src/backend/pipeline
 
-# Upload dir
-RUN mkdir -p /app/data/uploads
+# Data dirs (mount points for named volumes)
+RUN mkdir -p /data/uploads /data/library /data/db
 
 EXPOSE 8001
 

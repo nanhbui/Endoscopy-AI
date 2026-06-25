@@ -304,6 +304,10 @@ sync: _require-vpn
 		--exclude='*.log' \
 		--exclude='frontend/.env.local' \
 		--exclude='src/backend/api/.env' \
+		--exclude='docker-compose*.yml' \
+		--exclude='Dockerfile*' \
+		--exclude='deploy/' \
+		--exclude='vendor/' \
 		$(ROOT)/ $(GPU_USER)@$(GPU_HOST):$(REMOTE_DIR)/
 	@echo "$(GREEN)✔ Sync complete$(RESET) $(YELLOW)(server .env left untouched — run 'make sync-env' to push local .env)$(RESET)"
 

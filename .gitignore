@@ -15,6 +15,9 @@ libtorch/
 *.pth
 *.onnx
 
+# Vendored UTR-Track boxmot fork (copied in at build time, not committed)
+vendor/boxmot/
+
 # GStreamer build
 gstreamer_plugin_c/build/
 *.so

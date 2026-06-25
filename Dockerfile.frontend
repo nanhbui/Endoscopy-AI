@@ -20,7 +20,7 @@ COPY frontend/ .
 # must be a URL the BROWSER can reach (not a Docker-internal hostname).
 # Default targets the host-mapped backend port; override via --build-arg for
 # other deployments (e.g. the public tunnel host).
-ARG NEXT_PUBLIC_API_BASE=http://localhost:8001
+ARG NEXT_PUBLIC_API_BASE=http://backend:8003
 ENV NEXT_PUBLIC_API_BASE=${NEXT_PUBLIC_API_BASE}
 
 RUN npm run build

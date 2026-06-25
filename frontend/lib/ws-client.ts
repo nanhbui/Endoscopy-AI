@@ -5,8 +5,24 @@
  * Upload via:  POST http://localhost:8001/upload
  */
 
-export const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8001";
-export const WS_BASE  = API_BASE.replace(/^http/, "ws");
+// Backend base URL. If NEXT_PUBLIC_API_BASE is baked at build time, use it.
+// Otherwise (the portable default) derive it from the page's host with the
+// backend on NEXT_PUBLIC_API_PORT (default 8003) — so ONE published image works
+// on ANY single-host deploy (backend + frontend on the same server, different
+// ports). Override the port via the NEXT_PUBLIC_API_PORT build-arg.
+const API_PORT = process.env.NEXT_PUBLIC_API_PORT || "8003";
+function resolveApiBase(): string {
+  const explicit = process.env.NEXT_PUBLIC_API_BASE;
+  if (explicit) return explicit;
+  if (typeof window !== "undefined") {
+    return `${window.location.protocol}//${window.location.hostname}:${API_PORT}`;
+  }
+  return `http://localhost:${API_PORT}`; // SSR fallback — the client re-resolves in the browser
+}
+
+export const API_BASE = resolveApiBase();
+// ws:// or wss:// tracks the page's http/https automatically.
+export const WS_BASE = API_BASE.replace(/^http/, "ws");
 
 // Skip ngrok's browser-warning interstitial for fetch + XHR when API goes via ngrok.
 if (typeof window !== "undefined" && API_BASE.includes("ngrok") && !(window as unknown as { __NGROK_PATCHED__?: boolean }).__NGROK_PATCHED__) {

@@ -19,18 +19,20 @@ on:
     tags: ['v*']
   workflow_dispatch:
     inputs:
-      ngrok_api_base:
-        description: 'NEXT_PUBLIC_API_BASE baked into FE bundle'
+      api_base:
+        description: 'NEXT_PUBLIC_API_BASE baked into FE bundle (leave EMPTY for same-origin behind a reverse proxy — the default deployment)'
         required: false
-        default: 'https://ferris-smudgy-fondue.ngrok-free.dev'
+        default: ''
 
 env:
   REGISTRY: docker.io
   BACKEND_IMAGE: endoscopy-backend
   FRONTEND_IMAGE: endoscopy-frontend
-  # Default URL baked into the FE bundle. Override per-environment by
-  # rebuilding the FE image with a different --build-arg NEXT_PUBLIC_API_BASE.
-  DEFAULT_API_BASE: https://ferris-smudgy-fondue.ngrok-free.dev
+  # Empty = same-origin: the browser calls /upload, /ws/*, … on whatever host
+  # serves the page, and a reverse proxy (Caddy) routes them to the backend.
+  # This keeps the published image portable. Override per-environment only if you
+  # bake a fixed backend URL instead of fronting the FE with a proxy.
+  DEFAULT_API_BASE: ''
 
 jobs:
   build-and-push:
@@ -66,8 +68,8 @@ jobs:
             echo "be_tags=${BASE}/${{ env.BACKEND_IMAGE }}:latest" >> "$GITHUB_OUTPUT"
             echo "fe_tags=${BASE}/${{ env.FRONTEND_IMAGE }}:latest" >> "$GITHUB_OUTPUT"
           fi
-          API_BASE="${{ github.event.inputs.ngrok_api_base }}"
-          if [[ -z "$API_BASE" ]]; then API_BASE="${{ env.DEFAULT_API_BASE }}"; fi
+          # Empty input → same-origin (DEFAULT_API_BASE is intentionally empty).
+          API_BASE="${{ github.event.inputs.api_base }}"
           echo "api_base=${API_BASE}" >> "$GITHUB_OUTPUT"
 
       - name: Build & push backend
