@@ -821,6 +821,13 @@ export default function Workspace() {
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [videoUnsupported, setVideoUnsupported] = useState(false);
+  // Library video currently previewed — kept so we can re-mint the backend
+  // session if its in-memory state was lost (e.g. backend restart → 404 on the
+  // /session/{id}/video stream, which otherwise looks like an unsupported codec).
+  const currentLibraryIdRef = useRef<string | null>(null);
+  // Caps auto-recovery to one attempt per playback so a genuinely-down backend
+  // can't spin into an infinite re-mint loop. Reset on successful canplay.
+  const recoverAttemptsRef = useRef(0);
   // True when a library video is prepared (video_id set) but analysis not yet started
   const [libraryReady, setLibraryReady] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -852,23 +859,37 @@ export default function Workspace() {
   const [backendReachable, setBackendReachable] = useState<boolean | null>(null);
   const prevBackendReachable = useRef<boolean | null>(null);
   const [backendJustCameBack, setBackendJustCameBack] = useState(false);
+  // Consecutive failed /health polls. A single miss is almost always a transient
+  // transport blip (Tailscale Funnel relay), NOT a backend restart — so we only
+  // declare the backend offline after HEALTH_FAIL_THRESHOLD misses in a row.
+  const healthFailRef = useRef(0);
+  const HEALTH_FAIL_THRESHOLD = 2;
 
   // Health check on mount and every 10s when not connected
   useEffect(() => {
     const check = async () => {
       try {
         const res = await fetch(`${API_BASE}/health`, { signal: AbortSignal.timeout(8000) });
-        const ok = res.ok;
-        // Detect offline → online transition
-        if (ok && prevBackendReachable.current === false) {
+        if (!res.ok) throw new Error(`health ${res.status}`);
+        // Success — reset the miss counter. Surface the recovery banner only if we
+        // had actually crossed into the debounced "offline" state beforehand.
+        healthFailRef.current = 0;
+        if (prevBackendReachable.current === false) {
+          console.warn('[health] backend reachable again after sustained outage');
           setBackendJustCameBack(true);
         }
-        prevBackendReachable.current = ok;
-        setBackendReachable(ok);
-      } catch {
-        prevBackendReachable.current = false;
-        setBackendReachable(false);
-        setBackendJustCameBack(false);
+        prevBackendReachable.current = true;
+        setBackendReachable(true);
+      } catch (err) {
+        healthFailRef.current += 1;
+        // Browser-side log: the event originates here (a fetch timeout), which is
+        // why the server log stays clean during a "Backend offline" flash.
+        console.warn(`[health] /health miss ${healthFailRef.current}/${HEALTH_FAIL_THRESHOLD}`, err);
+        if (healthFailRef.current >= HEALTH_FAIL_THRESHOLD) {
+          prevBackendReachable.current = false;
+          setBackendReachable(false);
+          setBackendJustCameBack(false);
+        }
       }
     };
     check();
@@ -978,6 +999,8 @@ export default function Workspace() {
   const handleUploadAndConnect = useCallback(async (file: File, onProgress: (pct: number) => void) => {
     await uploadOnly(file, onProgress);
     const localUrl = URL.createObjectURL(file);
+    currentLibraryIdRef.current = null;
+    recoverAttemptsRef.current = 0;
     setVideoFile(file);
     setVideoUrl(localUrl);
     setVideoUnsupported(false);
@@ -1011,6 +1034,8 @@ export default function Workspace() {
         setLibraryReady(false);
       } else {
         // Stream library video from backend so browser can play it like an uploaded file
+        currentLibraryIdRef.current = libraryId;
+        recoverAttemptsRef.current = 0;
         setVideoUrl(`${API_BASE}/session/${vid}/video`);
         setVideoFile(null);
         setVideoUnsupported(false);
@@ -1021,9 +1046,30 @@ export default function Workspace() {
     }
   }, [prepareFromLibrary]);
 
+  // <video> error handler. A library stream that 404s almost always means the
+  // backend lost its in-memory session (restart) — not a real codec problem.
+  // Re-mint the session from the stored libraryId and retry once before giving up.
+  const handleVideoError = useCallback(async () => {
+    const libId = currentLibraryIdRef.current;
+    if (libId && recoverAttemptsRef.current < 1) {
+      recoverAttemptsRef.current += 1;
+      try {
+        const vid = await prepareFromLibrary(libId);
+        setVideoUnsupported(false);
+        setVideoUrl(`${API_BASE}/session/${vid}/video`);
+        return;
+      } catch {
+        /* fall through to show the message */
+      }
+    }
+    setVideoUnsupported(true);
+  }, [prepareFromLibrary]);
+
   const handleRemoveVideo = useCallback(() => {
     if (videoRef.current) videoRef.current.pause();
     if (videoUrl) URL.revokeObjectURL(videoUrl);
+    currentLibraryIdRef.current = null;
+    recoverAttemptsRef.current = 0;
     setVideoFile(null);
     setVideoUrl(null);
     setLibraryReady(false);
@@ -1135,7 +1181,7 @@ export default function Workspace() {
           <Box sx={{ mb: 2, px: 2, py: 1.25, borderRadius: '12px', backgroundColor: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.35)', display: 'flex', alignItems: 'center', gap: 1.5 }}>
             <AlertTriangle size={16} color="#D97706" />
             <Typography sx={{ fontSize: '0.85rem', color: '#92400E', fontWeight: 500, flex: 1 }}>
-              Backend đã khởi động lại — session cũ bị mất.
+              Mất kết nối với máy chủ một lúc — phiên phân tích có thể đã gián đoạn.
             </Typography>
             <MuiButton
               size="small"
@@ -1354,8 +1400,8 @@ export default function Workspace() {
                       controlsList="nodownload nofullscreen noremoteplayback"
                       disablePictureInPicture
                       onContextMenu={(e) => e.preventDefault()}
-                      onError={() => setVideoUnsupported(true)}
-                      onCanPlay={() => setVideoUnsupported(false)}
+                      onError={handleVideoError}
+                      onCanPlay={() => { recoverAttemptsRef.current = 0; setVideoUnsupported(false); }}
                       style={{
                         position: 'absolute',
                         inset: 0,
@@ -1375,11 +1421,11 @@ export default function Workspace() {
                         bgcolor: 'rgba(0,0,0,0.85)',
                       }}>
                         <Typography sx={{ color: '#FFA726', fontWeight: 700, fontSize: '0.95rem' }}>
-                          Trình duyệt không hỗ trợ xem trước video này
+                          Không tải được video xem trước
                         </Typography>
                         <Typography sx={{ color: 'rgba(255,255,255,0.6)', fontSize: '0.8rem', textAlign: 'center', px: 2 }}>
-                          Codec {videoFile?.name?.endsWith('.mp4') ? 'MPEG-4 Part 2' : ''} không được hỗ trợ trong trình duyệt.
-                          Phân tích AI vẫn chạy bình thường — hãy dùng H.264 để xem trước.
+                          Phiên có thể đã hết hạn (backend khởi động lại) hoặc codec không được trình duyệt hỗ trợ.
+                          Hãy tải lại trang hoặc chọn lại video từ thư viện. Phân tích AI vẫn chạy bình thường.
                         </Typography>
                       </Box>
                     )}
