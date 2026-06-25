@@ -397,9 +397,9 @@ _library = VideoLibrary(LIBRARY_DIR)
 # Runs in background threads; no-op for videos that already have a proxy.
 try:
     for _e in _library.load_index():
-        _p = _e.get("path")
-        if _p:
-            ensure_proxy_async(Path(_p))
+        _p = _library.resolve_path(_e)
+        if _p.exists():
+            ensure_proxy_async(_p)
 except Exception as _exc:  # pragma: no cover - best effort at startup
     logger.warning("Proxy pre-build skipped: {}", _exc)
 
@@ -1191,7 +1191,9 @@ async def session_from_library(library_id: str):
     video_id = uuid.uuid4().hex[:12]
     _sessions[video_id] = {
         "controller": None,
-        "video_path": Path(entry["path"]),
+        # resolve_path falls back to LIBRARY_DIR/<id> when the index holds a
+        # stale absolute path (e.g. library dir moved) — avoids 404 + worker crash.
+        "video_path": _library.resolve_path(entry),
         "confirmed_detections": [],
         "library_id": library_id,
         "conv_history": [],
