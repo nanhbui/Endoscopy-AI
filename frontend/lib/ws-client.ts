@@ -165,6 +165,11 @@ export interface LibraryVideo {
   filename: string;
   size_bytes: number;
   uploaded_at: string;
+  /** Set to "live_recording" for videos recorded from a live (Trực tiếp) session. */
+  source?: string;
+  session_id?: string;
+  recorded_at?: string;
+  duration_ms?: number;
 }
 
 export interface LibraryUploadResult {
@@ -234,11 +239,51 @@ export function uploadVideo(
 
 // ── Video library API helpers ─────────────────────────────────────────────────
 
-export async function listLibraryVideos(): Promise<LibraryVideo[]> {
-  const res = await fetch(`${API_BASE}/library`);
+export async function listLibraryVideos(source?: string): Promise<LibraryVideo[]> {
+  const qs = source ? `?${new URLSearchParams({ source }).toString()}` : "";
+  const res = await fetch(`${API_BASE}/library${qs}`);
   if (!res.ok) throw new Error(`Library fetch failed: ${res.statusText}`);
   const data = await res.json() as { videos: LibraryVideo[] };
   return data.videos;
+}
+
+/** Direct stream URL for inline replay of a library video (recordings UI). */
+export function libraryVideoUrl(libraryId: string): string {
+  return `${API_BASE}/library/${libraryId}/video`;
+}
+
+/**
+ * Upload a finished live-session recording (webm Blob) to the library, tagged
+ * with source=live_recording so it shows under "Bản ghi trực tiếp".
+ */
+export function uploadRecording(
+  blob: Blob,
+  filename: string,
+  opts: { sessionId?: string; durationMs?: number; onProgress?: (pct: number) => void } = {},
+): Promise<LibraryUploadResult> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    if (opts.onProgress) {
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) opts.onProgress!(Math.round((e.loaded / e.total) * 100));
+      };
+    }
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try { resolve(JSON.parse(xhr.responseText)); }
+        catch { reject(new Error("Invalid JSON response")); }
+      } else {
+        reject(Object.assign(new Error(`Upload failed: ${xhr.statusText}`), { status: xhr.status }));
+      }
+    };
+    xhr.onerror = () => reject(new Error("Upload network error"));
+    const params = new URLSearchParams({ filename, source: "live_recording" });
+    if (opts.sessionId) params.set("session_id", opts.sessionId);
+    if (opts.durationMs && opts.durationMs > 0) params.set("duration_ms", String(Math.round(opts.durationMs)));
+    xhr.open("POST", `${API_BASE}/library/upload?${params.toString()}`);
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    xhr.send(blob);
+  });
 }
 
 export function uploadToLibrary(

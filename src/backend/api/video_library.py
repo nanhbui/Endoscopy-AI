@@ -50,10 +50,20 @@ class VideoLibrary:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def list_videos(self) -> list[dict]:
-        """Return all library entries (public fields only, sorted newest first)."""
+    def list_videos(self, source: Optional[str] = None) -> list[dict]:
+        """Return library entries (public fields only, sorted newest first).
+
+        ``source`` filters by origin: pass ``"live_recording"`` to list only
+        recordings captured from a live (Trực tiếp) session, or omit to list all.
+        The recording-specific fields (source/session_id/recorded_at/duration_ms)
+        are surfaced when present so the recordings UI can show duration + when it
+        was recorded; older library entries simply omit them.
+        """
         entries = self.load_index()
-        public_fields = ("library_id", "filename", "size_bytes", "uploaded_at")
+        if source is not None:
+            entries = [e for e in entries if e.get("source") == source]
+        public_fields = ("library_id", "filename", "size_bytes", "uploaded_at",
+                         "source", "session_id", "recorded_at", "duration_ms")
         result = [{k: e[k] for k in public_fields if k in e} for e in entries]
         return sorted(result, key=lambda e: e.get("uploaded_at", ""), reverse=True)
 
@@ -70,6 +80,21 @@ class VideoLibrary:
             if entry.get("sha256_prefix") == sha256_prefix and entry.get("size_bytes") == size_bytes:
                 return entry
         return None
+
+    def resolve_path(self, entry: dict) -> Path:
+        """Actual on-disk file for an entry, resilient to a moved library dir.
+
+        Prefer the stored absolute ``path`` while it exists, but fall back to
+        ``<library_dir>/<library_id><ext>``. Index entries written before
+        ENDOSCOPY_LIBRARY_DIR changed keep an old absolute path that no longer
+        exists — trusting it blindly 404s the preview and crashes the GStreamer
+        worker ("Resource not found"). Files are always named <library_id><ext>.
+        """
+        stored = entry.get("path")
+        if stored and Path(stored).exists():
+            return Path(stored)
+        ext = Path(entry.get("filename", "") or "").suffix.lower() or ".mp4"
+        return self._dir / f"{entry.get('library_id', '')}{ext}"
 
     def add_entry(self, entry: dict) -> None:
         entries = self.load_index()

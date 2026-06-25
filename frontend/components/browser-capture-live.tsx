@@ -21,7 +21,7 @@ import Typography from '@mui/material/Typography';
 import CircularProgress from '@mui/material/CircularProgress';
 import LinearProgress from '@mui/material/LinearProgress';
 import { Radio, Cpu, Square, Video as VideoIcon, X, Info, Maximize2, FileText, StopCircle, CheckCircle2 } from 'lucide-react';
-import { WS_BASE, API_BASE } from '@/lib/ws-client';
+import { WS_BASE, API_BASE, uploadRecording } from '@/lib/ws-client';
 import { labelToColor as colorFor } from '@/lib/lesion-colors';
 import { useAnalysis, lesionReportToMarkdown, type Detection } from '@/context/AnalysisContext';
 import { LiveCapturesPanel, type LiveCapture } from '@/components/live-captures-panel';
@@ -86,6 +86,13 @@ export function BrowserCaptureLive() {
   // FIFO queue + in-flight counter for serialized lesion explanations.
   const explainQueueRef = useRef<Array<{ id: number; b64: string; box: LiveBox }>>([]);
   const explainActiveRef = useRef(0);
+  // Full-session recording (Trực tiếp): MediaRecorder taps the raw mirror stream
+  // — clean video, no AI overlay — and the whole .webm is uploaded to the library
+  // on "Dừng phiên". Recording is auto-started with the AI session.
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
+  const recordStartMsRef = useRef(0);
+  const recordTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [deviceId, setDeviceId] = useState('');
@@ -105,6 +112,10 @@ export function BrowserCaptureLive() {
   const [captures, setCaptures] = useState<LiveCapture[]>([]);
   const [err, setErr] = useState('');
   const [patientCtx, setPatientCtx] = useState<PatientContextData>(emptyPatientContext);
+  // Recording UI state: live elapsed seconds + upload outcome banner.
+  const [recording, setRecording] = useState(false);
+  const [recordElapsed, setRecordElapsed] = useState(0);
+  const [recordStatus, setRecordStatus] = useState<'' | 'saving' | 'saved' | 'failed'>('');
 
   const refreshDevices = useCallback(async () => {
     try {
@@ -239,6 +250,57 @@ export function BrowserCaptureLive() {
     captureFrame(top, overlay.length ? overlay : captures);
   }, [captureFrame]);
 
+  // Start recording the RAW mirror stream (no AI overlay) — full session, one
+  // .webm file. No-op if already recording or the stream isn't ready, so AI
+  // off→on toggles never fragment the recording. Best-effort: a browser that
+  // can't record just skips it; detection is unaffected.
+  const startRecording = useCallback(() => {
+    const stream = streamRef.current;
+    if (recorderRef.current || !stream || typeof MediaRecorder === 'undefined') return;
+    const mime = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']
+      .find((m) => MediaRecorder.isTypeSupported(m)) || '';
+    try {
+      const rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+      recordedChunksRef.current = [];
+      rec.ondataavailable = (e) => { if (e.data && e.data.size > 0) recordedChunksRef.current.push(e.data); };
+      rec.start(1000);   // 1s timeslice → periodic chunks, survives long sessions
+      recorderRef.current = rec;
+      recordStartMsRef.current = Date.now();
+      setRecording(true);
+      setRecordStatus('');
+      setRecordElapsed(0);
+      recordTimerRef.current = setInterval(
+        () => setRecordElapsed(Math.floor((Date.now() - recordStartMsRef.current) / 1000)), 1000);
+    } catch {
+      recorderRef.current = null;  // recording is optional — never block the session
+    }
+  }, []);
+
+  // Stop recording and upload the .webm to the library (tagged live_recording).
+  // Returns a promise that resolves once upload settles so callers can await it.
+  const stopAndUploadRecording = useCallback(async (): Promise<void> => {
+    const rec = recorderRef.current;
+    if (recordTimerRef.current) { clearInterval(recordTimerRef.current); recordTimerRef.current = null; }
+    setRecording(false);
+    if (!rec) return;
+    recorderRef.current = null;
+    const durationMs = recordStartMsRef.current ? Date.now() - recordStartMsRef.current : 0;
+    const blob: Blob = await new Promise((resolve) => {
+      rec.onstop = () => resolve(new Blob(recordedChunksRef.current, { type: 'video/webm' }));
+      try { rec.stop(); } catch { resolve(new Blob(recordedChunksRef.current, { type: 'video/webm' })); }
+    });
+    recordedChunksRef.current = [];
+    if (blob.size === 0) return;
+    setRecordStatus('saving');
+    const name = `Trực tiếp ${new Date().toLocaleString('vi-VN')}.webm`;
+    try {
+      await uploadRecording(blob, name, { durationMs });
+      setRecordStatus('saved');
+    } catch {
+      setRecordStatus('failed');
+    }
+  }, []);
+
   const stopAi = useCallback(() => {
     setAiOn(false);
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
@@ -269,6 +331,7 @@ export function BrowserCaptureLive() {
     ws.onerror = () => { setErr('Mất kết nối tới máy chủ AI.'); };
     ws.onopen = () => {
       setAiOn(true);
+      startRecording();   // auto-record the full session (raw mirror, no overlay)
       timerRef.current = setInterval(() => {
         const v = videoRef.current, c = canvasRef.current, sock = wsRef.current;
         if (!v || !c || !sock || sock.readyState !== WebSocket.OPEN) return;
@@ -287,18 +350,20 @@ export function BrowserCaptureLive() {
         }, 'image/jpeg', 0.6);
       }, SEND_INTERVAL_MS);
     };
-  }, [previewing, maybeCapture]);
+  }, [previewing, maybeCapture, startRecording]);
 
   // "Dừng phiên" — stop the detector AND the mirror; captures stay so the doctor
-  // can still review and "Tạo báo cáo".
+  // can still review and "Tạo báo cáo". The full-session recording is flushed and
+  // uploaded BEFORE the stream tracks are stopped so the final chunk is captured.
   const stopSession = useCallback(() => {
     stopAi();
+    void stopAndUploadRecording();
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     if (videoRef.current) videoRef.current.srcObject = null;
     setPreviewing(false);
     setStopped(true);
-  }, [stopAi]);
+  }, [stopAi, stopAndUploadRecording]);
 
   const removeCapture = useCallback((id: number) => {
     setCaptures((prev) => prev.filter((c) => c.id !== id));
@@ -354,6 +419,8 @@ export function BrowserCaptureLive() {
   // Cleanup on unmount.
   useEffect(() => () => {
     if (timerRef.current) clearInterval(timerRef.current);
+    if (recordTimerRef.current) clearInterval(recordTimerRef.current);
+    try { recorderRef.current?.stop(); } catch { /* already stopped */ }
     wsRef.current?.close();
     streamRef.current?.getTracks().forEach((t) => t.stop());
   }, []);
@@ -439,10 +506,29 @@ export function BrowserCaptureLive() {
                 <Typography sx={{ fontSize: '0.7rem', fontWeight: 800 }}>{boxes.length} vùng</Typography>
               </Box>
             )}
+
+            {/* REC indicator + elapsed timer (full-session recording) */}
+            {recording && (
+              <Box sx={{ position: 'absolute', bottom: 12, right: 12, zIndex: 2, display: 'inline-flex', alignItems: 'center', gap: 0.6, px: 1.1, py: 0.4, borderRadius: '6px', backgroundColor: 'rgba(220,38,38,0.9)', color: '#fff', backdropFilter: 'blur(6px)' }}>
+                <Box sx={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: '#fff', animation: 'pulse 1.5s infinite', '@keyframes pulse': { '0%,100%': { opacity: 1 }, '50%': { opacity: 0.3 } } }} />
+                <Typography sx={{ fontSize: '0.7rem', fontWeight: 800, letterSpacing: '0.06em', fontVariantNumeric: 'tabular-nums' }}>
+                  REC {String(Math.floor(recordElapsed / 60)).padStart(2, '0')}:{String(recordElapsed % 60).padStart(2, '0')}
+                </Typography>
+              </Box>
+            )}
           </Box>
 
           {err && (
             <Typography sx={{ fontSize: '0.78rem', color: '#DC2626' }}>{err}</Typography>
+          )}
+
+          {/* Recording upload status */}
+          {recordStatus && (
+            <Typography sx={{ fontSize: '0.78rem', fontWeight: 600, color: recordStatus === 'failed' ? '#DC2626' : '#00838F' }}>
+              {recordStatus === 'saving' && 'Đang lưu bản ghi phiên trực tiếp vào thư viện…'}
+              {recordStatus === 'saved' && 'Đã lưu bản ghi vào “Bản ghi trực tiếp”.'}
+              {recordStatus === 'failed' && 'Lưu bản ghi thất bại — phiên vẫn được xử lý bình thường.'}
+            </Typography>
           )}
 
           {/* Controls */}
@@ -453,11 +539,13 @@ export function BrowserCaptureLive() {
               </Box>
             ) : (
               <>
-                {/* Device picker — no typing */}
+                {/* Device picker — no typing. Locked while AI runs: switching the
+                    source reacquires the stream and would truncate the recording. */}
                 <Box component="select"
                   value={deviceId}
+                  disabled={aiOn}
                   onChange={(e: React.ChangeEvent<HTMLSelectElement>) => startPreview(e.target.value)}
-                  sx={{ flex: '1 1 200px', minWidth: 180, px: 1.5, py: 1, borderRadius: '10px', border: '1px solid #CBD5D3', fontSize: '0.85rem', backgroundColor: '#fff', color: 'text.primary' }}
+                  sx={{ flex: '1 1 200px', minWidth: 180, px: 1.5, py: 1, borderRadius: '10px', border: '1px solid #CBD5D3', fontSize: '0.85rem', backgroundColor: aiOn ? '#F1F5F4' : '#fff', color: 'text.primary', cursor: aiOn ? 'not-allowed' : 'pointer' }}
                 >
                   {devices.map((d, i) => (
                     <option key={`${d.deviceId}-${i}`} value={d.deviceId}>
@@ -532,8 +620,9 @@ export function BrowserCaptureLive() {
                 <Typography sx={{ fontSize: '0.72rem', fontWeight: 700, color: '#445' }}>Độ phân giải</Typography>
                 <Box component="select"
                   value={resolution}
+                  disabled={aiOn}
                   onChange={(e: React.ChangeEvent<HTMLSelectElement>) => { setResolution(e.target.value); startPreview(deviceId, e.target.value); }}
-                  sx={{ px: 1, py: 0.6, borderRadius: '8px', border: '1px solid #CBD5D3', fontSize: '0.78rem', backgroundColor: '#fff' }}
+                  sx={{ px: 1, py: 0.6, borderRadius: '8px', border: '1px solid #CBD5D3', fontSize: '0.78rem', backgroundColor: aiOn ? '#F1F5F4' : '#fff', cursor: aiOn ? 'not-allowed' : 'pointer' }}
                 >
                   {RES_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                 </Box>

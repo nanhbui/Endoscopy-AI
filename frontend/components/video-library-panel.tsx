@@ -22,21 +22,7 @@ import {
   uploadToLibrary,
   type LibraryVideo,
 } from '@/lib/ws-client';
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
-}
-
-function formatDate(iso: string): string {
-  return new Date(iso).toLocaleDateString('vi-VN', {
-    day: '2-digit', month: '2-digit', year: 'numeric',
-    hour: '2-digit', minute: '2-digit',
-  });
-}
+import { fmtBytes, fmtIsoDateTime } from '@/lib/format';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -254,11 +240,11 @@ export function VideoLibraryPanel({ onSelect, showUploadButton = true, sx }: Vid
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mt: 0.25 }}>
                     <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.4, color: 'text.disabled' }}>
                       <HardDrive size={11} />
-                      <Typography sx={{ fontSize: '0.7rem' }}>{formatBytes(video.size_bytes)}</Typography>
+                      <Typography sx={{ fontSize: '0.7rem' }}>{fmtBytes(video.size_bytes)}</Typography>
                     </Box>
                     <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.4, color: 'text.disabled' }}>
                       <Clock size={11} />
-                      <Typography sx={{ fontSize: '0.7rem' }}>{formatDate(video.uploaded_at)}</Typography>
+                      <Typography sx={{ fontSize: '0.7rem' }}>{fmtIsoDateTime(video.uploaded_at)}</Typography>
                     </Box>
                   </Box>
                 </Box>

@@ -14,6 +14,7 @@ import LinearProgress from '@mui/material/LinearProgress';
 import Typography from '@mui/material/Typography';
 import { uploadToLibrary } from '@/lib/ws-client';
 import { VideoLibraryPanel } from '@/components/video-library-panel';
+import { RecordingsPanel } from '@/components/recordings-panel';
 
 // ── UploadZone (moved from workspace/page.tsx) ────────────────────────────────
 
@@ -122,6 +123,7 @@ export function VideoSourceModal({ open, onClose, onUploadAndConnect, onLibraryS
   const [saveToLibrary, setSaveToLibrary] = useState(false);
   const [uploadingFileName, setUploadingFileName] = useState('');
   const [duplicateBanner, setDuplicateBanner] = useState<string | null>(null);
+  const [leftTab, setLeftTab] = useState<'library' | 'recordings'>('library');
 
   const handleFileSelected = useCallback(async (file: File) => {
     if (!file.type.startsWith('video/')) {
@@ -183,16 +185,37 @@ export function VideoSourceModal({ open, onClose, onUploadAndConnect, onLibraryS
       <DialogContent sx={{ p: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column', flex: 1 }}>
         <Grid container sx={{ flex: 1, height: '100%', overflow: 'hidden' }}>
 
-          {/* ── Library section (left) ────────────────────────────────────── */}
+          {/* ── Library / Recordings section (left) ───────────────────────── */}
           <Grid
             size={{ xs: 12, md: 7 }}
-            sx={{ borderRight: { md: '1px solid #E2EAE8' }, overflowY: 'auto', display: 'flex', flexDirection: 'column', height: '100%' }}
+            sx={{ borderRight: { md: '1px solid #E2EAE8' }, overflowY: 'hidden', display: 'flex', flexDirection: 'column', height: '100%' }}
           >
-            <VideoLibraryPanel
-              showUploadButton={false}
-              onSelect={handleLibrarySelectInternal}
-              sx={{ aspectRatio: 'unset', borderRadius: 0, border: 'none', height: '100%' }}
-            />
+            {/* Tab switcher */}
+            <Box sx={{ display: 'flex', gap: 0.5, px: 1.5, pt: 1.5, pb: 1, borderBottom: '1px solid #E2EAE8', backgroundColor: '#F8FAFB', flexShrink: 0 }}>
+              {([
+                { id: 'library', label: 'Thư viện video' },
+                { id: 'recordings', label: 'Bản ghi trực tiếp' },
+              ] as const).map((t) => (
+                <Box key={t.id} component="button" onClick={() => setLeftTab(t.id)}
+                  sx={{ px: 1.75, py: 0.75, borderRadius: '8px', border: 'none', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 700,
+                    backgroundColor: leftTab === t.id ? '#006064' : 'transparent',
+                    color: leftTab === t.id ? '#fff' : 'text.secondary',
+                    '&:hover': leftTab === t.id ? {} : { backgroundColor: 'rgba(0,96,100,0.06)' } }}>
+                  {t.label}
+                </Box>
+              ))}
+            </Box>
+            <Box sx={{ flex: 1, minHeight: 0 }}>
+              {leftTab === 'library' ? (
+                <VideoLibraryPanel
+                  showUploadButton={false}
+                  onSelect={handleLibrarySelectInternal}
+                  sx={{ aspectRatio: 'unset', borderRadius: 0, border: 'none', height: '100%' }}
+                />
+              ) : (
+                <RecordingsPanel onSelect={handleLibrarySelectInternal} />
+              )}
+            </Box>
           </Grid>
 
           {/* ── Upload section (right) ────────────────────────────────────── */}

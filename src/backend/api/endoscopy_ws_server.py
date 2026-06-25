@@ -1092,17 +1092,31 @@ async def connect_stream(request: Request):
 
 
 @app.get("/library")
-async def list_library():
-    """Return all library videos (public fields, newest first)."""
-    return {"videos": _library.list_videos()}
+async def list_library(source: str = ""):
+    """Return library videos (public fields, newest first).
+
+    ``source=live_recording`` filters to recordings captured from a live
+    (Trực tiếp) session; omit to list everything.
+    """
+    return {"videos": _library.list_videos(source or None)}
 
 
 @app.post("/library/upload")
-async def upload_to_library(request: Request, filename: str = "video.mp4"):
+async def upload_to_library(
+    request: Request,
+    filename: str = "video.mp4",
+    source: str = "",
+    session_id: str = "",
+    duration_ms: int = 0,
+):
     """Upload a video and persist it to the permanent library.
 
     Checks for duplicates via SHA-256(first 4 MB) + size_bytes before writing.
     Returns duplicate:true and the existing entry if the file is already stored.
+
+    Optional ``source``/``session_id``/``duration_ms`` tag a live-session
+    recording so the "Bản ghi trực tiếp" UI can list and replay it separately
+    from manually-uploaded library videos.
     """
     from video_library import _ALLOWED_EXTENSIONS
     import errno as _errno
@@ -1142,14 +1156,23 @@ async def upload_to_library(request: Request, filename: str = "video.mp4"):
     dest = LIBRARY_DIR / f"{library_id}{ext}"
     tmp_path.rename(dest)
 
+    _now_iso = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
     entry = {
         "library_id": library_id,
         "filename": filename,
         "size_bytes": size,
-        "uploaded_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+        "uploaded_at": _now_iso,
         "sha256_prefix": sha256_prefix,
         "path": str(dest),
     }
+    # Tag live-session recordings so the recordings UI can list them separately.
+    if source:
+        entry["source"] = source
+        entry["recorded_at"] = _now_iso
+        if session_id:
+            entry["session_id"] = session_id
+        if duration_ms > 0:
+            entry["duration_ms"] = duration_ms
     _library.add_entry(entry)
     # Build the low-bitrate playback proxy in the background so the first replay
     # of this video streams smoothly over a slow link.
@@ -1209,6 +1232,30 @@ async def delete_library_video(library_id: str):
     remove_proxy(file_path)   # drop the playback proxy alongside the original
     logger.info("Library video deleted: {}", library_id)
     return {"deleted": True, "library_id": library_id}
+
+
+@app.get("/library/{library_id}/video")
+async def stream_library_video(library_id: str):
+    """Stream a library video for inline <video> replay (supports Range requests).
+
+    Used by the "Bản ghi trực tiếp" UI to replay a recording directly — no
+    analysis session needed. Serves the low-bitrate proxy when ready (smooth
+    over a slow remote link), else the original.
+    """
+    from fastapi.responses import FileResponse
+    entry = next((e for e in _library.load_index() if e.get("library_id") == library_id), None)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Library video not found")
+    original = _library.resolve_path(entry)
+    if not original.exists():
+        raise HTTPException(status_code=404, detail="Video file not found")
+    serve_path = playback_path(original)
+    media_type = {
+        ".mp4": "video/mp4", ".mov": "video/quicktime",
+        ".avi": "video/x-msvideo", ".mkv": "video/x-matroska",
+        ".webm": "video/webm",
+    }.get(serve_path.suffix.lower(), "video/mp4")
+    return FileResponse(str(serve_path), media_type=media_type)
 
 
 @app.get("/sessions")
