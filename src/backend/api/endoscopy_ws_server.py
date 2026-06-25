@@ -65,6 +65,7 @@ from llm_prompts import (                                              # noqa: E
     LESION_REPORT_SCHEMA,
     LESION_REPORT_PROMPT,
     build_lesion_user_message,
+    clinical_meta_for,
 )
 from db import (                                                       # noqa: E402
     init_db, restore_db_if_empty, backup_db,
@@ -1401,11 +1402,19 @@ async def live_explain(request: Request, label: str = "", conf: float = 0.0):
     if client is None:
         return {"report": _mock_lesion_report(_label, conf, 0, 0)}
     frame_b64 = _b64.b64encode(raw).decode()
+
+    # Phase 2 RAG grounding — same per-lesion retrieval the upload path runs, so
+    # the live report carries the same guideline citations.
+    _evidence_chunks = kb_rag.retrieve_evidence(_label, k=3, min_sim=0.3)
+    _evidence_block = kb_rag.format_evidence_block(_evidence_chunks)
+    _valid_labels = kb_rag.valid_citation_labels(_evidence_chunks)
+
     messages = [
         {"role": "system", "content": LESION_REPORT_PROMPT},
         {"role": "user", "content": [
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{frame_b64}", "detail": "high"}},
-            {"type": "text", "text": build_lesion_user_message(_label, conf, 0, 0)},
+            {"type": "text", "text": build_lesion_user_message(_label, conf, 0, 0,
+                                                               evidence_block=_evidence_block)},
         ]},
     ]
     response_format = {"type": "json_schema",
@@ -1420,6 +1429,11 @@ async def live_explain(request: Request, label: str = "", conf: float = 0.0):
                     response_format=response_format, max_tokens=LIVE_EXPLAIN_MAX_TOKENS),
                 timeout=LLM_CALL_TIMEOUT_SEC)
         report = _sanitize_llm_output(json.loads(completion.choices[0].message.content or "{}"))
+        # Same normalization + grounded citations as the upload path so live and
+        # file reports are identical (anchor primary_dx to the detector label,
+        # ranked differential, label-aware Paris).
+        _postprocess_lesion_report(report, yolo_label=_label)
+        _attach_evidence_citations(report, _evidence_chunks, _valid_labels)
         return {"report": report}
     except Exception as e:
         code, friendly = _classify_llm_error(e)
@@ -2051,6 +2065,97 @@ async def _stream_llm(websocket: WebSocket, detection: dict, sess: dict, ws_lock
         sess["llm_streaming"] = False
 
 
+def _postprocess_lesion_report(report: dict, yolo_label: str | None = None) -> dict:
+    """Normalize a parsed lesion report in place and return it.
+
+    Label-aware anchoring (fixes two clinical bugs):
+      1. primary_dx is ANCHORED to the YOLO detector class (the trained ground
+         truth) — the VLM only DESCRIBES the image and must not override the
+         diagnosis. differential[0] is forced to match primary_dx; the model's
+         other guesses are kept as lower-probability secondary differentials.
+      2. Paris classification is invalid for diffuse inflammation, so for
+         "inflammatory" labels (viêm) any Paris code the model leaked is replaced
+         with "Không áp dụng Paris (viêm lan tỏa)" — the LA/Kyoto grade the prompt
+         asks for is preserved.
+
+    When yolo_label is None (legacy callers) the old behaviour is kept:
+    primary_dx ← top-probability differential. Shared by the upload
+    (_stream_lesion_report) and live (/live/explain) paths.
+    """
+    import re as _re
+
+    def _dedup_bilingual(text: str) -> str:
+        return _re.sub(r"(\([^)]+\))\s*\([^)]+\)\s*$", r"\1", text).strip()
+
+    conclusion = report.get("conclusion", {})
+    diff = conclusion.get("differential", []) or []
+    for d in diff:
+        d["dx"] = _dedup_bilingual(d.get("dx", ""))
+    diff.sort(key=lambda d: d.get("probability_pct", 0), reverse=True)
+
+    if not yolo_label:
+        # Legacy path — keep prior behaviour (no detector class to anchor to).
+        if diff:
+            conclusion["differential"] = diff
+            conclusion["primary_dx"] = diff[0]["dx"]
+        elif "primary_dx" in conclusion:
+            conclusion["primary_dx"] = _dedup_bilingual(conclusion["primary_dx"])
+        return report
+
+    meta = clinical_meta_for(yolo_label)
+    canonical = meta["canonical_dx"]
+    target_cat = meta["category"]
+
+    # Anchor primary_dx + differential[0] to the detector class. Keep the model's
+    # OTHER-class guesses as secondary differentials, capped below the primary.
+    conf_pct = conclusion.get("ai_confidence") or 80
+    same_probs = [d.get("probability_pct", 0) for d in diff
+                  if clinical_meta_for(d.get("dx", "")).get("category") == target_cat]
+    top_prob = max(1, min(100, int(max([conf_pct] + same_probs))))
+    secondary = [d for d in diff
+                 if clinical_meta_for(d.get("dx", "")).get("category") != target_cat]
+    for d in secondary:                       # secondary must not outrank the primary
+        if d.get("probability_pct", 0) >= top_prob:
+            d["probability_pct"] = max(0, top_prob - 10)
+    conclusion["differential"] = [{"dx": canonical, "probability_pct": top_prob}] + secondary[:2]
+    conclusion["primary_dx"] = canonical
+
+    # Paris is invalid for diffuse inflammation — sanitize a leaked Paris code.
+    if target_cat == "inflammatory":
+        desc = report.setdefault("description", {})
+        pc = str(desc.get("paris_class", "")).strip()
+        has_paris_code = _re.search(r"0-I{1,3}[abc]?\b|0-Is\b|0-Ip\b", pc)
+        if (has_paris_code and "không áp dụng" not in pc.lower()) or not pc:
+            desc["paris_class"] = "Không áp dụng Paris (viêm lan tỏa)"
+    return report
+
+
+def _attach_evidence_citations(report: dict, evidence_chunks: list, valid_labels) -> dict:
+    """Drop model-hallucinated citation labels (keep only those in the retrieved
+    evidence) and overwrite report.citations with the DETERMINISTIC structured
+    citations from the RAG chunks. Shared by the upload + live report paths so
+    both are grounded identically."""
+    conclusion = report.get("conclusion", {})
+    if valid_labels:
+        model_cits = conclusion.get("citations", [])
+        if isinstance(model_cits, list):
+            conclusion["citations"] = [
+                c for c in model_cits
+                if isinstance(c, dict) and c.get("label") in valid_labels
+            ]
+    if evidence_chunks:
+        report["citations"] = [
+            {
+                "label": ch["citation_label"],
+                "source_guideline": ch.get("source_guideline", ""),
+                "year": ch.get("year"),
+                "body_region": ch.get("body_region", ""),
+            }
+            for ch in evidence_chunks
+        ]
+    return report
+
+
 async def _stream_lesion_report(websocket: WebSocket, detection: dict,
                                  sess: dict, video_id: str,
                                  ws_lock: asyncio.Lock | None = None) -> None:
@@ -2166,56 +2271,11 @@ async def _stream_lesion_report(websocket: WebSocket, detection: dict,
                                   "frame_index": frame_index}})
             return
 
-        # Phase A post-process: enforce primary_dx ↔ differential[0] consistency.
-        # The 7B model doesn't reliably follow this rule from prompt alone
-        # (~33% compliance on real runs), so we sort differentials by
-        # probability descending and overwrite primary_dx with the top entry.
-        # This guarantees primary_dx == differential[0].dx and the differential
-        # list is properly ranked — both required by the schema's clinical logic.
-        #
-        # Also strip double-bilingual wraps ("X (X-en) (X)") — model sometimes
-        # appends a redundant VN parenthetical after a valid VN (EN) pair. We
-        # keep only the FIRST parenthesized group following the head term.
-        import re as _re
-        def _dedup_bilingual(text: str) -> str:
-            # Match: "<head> (<first paren>) (<second paren>)" → "<head> (<first paren>)"
-            return _re.sub(r"(\([^)]+\))\s*\([^)]+\)\s*$", r"\1", text).strip()
-
-        conclusion = report.get("conclusion", {})
-        diff = conclusion.get("differential", [])
-        if diff:
-            for d in diff:
-                d["dx"] = _dedup_bilingual(d.get("dx", ""))
-            diff.sort(key=lambda d: d.get("probability_pct", 0), reverse=True)
-            conclusion["differential"] = diff
-            conclusion["primary_dx"] = diff[0]["dx"]
-        elif "primary_dx" in conclusion:
-            conclusion["primary_dx"] = _dedup_bilingual(conclusion["primary_dx"])
-
-        # Phase 2 post-check: validate model-returned citations against retrieved set.
-        # Drop any model-hallucinated [label] not in the injected evidence block.
-        if _valid_labels:
-            model_cits = conclusion.get("citations", [])
-            if isinstance(model_cits, list):
-                conclusion["citations"] = [
-                    c for c in model_cits
-                    if isinstance(c, dict) and c.get("label") in _valid_labels
-                ]
-
-        # Phase 2: attach DETERMINISTIC structured citations from retrieved evidence.
-        # These are always correct (ground truth of what was injected) regardless
-        # of whether the model echoed the tags. Overwrites model field to ensure
-        # no hallucinated labels survive.
-        if _evidence_chunks:
-            report["citations"] = [
-                {
-                    "label": ch["citation_label"],
-                    "source_guideline": ch.get("source_guideline", ""),
-                    "year": ch.get("year"),
-                    "body_region": ch.get("body_region", ""),
-                }
-                for ch in _evidence_chunks
-            ]
+        # Anchor primary_dx to the detector label + label-aware Paris, then attach
+        # the deterministic RAG citations. Shared with /live/explain so both paths
+        # produce a consistent, grounded report.
+        _postprocess_lesion_report(report, yolo_label=label)
+        _attach_evidence_citations(report, _evidence_chunks, _valid_labels)
 
         latency = time.monotonic() - t0
         logger.info("Lesion report generated: model={} latency={:.2f}s severity={} citations={}",

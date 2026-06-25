@@ -194,6 +194,17 @@ NEVER use Chinese characters / Han characters (e.g. 淋巴, 胃, 炎). Foreign t
 MUST be written only in English (Latin script). Output contains only Vietnamese +
 English — any Chinese character is a CRITICAL VIOLATION.
 
+## LESION CLASS IS PRE-DETERMINED BY THE DETECTOR (CRITICAL — NEVER OVERRIDE)
+The lesion CLASS has already been determined by the YOLO detector and is given to
+you in the user message ("LỚP TỔN THƯƠNG ĐÃ ĐƯỢC DETECTOR XÁC ĐỊNH"). The detector
+is the trained ground truth for the class. Your job is to READ the image and
+DESCRIBE the lesion (morphology, severity, recommendations) — NOT to re-diagnose.
+- primary_dx MUST equal the class stated in the user message. Do NOT change it.
+- differential[0] MUST equal primary_dx; any other differentials are SECONDARY
+  possibilities only and must have lower probability than primary_dx.
+- If the image looks atypical for that class, still keep primary_dx, and you MAY
+  note the atypia in the description fields — but never swap the main diagnosis.
+
 ## TECHNIQUE FIELD RULES (do not confuse these)
 - method: the ENDOSCOPY procedure, NOT the AI algorithm.
   ✅ "Nội soi dạ dày-tá tràng AI-assisted (EGD with AI assistance)"
@@ -276,7 +287,13 @@ field cannot be clearly observed (e.g. vessels obscured by fibrin), write
 "Không quan sát rõ" or "Không xác định".
 DO NOT invent information to fill the schema.
 
-## PARIS CLASSIFICATION (MANDATORY APPLICATION)
+## PARIS CLASSIFICATION (ONLY FOR NEOPLASTIC / FOCAL LESIONS)
+
+Apply Paris ONLY when the detector class is a neoplastic / focal lesion
+(ung thư, loét, polyp). For DIFFUSE INFLAMMATION (viêm thực quản, viêm dạ dày HP),
+Paris does NOT apply — the user-message directive will tell you to set
+paris_class to "Không áp dụng Paris ..." with the proper inflammation grade
+(LA grade for esophagitis, Kyoto/Sydney for HP gastritis) instead.
 
 Polypoid (raised) types:
 - 0-Ip (pedunculated): lesion with a distinct stalk; head wider than stalk
@@ -305,6 +322,101 @@ Distinguishing features:
 Return ONLY JSON conforming to schema endoscopy_lesion_report. Do NOT add any
 introductory text, markdown, or explanation. JSON must be parseable by json.loads().
 """
+
+
+# ── Per-class clinical metadata (label-aware report anchoring) ───────────────
+#
+# The YOLO detector is the trained ground truth for the lesion CLASS (cancer
+# classes even require conf ≥ 0.75 to fire). The VLM must therefore only DESCRIBE
+# the image — it must NOT re-diagnose and contradict the detector. This table
+# drives two fixes:
+#   1. primary_dx is anchored to canonical_dx (the detector's class), not the
+#      VLM's free visual guess.
+#   2. Paris classification applies ONLY to neoplastic / focal lesions. For
+#      diffuse inflammation (viêm) Paris is clinically invalid, so we substitute
+#      the proper grading scale (LA grade / Kyoto–Sydney) instead.
+#
+# Keys MUST match the exact label strings emitted by the worker (models/labels.txt).
+LABEL_CLINICAL_META = {
+    "Viêm thực quản": {
+        "category": "inflammatory",
+        "canonical_dx": "Viêm thực quản (esophagitis)",
+        "grading": "phân độ LA (Los Angeles A–D) cho viêm thực quản trào ngược",
+    },
+    "Viêm dạ dày HP": {
+        "category": "inflammatory",
+        "canonical_dx": "Viêm dạ dày HP (Helicobacter pylori gastritis)",
+        "grading": "phân loại Kyoto / Sydney cập nhật cho viêm dạ dày HP",
+    },
+    "Ung thư thực quản": {
+        "category": "neoplastic",
+        "canonical_dx": "Ung thư thực quản (esophageal carcinoma)",
+        "grading": "",
+    },
+    "Ung thư dạ dày": {
+        "category": "neoplastic",
+        "canonical_dx": "Ung thư dạ dày (gastric carcinoma)",
+        "grading": "",
+    },
+    "Loét hoành tá tràng": {
+        "category": "ulcer",
+        "canonical_dx": "Loét hành tá tràng (duodenal bulb ulcer)",
+        "grading": "phân loại Forrest nếu có dấu hiệu chảy máu",
+    },
+}
+
+
+def clinical_meta_for(label: str) -> dict:
+    """Resolve clinical metadata for a YOLO label (or any bilingual dx string).
+
+    Exact-match the known classes first; otherwise infer the category by keyword
+    so unseen label variants / bilingual differential strings still categorise
+    correctly ("viêm" → inflammatory, "ung thư"/"cancer" → neoplastic,
+    "loét"/"ulcer" → ulcer)."""
+    meta = LABEL_CLINICAL_META.get(label)
+    if meta:
+        return meta
+    low = (label or "").lower()
+    if "viêm" in low or "viem" in low:
+        category = "inflammatory"
+    elif "ung thư" in low or "ung thu" in low or "carcin" in low or "cancer" in low:
+        category = "neoplastic"
+    elif "loét" in low or "loet" in low or "ulcer" in low:
+        category = "ulcer"
+    else:
+        category = "unknown"
+    return {"category": category, "canonical_dx": label or "Tổn thương", "grading": ""}
+
+
+def _class_directive(label: str) -> str:
+    """Per-detection instruction appended to the user message: the lesion CLASS
+    is fixed by the detector (anchor primary_dx) and whether Paris applies."""
+    meta = clinical_meta_for(label)
+    canonical = meta["canonical_dx"]
+    if meta["category"] == "inflammatory":
+        grading = meta["grading"] or "thang phân độ viêm phù hợp"
+        return (
+            "## LỚP TỔN THƯƠNG ĐÃ ĐƯỢC DETECTOR XÁC ĐỊNH (BẮT BUỘC TUÂN THỦ)\n"
+            f"- Detector (YOLO) đã xác định đây là: \"{canonical}\". primary_dx PHẢI bằng đúng "
+            "chuỗi này — TUYỆT ĐỐI KHÔNG đổi chẩn đoán chính sang bệnh khác.\n"
+            "- Đây là tổn thương VIÊM LAN TỎA → KHÔNG dùng phân loại Paris (Paris chỉ dành cho "
+            "tổn thương tân sinh / dạng polyp). Đặt description.paris_class = chuỗi bắt đầu bằng "
+            f"\"Không áp dụng Paris\" kèm {grading} nếu quan sát được "
+            "(vd \"Không áp dụng Paris — LA độ B\").\n"
+            "- NHIỆM VỤ của bạn: ĐỌC kỹ ảnh tổn thương và mô tả chi tiết hình thái thực tế "
+            "(bề mặt, màu sắc, bờ, mạch máu, dịch), đánh giá mức độ và đưa khuyến nghị — "
+            "tất cả DỰA TRÊN ảnh, KHÔNG bịa và KHÔNG đổi chẩn đoán chính."
+        )
+    return (
+        "## LỚP TỔN THƯƠNG ĐÃ ĐƯỢC DETECTOR XÁC ĐỊNH (BẮT BUỘC TUÂN THỦ)\n"
+        f"- Detector (YOLO) đã xác định đây là: \"{canonical}\". primary_dx PHẢI bằng đúng "
+        "chuỗi này — TUYỆT ĐỐI KHÔNG đổi chẩn đoán chính sang bệnh khác.\n"
+        "- Đây là tổn thương khu trú / tân sinh → ÁP DỤNG phân loại Paris (0-I / 0-II / 0-III) "
+        "dựa trên hình thái quan sát được trong ảnh.\n"
+        "- NHIỆM VỤ của bạn: ĐỌC kỹ ảnh tổn thương và mô tả chi tiết hình thái thực tế, phân loại "
+        "Paris, đánh giá mức độ và đưa khuyến nghị — DỰA TRÊN ảnh, KHÔNG đổi chẩn đoán chính. "
+        "differential phụ (nếu có) chỉ là các khả năng thứ yếu, không được thay thế primary_dx."
+    )
 
 
 def build_lesion_user_message(label: str, confidence: float, timestamp_ms: int,
@@ -338,5 +450,8 @@ def build_lesion_user_message(label: str, confidence: float, timestamp_ms: int,
         parts.append(patient_ctx)
     if evidence_block:
         parts.append(evidence_block)
+    # Label-aware directive: anchor primary_dx to the detector class + decide
+    # whether Paris classification applies (see _class_directive / LABEL_CLINICAL_META).
+    parts.append(_class_directive(label))
     parts.append(detection_text)
     return "\n\n".join(parts)

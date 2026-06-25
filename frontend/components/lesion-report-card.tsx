@@ -154,7 +154,13 @@ export function LesionReportCard({ report }: LesionReportCardProps) {
       <Section title="Mô tả tổn thương" icon="📋">
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
           <KeyValue label="Kích thước"  value={report.description.size_mm} />
-          <KeyValue label="Phân loại Paris" value={report.description.paris_class} />
+          {/* Paris label is dynamic: inflammatory lesions show "Không áp dụng Paris"
+              (+ LA/Kyoto grade) under a generic "Phân loại" row, neoplastic/focal
+              lesions keep the "Phân loại Paris" label. */}
+          <KeyValue
+            label={/không áp dụng/i.test(report.description.paris_class || '') ? 'Phân loại' : 'Phân loại Paris'}
+            value={report.description.paris_class}
+          />
           <KeyValue label="Bề mặt"      value={report.description.surface} />
           <KeyValue label="Màu sắc"     value={report.description.color} />
           <KeyValue label="Bờ"          value={report.description.margin} />
