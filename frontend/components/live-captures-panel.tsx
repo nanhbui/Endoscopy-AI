@@ -17,6 +17,7 @@ import CircularProgress from '@mui/material/CircularProgress';
 import { Image as ImageIcon, Sparkles, X, AlertCircle, ChevronDown, ChevronUp } from 'lucide-react';
 import type { LesionReport } from '@/lib/ws-client';
 import { LesionReportCard } from '@/components/lesion-report-card';
+import { AnalysisFeedbackControl } from '@/components/analysis-feedback-control';
 
 export interface LiveCapture {
   id: number;
@@ -35,7 +36,11 @@ export interface LiveCapture {
 const sevColor = (s?: string) =>
   s === 'cao' ? '#DC2626' : s === 'trung bình' ? '#D97706' : '#059669';
 
-function CaptureCard({ c, onRemove }: { c: LiveCapture; onRemove?: (id: number) => void }) {
+function CaptureCard({ c, onRemove, onApplyAnalysis }: {
+  c: LiveCapture;
+  onRemove?: (id: number) => void;
+  onApplyAnalysis?: (id: number, next: LesionReport) => void;
+}) {
   const [open, setOpen] = useState(false);
   return (
     <Box sx={{ borderRadius: '12px', border: '1px solid #ECF1F0', overflow: 'hidden' }}>
@@ -86,6 +91,21 @@ function CaptureCard({ c, onRemove }: { c: LiveCapture; onRemove?: (id: number) 
                 <LesionReportCard report={c.report} />
               </Box>
             )}
+
+            {/* Flag the AI ANALYSIS (not the detection) as wrong — re-analyze,
+                edit, or clear. Applies to this capture's local report; persisted
+                at "Tạo báo cáo đầy đủ". */}
+            {onApplyAnalysis && (
+              <Box sx={{ mt: 0.25 }}>
+                <AnalysisFeedbackControl
+                  report={c.report}
+                  label={c.label}
+                  confidence={c.confidence}
+                  frameB64={c.frameB64}
+                  onApply={(next) => onApplyAnalysis(c.id, next)}
+                />
+              </Box>
+            )}
           </Box>
         ) : (
           <Typography sx={{ fontSize: '0.74rem', color: 'text.disabled' }}>Chưa có giải thích</Typography>
@@ -98,9 +118,11 @@ function CaptureCard({ c, onRemove }: { c: LiveCapture; onRemove?: (id: number) 
 export function LiveCapturesPanel({
   captures,
   onRemove,
+  onApplyAnalysis,
 }: {
   captures: LiveCapture[];
   onRemove?: (id: number) => void;
+  onApplyAnalysis?: (id: number, next: LesionReport) => void;
 }) {
   return (
     <Box sx={{ width: { xs: '100%', md: 340 }, flexShrink: 0, display: 'flex', flexDirection: 'column', borderRadius: '16px', border: '1px solid #E2EAE8', backgroundColor: '#fff', overflow: 'hidden' }}>
@@ -120,7 +142,7 @@ export function LiveCapturesPanel({
             </Typography>
           </Box>
         ) : captures.map((c) => (
-          <CaptureCard key={c.id} c={c} onRemove={onRemove} />
+          <CaptureCard key={c.id} c={c} onRemove={onRemove} onApplyAnalysis={onApplyAnalysis} />
         ))}
       </Box>
     </Box>

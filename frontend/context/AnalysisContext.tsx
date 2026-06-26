@@ -85,6 +85,10 @@ export interface Detection {
    *  `-1` = recheck-origin (manual inspection, not auto-trackable).
    *  `undefined` = legacy detection from older BE. */
   trackId?: number;
+  /** Frame index this detection paused on — the DB key for its lesion_report.
+   *  Needed to update the persisted report ("Báo sai phân tích") in the video
+   *  flow. Undefined for live captures (persisted by list index at finalize). */
+  frame_index?: number;
   frame_b64?: string;
   /** Markdown rendering of the structured lesion report (legacy fallback +
    *  Phase A bridge). Kept for ReactMarkdown surfaces and history that
@@ -223,6 +227,8 @@ interface AnalysisContextType {
   setIsPlaying: (v: boolean) => void;
   addDetection: (d: Detection) => void;
   removeDetection: (timestamp: number) => void;
+  /** "Báo sai phân tích" — replace a detection's lesion report in the session. */
+  updateDetectionReport: (target: Detection, report: LesionReport) => void;
   resetAnalysis: () => void;
   /** Stop the running pipeline but KEEP the current session + findings and jump
    *  straight to the end-of-session report (workspace "Dừng" button). */
@@ -309,6 +315,7 @@ function toDetection(d: DetectionData): Detection {
     },
     timestamp: d.timestamp_ms / 1000,
     trackId: d.lesion.track_id,
+    frame_index: d.frame_index,
     frame_b64: d.frame_b64,
   };
 }
@@ -463,6 +470,22 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
     },
     [currentSessionId],
   );
+
+  // "Báo sai phân tích" — replace one detection's report (re-analyzed / edited /
+  // cleared). Matches by reference, or by frame_index for the video flow where the
+  // modal hands back a derived copy. Drops the stale markdown so the card renders
+  // the new report.
+  const updateDetectionReport = useCallback((target: Detection, report: LesionReport) => {
+    const matches = (d: Detection) =>
+      d === target || (target.frame_index != null && d.frame_index === target.frame_index);
+    updateCurrentSession((sess) => ({
+      ...sess,
+      detections: sess.detections.map((d) => matches(d) ? { ...d, lesionReport: report, llmInsight: undefined } : d),
+    }));
+    // Also patch the live "currentDetection" so the video pause panel (which reads
+    // it, not the session list) reflects the change immediately.
+    setCurrentDetection((cur) => cur && matches(cur) ? { ...cur, lesionReport: report, llmInsight: undefined } : cur);
+  }, [updateCurrentSession]);
 
   // ── WebSocket event handler ───────────────────────────────────────────────
 
@@ -1202,6 +1225,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       setIsPlaying,
       addDetection,
       removeDetection,
+      updateDetectionReport,
       resetAnalysis,
       finalizeSession,
       saveLiveSession,
@@ -1219,7 +1243,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       recheckResult, isRecheckModalOpen, openRecheckModal, closeRecheckModal,
       removeCapture,
       sendSessionQA, stopSessionQA, clearSessionQA, lastError, setIsPlaying,
-      addDetection, removeDetection, resetAnalysis, finalizeSession, saveLiveSession, removeSession, clearSessions,
+      addDetection, removeDetection, updateDetectionReport, resetAnalysis, finalizeSession, saveLiveSession, removeSession, clearSessions,
     ],
   );
 

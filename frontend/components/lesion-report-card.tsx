@@ -18,7 +18,7 @@
  */
 
 import { useState } from 'react';
-import { ChevronDown, ChevronRight, Check } from 'lucide-react';
+import { ChevronDown, ChevronRight, Check, Eraser, Pencil } from 'lucide-react';
 import Box from '@mui/material/Box';
 import LinearProgress from '@mui/material/LinearProgress';
 import Typography from '@mui/material/Typography';
@@ -90,6 +90,37 @@ export interface LesionReportCardProps {
 }
 
 export function LesionReportCard({ report }: LesionReportCardProps) {
+  // "Báo sai phân tích" outcomes — render distinct surfaces instead of the
+  // structured card (which would show empty/stale fields).
+  if (report.analysis_cleared) {
+    return (
+      <Box sx={{
+        display: 'flex', alignItems: 'center', gap: 1, px: 1.75, py: 1.25,
+        borderRadius: '12px', border: '1px dashed #CBD5D3', backgroundColor: '#F8FAFB',
+      }}>
+        <Eraser size={15} color="#9AA5B1" style={{ flexShrink: 0 }} />
+        <Typography sx={{ fontSize: '0.8rem', color: 'text.secondary', lineHeight: 1.5 }}>
+          Phân tích AI đã được gỡ — tổn thương vẫn được tính là một phát hiện.
+        </Typography>
+      </Box>
+    );
+  }
+  if (report.edited_text) {
+    return (
+      <Box sx={{
+        borderRadius: '12px', border: '1px solid #E2EAE8', backgroundColor: '#FFFFFF', overflow: 'hidden',
+      }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.6, px: 1.75, py: 0.85, backgroundColor: 'rgba(0,96,100,0.06)', borderBottom: '1px solid #E2EAE8' }}>
+          <Pencil size={13} color="#006064" />
+          <Typography sx={{ fontSize: '0.72rem', fontWeight: 700, color: '#006064' }}>Bác sĩ đã chỉnh sửa phân tích</Typography>
+        </Box>
+        <Typography sx={{ px: 1.75, py: 1.25, fontSize: '0.84rem', lineHeight: 1.65, color: 'text.primary', whiteSpace: 'pre-wrap' }}>
+          {report.edited_text}
+        </Typography>
+      </Box>
+    );
+  }
+
   const sev = SEVERITY_STYLE[report.conclusion.severity];
 
   return (

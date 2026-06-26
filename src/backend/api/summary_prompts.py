@@ -712,6 +712,35 @@ def build_session_summary_input(reports: list[dict],
         rep = row.get("report", {})
         concl = rep.get("conclusion", {})
         desc = rep.get("description", {})
+        fi = row.get("frame_index")
+        dx = concl.get("primary_dx", "?")
+        sev = concl.get("severity", "?")
+
+        # Doctor flagged the AI analysis as wrong ("Báo sai phân tích"):
+        #  - cleared  → the lesion is REAL (still counted) but its (wrong) AI
+        #               detail is withheld; send only label + severity.
+        #  - edited   → the doctor rewrote it; send their text VERBATIM as the
+        #               authoritative analysis instead of the structured fields.
+        if rep.get("analysis_cleared"):
+            lines.extend([
+                "",
+                f"### Finding #{i} — frame {fi}",
+                f"- primary_dx: {dx}",
+                f"- severity: {sev}",
+                "- (Bác sĩ đã gỡ phân tích AI cho tổn thương này — không có mô tả chi tiết)",
+            ])
+            continue
+        if rep.get("edited_text"):
+            lines.extend([
+                "",
+                f"### Finding #{i} — frame {fi}",
+                f"- primary_dx: {dx}",
+                f"- severity: {sev}",
+                "- Phân tích (bác sĩ đã chỉnh sửa — dùng làm nguồn chính):",
+                f"  {rep.get('edited_text')}",
+            ])
+            continue
+
         # Truncate fields that can be very long to keep prompt token-efficient.
         recs = concl.get("recommendations", []) or []
         diffs = concl.get("differential", []) or []

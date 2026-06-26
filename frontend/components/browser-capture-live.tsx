@@ -391,6 +391,12 @@ export function BrowserCaptureLive({ onViewRecordings }: BrowserCaptureLiveProps
     setCaptures((prev) => prev.filter((c) => c.id !== id));
   }, []);
 
+  // "Báo sai phân tích" applied to a live capture — update its report in place.
+  // It's persisted (kept/edited/cleared) when the doctor hits "Tạo báo cáo đầy đủ".
+  const applyAnalysis = useCallback((id: number, next: LesionReport) => {
+    setCaptures((prev) => prev.map((c) => c.id === id ? { ...c, report: next } : c));
+  }, []);
+
   // "Tạo báo cáo" — fold captures into a live session and open /report.
   // Block report creation until every capture's VLM call has settled — otherwise
   // detections land in the report with an empty "Phân tích AI".
@@ -739,7 +745,7 @@ export function BrowserCaptureLive({ onViewRecordings }: BrowserCaptureLiveProps
 
         {/* Right panel — auto-captured detections + their LLM explanations */}
         {(previewing || captures.length > 0) && (
-          <LiveCapturesPanel captures={captures} onRemove={removeCapture} />
+          <LiveCapturesPanel captures={captures} onRemove={removeCapture} onApplyAnalysis={applyAnalysis} />
         )}
       </Box>
 

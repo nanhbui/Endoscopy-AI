@@ -1346,6 +1346,42 @@ async def get_patient_context_endpoint(session_id: str):
     return ctx_dict if ctx_dict else {}
 
 
+@app.put("/sessions/{session_id}/reports/{frame_index}")
+async def upsert_lesion_report(session_id: str, frame_index: int, request: Request):
+    """Overwrite one persisted lesion report — used by "Báo sai phân tích" on the
+    video flow to apply the doctor's choice: a re-analyzed report, an edited one
+    (report.edited_text), or a cleared stub (report.analysis_cleared). The summary
+    reads lesion_reports, so this is what makes the change reach the synthesis.
+    Body: {report: <LesionReport>, frame_b64?: str}."""
+    body = await request.json()
+    report = body.get("report")
+    if not isinstance(report, dict):
+        raise HTTPException(status_code=400, detail="report (object) required")
+    ok = save_lesion_report(
+        session_id=session_id, frame_index=frame_index, report=report,
+        model=_llm_model_name("vision"), generated_at_ms=int(time.time() * 1000),
+        frame_b64=body.get("frame_b64"),
+    )
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to save lesion report")
+    return {"ok": True}
+
+
+@app.post("/sessions/{session_id}/regenerate-summary")
+async def regenerate_summary(session_id: str):
+    """Rebuild the session summary from the CURRENT lesion_reports. The video flow
+    auto-generates its summary at end-of-video, so "Báo sai phân tích" edits made
+    afterwards in the report modal only reach the synthesis by re-running this.
+    Reuses the live session state for counts when still in memory."""
+    sess = _sessions.get(session_id) or {"confirmed_detections": [], "confirmed_captures": []}
+    try:
+        summary = await _generate_session_summary(sess, session_id)
+    except Exception as exc:
+        logger.error("regenerate_summary failed for {}: {}", session_id, exc)
+        raise HTTPException(status_code=500, detail="summary generation failed")
+    return {"ok": summary is not None}
+
+
 @app.get("/live/{video_id}/mjpeg")
 def stream_live_mjpeg(video_id: str):
     """Live-mode (Trực tuyến) video: stream the captured + annotated frames from

@@ -85,6 +85,12 @@ export interface LesionReport {
   };
   /** Phase 3 — optional guideline citations from Phase-2 grounding. */
   citations?: Citation[];
+  /** "Báo sai phân tích" — doctor's manual rewrite of the AI analysis. When set,
+   *  it's shown instead of the structured card and sent verbatim to the summary. */
+  edited_text?: string;
+  /** "Báo sai phân tích" — doctor removed the (wrong) AI analysis. The lesion is
+   *  still a real finding (counted) but carries no detailed analysis. */
+  analysis_cleared?: boolean;
 }
 
 // Session summary (Phase B) — emitted once when VIDEO_FINISHED fires.
