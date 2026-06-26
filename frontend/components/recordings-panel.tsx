@@ -15,6 +15,7 @@ import Box, { type BoxProps } from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
 import MuiButton from '@mui/material/Button';
 import CircularProgress from '@mui/material/CircularProgress';
+import LinearProgress from '@mui/material/LinearProgress';
 import {
   deleteLibraryVideo,
   libraryVideoUrl,
@@ -22,6 +23,7 @@ import {
   type LibraryVideo,
 } from '@/lib/ws-client';
 import { fmtBytes, fmtIsoDateTime, fmtDurationMs } from '@/lib/format';
+import { useRecordingUpload } from '@/lib/recording-upload-store';
 
 interface RecordingsPanelProps {
   /** Re-analyze a recording: runs it through the same pipeline as a library video. */
@@ -37,6 +39,7 @@ export function RecordingsPanel({ onSelect, sx }: RecordingsPanelProps) {
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const upload = useRecordingUpload();
 
   const fetchRecordings = useCallback(async () => {
     setLoading(true);
@@ -51,6 +54,11 @@ export function RecordingsPanel({ onSelect, sx }: RecordingsPanelProps) {
   }, []);
 
   useEffect(() => { fetchRecordings(); }, [fetchRecordings]);
+
+  // A finished upload adds a new recording — refresh the list so it appears.
+  useEffect(() => {
+    if (upload.status === 'done') fetchRecordings();
+  }, [upload.status, fetchRecordings]);
 
   const handleDelete = useCallback(async (libraryId: string) => {
     setConfirmDeleteId(null);
@@ -84,6 +92,27 @@ export function RecordingsPanel({ onSelect, sx }: RecordingsPanelProps) {
 
       {error && (
         <Typography sx={{ px: 2.5, py: 1, fontSize: '0.78rem', color: '#D32F2F' }}>{error}</Typography>
+      )}
+
+      {/* In-flight recording upload (name + %) — driven by the shared store. */}
+      {upload.active && (
+        <Box sx={{ px: 2, py: 1.25, borderBottom: '1px solid #E2EAE8', backgroundColor: 'rgba(0,131,143,0.04)', display: 'flex', flexDirection: 'column', gap: 0.6 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+            {upload.status === 'uploading' && <CircularProgress size={14} sx={{ color: '#00838F', flexShrink: 0 }} />}
+            <Typography sx={{ fontSize: '0.78rem', fontWeight: 600, flex: 1, color: upload.status === 'error' ? '#D32F2F' : '#00838F', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {upload.status === 'uploading' && `Đang lưu: ${upload.name}`}
+              {upload.status === 'done' && 'Đã lưu bản ghi mới.'}
+              {upload.status === 'error' && 'Lưu bản ghi thất bại.'}
+            </Typography>
+            {upload.status === 'uploading' && (
+              <Typography sx={{ fontSize: '0.78rem', fontWeight: 700, color: '#00838F', flexShrink: 0 }}>{upload.pct}%</Typography>
+            )}
+          </Box>
+          {upload.status === 'uploading' && (
+            <LinearProgress variant="determinate" value={upload.pct}
+              sx={{ height: 5, borderRadius: 3, backgroundColor: 'rgba(0,131,143,0.12)', '& .MuiLinearProgress-bar': { backgroundColor: '#00838F' } }} />
+          )}
+        </Box>
       )}
 
       <Box sx={{ flex: 1, overflowY: 'auto', p: loading || videos.length === 0 ? 0 : 1 }}>

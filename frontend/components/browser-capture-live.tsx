@@ -22,6 +22,7 @@ import CircularProgress from '@mui/material/CircularProgress';
 import LinearProgress from '@mui/material/LinearProgress';
 import { Radio, Cpu, Square, Video as VideoIcon, X, Info, Maximize2, FileText, StopCircle, CheckCircle2 } from 'lucide-react';
 import { WS_BASE, API_BASE, uploadRecording } from '@/lib/ws-client';
+import { startRecordingUpload, setRecordingUploadProgress, finishRecordingUpload, useRecordingUpload } from '@/lib/recording-upload-store';
 import { labelToColor as colorFor } from '@/lib/lesion-colors';
 import { useAnalysis, lesionReportToMarkdown, type Detection } from '@/context/AnalysisContext';
 import { LiveCapturesPanel, type LiveCapture } from '@/components/live-captures-panel';
@@ -72,7 +73,13 @@ function b64ToJpegBlob(b64: string): Blob {
   return new Blob([arr], { type: 'image/jpeg' });
 }
 
-export function BrowserCaptureLive() {
+interface BrowserCaptureLiveProps {
+  /** Opens the source modal on the "Bản ghi trực tiếp" tab — wired to the
+   *  "Xem bản ghi" link shown after a recording is saved. */
+  onViewRecordings?: () => void;
+}
+
+export function BrowserCaptureLive({ onViewRecordings }: BrowserCaptureLiveProps) {
   const { saveLiveSession } = useAnalysis();
 
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -93,6 +100,7 @@ export function BrowserCaptureLive() {
   const recordedChunksRef = useRef<Blob[]>([]);
   const recordStartMsRef = useRef(0);
   const recordTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const recNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [deviceId, setDeviceId] = useState('');
@@ -112,10 +120,16 @@ export function BrowserCaptureLive() {
   const [captures, setCaptures] = useState<LiveCapture[]>([]);
   const [err, setErr] = useState('');
   const [patientCtx, setPatientCtx] = useState<PatientContextData>(emptyPatientContext);
-  // Recording UI state: live elapsed seconds + upload outcome banner.
+  // Recording UI state: live elapsed seconds. Upload progress (name + %) lives in
+  // the shared store so the recordings list can show it too.
   const [recording, setRecording] = useState(false);
   const [recordElapsed, setRecordElapsed] = useState(0);
-  const [recordStatus, setRecordStatus] = useState<'' | 'saving' | 'saved' | 'failed'>('');
+  const [recNotice, setRecNotice] = useState(false);   // transient "recording started" banner
+  const [savedNotice, setSavedNotice] = useState(false); // persistent "saved → view" CTA
+  const upload = useRecordingUpload();
+
+  // Raise the persistent "saved → Xem bản ghi" banner once the upload finishes.
+  useEffect(() => { if (upload.status === 'done') setSavedNotice(true); }, [upload.status]);
 
   const refreshDevices = useCallback(async () => {
     try {
@@ -232,7 +246,7 @@ export function BrowserCaptureLive() {
     if (!b64) return;
     const id = ++capIdRef.current;
     setCaptures((prev) => [
-      { id, frameB64: b64, label: box.label, confidence: box.confidence, ts: Date.now(), report: null, explaining: true },
+      { id, frameB64: b64, label: box.label, confidence: box.confidence, bboxNorm: box.bbox, ts: Date.now(), report: null, explaining: true },
       ...prev,
     ].slice(0, MAX_CAPTURES));
     explainCapture(id, b64, box);
@@ -267,8 +281,14 @@ export function BrowserCaptureLive() {
       recorderRef.current = rec;
       recordStartMsRef.current = Date.now();
       setRecording(true);
-      setRecordStatus('');
       setRecordElapsed(0);
+      // One-shot "recording started" notice so the doctor knows the session is
+      // being recorded; auto-dismisses (the persistent REC badge remains).
+      setRecNotice(true);
+      setSavedNotice(false);   // clear any prior session's "saved" banner
+
+      if (recNoticeTimerRef.current) clearTimeout(recNoticeTimerRef.current);
+      recNoticeTimerRef.current = setTimeout(() => setRecNotice(false), 5000);
       recordTimerRef.current = setInterval(
         () => setRecordElapsed(Math.floor((Date.now() - recordStartMsRef.current) / 1000)), 1000);
     } catch {
@@ -291,13 +311,15 @@ export function BrowserCaptureLive() {
     });
     recordedChunksRef.current = [];
     if (blob.size === 0) return;
-    setRecordStatus('saving');
     const name = `Trực tiếp ${new Date().toLocaleString('vi-VN')}.webm`;
+    // Drive the shared store so the name + % shows on both the live view banner
+    // and the recordings list.
+    startRecordingUpload(name);
     try {
-      await uploadRecording(blob, name, { durationMs });
-      setRecordStatus('saved');
+      await uploadRecording(blob, name, { durationMs, onProgress: setRecordingUploadProgress });
+      finishRecordingUpload(true);
     } catch {
-      setRecordStatus('failed');
+      finishRecordingUpload(false);
     }
   }, []);
 
@@ -379,16 +401,27 @@ export function BrowserCaptureLive() {
     if (captures.length === 0 || captures.some((c) => c.explaining)) return;
     stopSession();   // end the live mirror/detector — the report popup takes over
     const base = Math.min(...captures.map((c) => c.ts));
-    const dets: Detection[] = captures.map((c) => ({
+    const dets: Detection[] = captures.map((c) => {
+      // Carry the YOLO box (1920×1080 px) as percent of frame — same shape the
+      // upload path uses — so the session-report modal can persist it as a
+      // false-positive ("Báo sai") that future runs match by IoU.
+      const [bx1, by1, bx2, by2] = c.bboxNorm;
+      return {
       label: c.label,
       confidence: c.confidence,
-      bbox: { x: 0, y: 0, width: 0, height: 0 }, // live boxes are per-frame; not meaningful here
+      bbox: {
+        x: (bx1 / FRAME_W) * 100,
+        y: (by1 / FRAME_H) * 100,
+        width: ((bx2 - bx1) / FRAME_W) * 100,
+        height: ((by2 - by1) / FRAME_H) * 100,
+      },
       timestamp: Math.max(0, Math.round((c.ts - base) / 1000)),
       frame_b64: c.frameB64,
       lesionReport: c.report ?? undefined,
       llmInsight: c.report ? lesionReportToMarkdown(c.report) : undefined,
       status: 'analyzed',
-    }));
+      };
+    });
     const name = `Trực tiếp ${new Date().toLocaleString('vi-VN')}`;
     // saveLiveSession flips pipelineState → EOS_SUMMARY; the workspace page then
     // renders its SessionReportModal (the stop→report popup). We intentionally do
@@ -406,20 +439,16 @@ export function BrowserCaptureLive() {
       }).catch(() => { /* non-fatal — summary degrades to no patient context */ });
     }
 
-    // Persist captures as lesion_reports + kick off the SAME AI summary the upload
-    // path runs, so the live report is identical. Fire-and-forget: the backend
-    // generates in the background and the Report page polls for the result.
-    fetch(`${API_BASE}/live/sessions/${sessionId}/finalize`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ detections: dets }),
-    }).catch(() => { /* non-fatal — report still shows detections; summary stays pending */ });
+    // NOTE: AI summary is NOT kicked off here. It's deferred to "Tạo báo cáo đầy
+    // đủ" in the session-report modal so detections the doctor flags as "Báo sai"
+    // can be excluded from the synthesis (only the kept findings are summarized).
   }, [captures, patientCtx, saveLiveSession, stopSession]);
 
   // Cleanup on unmount.
   useEffect(() => () => {
     if (timerRef.current) clearInterval(timerRef.current);
     if (recordTimerRef.current) clearInterval(recordTimerRef.current);
+    if (recNoticeTimerRef.current) clearTimeout(recNoticeTimerRef.current);
     try { recorderRef.current?.stop(); } catch { /* already stopped */ }
     wsRef.current?.close();
     streamRef.current?.getTracks().forEach((t) => t.stop());
@@ -433,6 +462,17 @@ export function BrowserCaptureLive() {
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+      {/* "Recording started" notice — shown when AI starts (= recording starts),
+          auto-dismisses after a few seconds. The REC badge on the video persists. */}
+      {recNotice && (
+        <Box sx={{ px: 2, py: 1.25, borderRadius: '12px', backgroundColor: 'rgba(220,38,38,0.07)', border: '1px solid rgba(220,38,38,0.3)', display: 'flex', alignItems: 'center', gap: 1.5 }}>
+          <Box sx={{ width: 9, height: 9, borderRadius: '50%', backgroundColor: '#DC2626', flexShrink: 0, animation: 'pulse 1.5s infinite', '@keyframes pulse': { '0%,100%': { opacity: 1 }, '50%': { opacity: 0.3 } } }} />
+          <Typography sx={{ fontSize: '0.85rem', color: '#B91C1C', fontWeight: 600, flex: 1 }}>
+            Đã bắt đầu ghi hình phiên trực tiếp — video sẽ được lưu vào “Bản ghi trực tiếp” khi bạn bấm “Dừng phiên”.
+          </Typography>
+        </Box>
+      )}
+
       {/* Patient context — filled before starting; saved on "Tạo báo cáo" */}
       {!aiOn && (
         <PatientContextForm data={patientCtx} onChange={setPatientCtx} />
@@ -522,13 +562,44 @@ export function BrowserCaptureLive() {
             <Typography sx={{ fontSize: '0.78rem', color: '#DC2626' }}>{err}</Typography>
           )}
 
-          {/* Recording upload status */}
-          {recordStatus && (
-            <Typography sx={{ fontSize: '0.78rem', fontWeight: 600, color: recordStatus === 'failed' ? '#DC2626' : '#00838F' }}>
-              {recordStatus === 'saving' && 'Đang lưu bản ghi phiên trực tiếp vào thư viện…'}
-              {recordStatus === 'saved' && 'Đã lưu bản ghi vào “Bản ghi trực tiếp”.'}
-              {recordStatus === 'failed' && 'Lưu bản ghi thất bại — phiên vẫn được xử lý bình thường.'}
-            </Typography>
+          {/* Recording upload progress — name + % (shared with the recordings list).
+              The 'done' case is handled by the persistent "saved → Xem bản ghi" CTA below. */}
+          {upload.active && upload.status !== 'done' && (
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                <Typography sx={{ fontSize: '0.78rem', fontWeight: 600, flex: 1, color: upload.status === 'error' ? '#DC2626' : '#00838F', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {upload.status === 'uploading' && `Đang lưu bản ghi: ${upload.name}`}
+                  {upload.status === 'error' && 'Lưu bản ghi thất bại — phiên vẫn được xử lý bình thường.'}
+                </Typography>
+                {upload.status === 'uploading' && (
+                  <Typography sx={{ fontSize: '0.78rem', fontWeight: 700, color: '#00838F', flexShrink: 0 }}>{upload.pct}%</Typography>
+                )}
+              </Box>
+              {upload.status === 'uploading' && (
+                <LinearProgress variant="determinate" value={upload.pct}
+                  sx={{ height: 5, borderRadius: 3, backgroundColor: 'rgba(0,131,143,0.12)', '& .MuiLinearProgress-bar': { backgroundColor: '#00838F' } }} />
+              )}
+            </Box>
+          )}
+
+          {/* Persistent "recording saved" CTA — links straight to the recordings tab. */}
+          {savedNotice && (
+            <Box sx={{ px: 2, py: 1.25, borderRadius: '12px', backgroundColor: 'rgba(0,131,143,0.06)', border: '1px solid #A7D8DC', display: 'flex', alignItems: 'center', gap: 1.5 }}>
+              <CheckCircle2 size={18} color="#00838F" style={{ flexShrink: 0 }} />
+              <Typography sx={{ fontSize: '0.85rem', color: '#0D1B2A', fontWeight: 600, flex: 1 }}>
+                Đã lưu bản ghi phiên trực tiếp vào thư viện.
+              </Typography>
+              {onViewRecordings && (
+                <Box component="button" onClick={() => { setSavedNotice(false); onViewRecordings(); }}
+                  sx={{ ...btnSx('#00838F'), py: 0.6, px: 1.5, fontSize: '0.8rem', flexShrink: 0 }}>
+                  <FileText size={15} /> Xem bản ghi
+                </Box>
+              )}
+              <Box component="button" onClick={() => setSavedNotice(false)}
+                sx={{ border: 'none', background: 'transparent', cursor: 'pointer', color: 'text.secondary', display: 'inline-flex', p: 0.25, flexShrink: 0 }}>
+                <X size={16} />
+              </Box>
+            </Box>
           )}
 
           {/* Controls */}

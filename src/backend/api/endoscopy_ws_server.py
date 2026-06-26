@@ -69,7 +69,7 @@ from llm_prompts import (                                              # noqa: E
 )
 from db import (                                                       # noqa: E402
     init_db, restore_db_if_empty, backup_db,
-    save_lesion_report, get_lesion_reports_for_session,
+    save_lesion_report, get_lesion_reports_for_session, delete_lesion_report,
     save_false_positive, load_all_false_positives, matches_false_positive,
     save_confirmed_lesion, load_all_confirmed_lesions,
     delete_confirmed_lesions_matching, delete_false_positives_matching,
@@ -901,6 +901,36 @@ async def list_false_positives():
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@app.post("/analytics/false-positives")
+async def create_false_positive(request: Request):
+    """Persist a false-positive reported from the live (Trực tiếp) session-summary
+    panel. Unlike ACTION_REPORT_FALSE_POSITIVE (which needs a paused pipeline
+    detection), this takes the detection straight from the FE: {label, bbox,
+    frame_b64, session_id}. bbox = [x1,y1,x2,y2] normalized to 1920×1080, same
+    space as DETECTION_FOUND, so replays + future live scans match it by IoU.
+    Mirrors the WS action's "Báo sai overrides Xác nhận luôn" cleanup."""
+    body = await request.json()
+    label = (body.get("label") or "").strip()
+    raw = body.get("bbox") or []
+    if not label or not isinstance(raw, list) or len(raw) < 4:
+        raise HTTPException(status_code=400, detail="label and bbox[4] required")
+    bbox = [float(v) for v in raw[:4]]
+    ok = save_false_positive(
+        label=label, bbox=bbox,
+        session_id_source=(body.get("session_id") or "live"),
+        reported_at_ms=int(time.time() * 1000),
+        frame_b64=body.get("frame_b64"),
+    )
+    if not ok:
+        # save_false_positive rejects near-full-frame boxes (area-ratio guard).
+        raise HTTPException(status_code=422, detail="false-positive rejected (bbox too large or invalid)")
+    # "Báo sai" overrides a prior "Xác nhận luôn" on the same region.
+    delete_confirmed_lesions_matching(label, bbox)
+    logger.info("False-positive created via /analytics: {} bbox={}",
+                label, [round(v, 1) for v in bbox])
+    return {"ok": True}
+
+
 @app.delete("/analytics/false-positives/{fp_id}")
 async def delete_false_positive(fp_id: int):
     """Delete one FP entry. Active sessions still have it cached in
@@ -1355,6 +1385,11 @@ async def ws_live_detect(websocket: WebSocket, video_id: str):
     # One detector per connection → its viewport cache + dedup history span the
     # whole live session (mirrors the upload worker's per-session dedup).
     detector = LiveDetector()
+    # Load false-positives ONCE per connection so a region the doctor flagged in
+    # a prior session (or this session, via "Báo sai") is auto-skipped here too —
+    # symmetric to the upload path's auto-skip at /ws/analysis.
+    fp_list = load_all_false_positives()
+    logger.info("[LIVE] loaded {} false-positives for auto-skip: {}", len(fp_list), video_id)
     # AI-detect WS connecting == the doctor pressed "Bắt đầu AI" == the browser
     # started recording this session. Log it clearly so `tail` shows live activity.
     logger.info("[LIVE] ▶ session started (AI detect + client recording): {}", video_id)
@@ -1364,6 +1399,18 @@ async def ws_live_detect(websocket: WebSocket, video_id: str):
         while True:
             data = await websocket.receive_bytes()
             result = await asyncio.to_thread(detector.detect, data)
+            # Drop any box/capture matching a known false-positive (label + IoU)
+            # from BOTH the overlay and the snapshot list, so the doctor never
+            # sees or records a region already classified as wrong.
+            if fp_list:
+                for key in ("boxes", "captures"):
+                    dets = result.get(key) or []
+                    if dets:
+                        result[key] = [
+                            d for d in dets
+                            if not matches_false_positive(
+                                d.get("label", ""), list(d.get("bbox", [])), fp_list)
+                        ]
             _frames += 1
             _dets += len(result.get("captures") or [])
             if _frames == 1:
@@ -1946,6 +1993,13 @@ async def ws_analysis(websocket: WebSocket, video_id: str):
                                 label, [round(v, 1) for v in bbox],
                                 len(sess["false_positives"]),
                             )
+                    # Drop this detection's persisted report (if it was already
+                    # explained) so its text is EXCLUDED from the session summary —
+                    # "Báo sai" means it's not a real finding. No-op when nothing
+                    # was saved yet (reported before explaining).
+                    frame_index = pending.get("frame_index")
+                    if frame_index is not None and delete_lesion_report(video_id, frame_index):
+                        logger.info("Removed lesion_report (frame={}) after Báo sai", frame_index)
                 sess["conv_history"] = []
                 sess["llm_streaming"] = False
                 ctrl.send_action("ACTION_IGNORE", msg.get("payload"))

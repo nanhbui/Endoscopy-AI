@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { CheckCircle2, UploadCloud, X } from 'lucide-react';
 import Box from '@mui/material/Box';
 import Checkbox from '@mui/material/Checkbox';
@@ -114,16 +114,22 @@ export interface VideoSourceModalProps {
    *  with "Lưu vào thư viện" checked — allows the workspace to show a local preview.
    *  filename is the library video's original filename (used as session name in history). */
   onLibrarySelect: (libraryId: string, localFile?: File, filename?: string) => void;
+  /** Which left tab to show when the modal opens (default 'library'). */
+  initialTab?: 'library' | 'recordings';
 }
 
-export function VideoSourceModal({ open, onClose, onUploadAndConnect, onLibrarySelect }: VideoSourceModalProps) {
+export function VideoSourceModal({ open, onClose, onUploadAndConnect, onLibrarySelect, initialTab = 'library' }: VideoSourceModalProps) {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [saveToLibrary, setSaveToLibrary] = useState(false);
   const [uploadingFileName, setUploadingFileName] = useState('');
   const [duplicateBanner, setDuplicateBanner] = useState<string | null>(null);
-  const [leftTab, setLeftTab] = useState<'library' | 'recordings'>('library');
+  const [leftTab, setLeftTab] = useState<'library' | 'recordings'>(initialTab);
+
+  // Sync the active tab to initialTab each time the modal is (re)opened — lets the
+  // "Xem bản ghi" link from the live view land directly on the recordings tab.
+  useEffect(() => { if (open) setLeftTab(initialTab); }, [open, initialTab]);
 
   const handleFileSelected = useCallback(async (file: File) => {
     if (!file.type.startsWith('video/')) {

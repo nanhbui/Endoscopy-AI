@@ -246,13 +246,33 @@ interface SessionReportModalProps {
   detections: Detection[];
   onClose: () => void;
   onRestart: () => void;
-  onGoReport: () => void;
+  /** Goes to the full report. Receives only the KEPT detections (those NOT
+   *  flagged "Báo sai") — the caller summarizes just these via AI. */
+  onGoReport: (keptDetections: Detection[]) => void;
   isNavigating: boolean;
+  /** When set, each detection shows a "Báo sai" action that persists it as a
+   *  false-positive. Returns true on success. Only wired for the live flow. */
+  onReportFalse?: (det: Detection) => Promise<boolean>;
 }
 
-function SessionReportModal({ detections, onClose, onRestart, onGoReport, isNavigating }: SessionReportModalProps) {
+function SessionReportModal({ detections, onClose, onRestart, onGoReport, isNavigating, onReportFalse }: SessionReportModalProps) {
   const [activeIdx, setActiveIdx] = useState(0);
   const det = detections[activeIdx] ?? null;
+  // Local "Báo sai" bookkeeping (the detections array is a derived memo, so we
+  // track flagged/in-flight by index here rather than mutating it).
+  const [reportedIdx, setReportedIdx] = useState<Set<number>>(new Set());
+  const [reportingIdx, setReportingIdx] = useState<number | null>(null);
+
+  const handleReportFalse = async () => {
+    if (!onReportFalse || det == null || reportedIdx.has(activeIdx) || reportingIdx != null) return;
+    setReportingIdx(activeIdx);
+    const ok = await onReportFalse(det);
+    setReportingIdx(null);
+    if (ok) setReportedIdx((prev) => new Set(prev).add(activeIdx));
+  };
+  const isReported = reportedIdx.has(activeIdx);
+  // Detections kept for the AI summary = everything NOT flagged "Báo sai".
+  const keptDetections = detections.filter((_, i) => !reportedIdx.has(i));
 
   const confirmed = detections.filter(d => d.status === 'confirmed' || d.status === 'analyzed').length;
   const ignored   = detections.filter(d => d.status === 'ignored').length;
@@ -284,6 +304,12 @@ function SessionReportModal({ detections, onClose, onRestart, onGoReport, isNavi
               <Typography variant="caption" sx={{ color: '#059669', fontWeight: 600 }}>{confirmed} xác nhận</Typography>
               <Box sx={{ width: 3, height: 3, borderRadius: '50%', backgroundColor: 'text.disabled' }} />
               <Typography variant="caption" sx={{ color: '#9AA5B1' }}>{ignored} bỏ qua</Typography>
+              {reportedIdx.size > 0 && (
+                <>
+                  <Box sx={{ width: 3, height: 3, borderRadius: '50%', backgroundColor: 'text.disabled' }} />
+                  <Typography variant="caption" sx={{ color: '#DC2626', fontWeight: 600 }}>{reportedIdx.size} báo sai</Typography>
+                </>
+              )}
             </Box>
           </Box>
           <Box component="button" onClick={onClose} sx={{ background: 'none', border: 'none', cursor: 'pointer', p: 0.75, borderRadius: '8px', '&:hover': { backgroundColor: '#F0F4F3' } }}>
@@ -302,7 +328,10 @@ function SessionReportModal({ detections, onClose, onRestart, onGoReport, isNavi
                 <Typography variant="caption" sx={{ display: 'block' }}>Không có tổn thương</Typography>
               </Box>
             ) : detections.map((d, i) => {
-              const sc = STATUS_CONFIG[d.status ?? 'detected'];
+              const isFalse = reportedIdx.has(i);
+              // Flagged rows render as "Báo sai" (red) + dimmed, so the doctor
+              // sees at a glance which detections are excluded from the report.
+              const sc = isFalse ? STATUS_CONFIG.false_positive : STATUS_CONFIG[d.status ?? 'detected'];
               const isActive = i === activeIdx;
               return (
                 <Box
@@ -312,6 +341,7 @@ function SessionReportModal({ detections, onClose, onRestart, onGoReport, isNavi
                     display: 'flex', gap: 1.5, px: 1.5, py: 1.25,
                     borderBottom: '1px solid #EEF2F0',
                     cursor: 'pointer',
+                    opacity: isFalse ? 0.55 : 1,
                     backgroundColor: isActive ? 'rgba(0,96,100,0.06)' : 'transparent',
                     borderLeft: isActive ? '3px solid #006064' : '3px solid transparent',
                     transition: 'all 0.12s',
@@ -322,7 +352,7 @@ function SessionReportModal({ detections, onClose, onRestart, onGoReport, isNavi
                   <Box sx={{ width: 52, height: 40, borderRadius: '7px', overflow: 'hidden', flexShrink: 0, backgroundColor: '#0D1117', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                     {d.frame_b64
                       // eslint-disable-next-line @next/next/no-img-element -- base64 data URI, next/image adds no value
-                      ? <img src={`data:image/jpeg;base64,${d.frame_b64}`} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                      ? <img src={`data:image/jpeg;base64,${d.frame_b64}`} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover', filter: isFalse ? 'grayscale(1)' : 'none' }} />
                       : <ScanSearch size={14} color="rgba(255,255,255,0.2)" />}
                   </Box>
                   {/* Info */}
@@ -392,6 +422,34 @@ function SessionReportModal({ detections, onClose, onRestart, onGoReport, isNavi
                   <Chip label={`${(det.confidence * 100).toFixed(0)}% tin cậy`} size="small" sx={{ backgroundColor: 'rgba(0,0,0,0.04)', color: 'text.secondary', fontWeight: 600, fontSize: '0.76rem', borderRadius: '7px', height: 26 }} />
                 </Box>
 
+                {/* "Báo sai" — persist this detection as a false-positive so a
+                    replay of the recording / another live scan of the same region
+                    auto-skips it. Live flow only; undo via analytics "Quản lý case
+                    sai". Hidden when the detection carries no usable box. */}
+                {onReportFalse && det.bbox.width > 0 && (
+                  <MuiButton
+                    variant="outlined"
+                    size="small"
+                    disabled={isReported || reportingIdx != null}
+                    startIcon={
+                      isReported ? <CheckCircle2 size={15} />
+                      : reportingIdx === activeIdx ? <CircularProgress size={13} sx={{ color: 'inherit' }} />
+                      : <Flag size={15} />
+                    }
+                    onClick={handleReportFalse}
+                    sx={{
+                      alignSelf: 'flex-start', borderRadius: '10px', fontWeight: 700, textTransform: 'none',
+                      ...(isReported
+                        ? { color: '#9AA5B1', borderColor: '#E2EAE8' }
+                        : { color: '#DC2626', borderColor: 'rgba(220,38,38,0.4)',
+                            '&:hover': { borderColor: '#DC2626', backgroundColor: 'rgba(220,38,38,0.06)' } }),
+                    }}
+                  >
+                    {isReported ? 'Đã báo sai — sẽ bỏ qua lần sau'
+                      : reportingIdx === activeIdx ? 'Đang lưu…' : 'Báo sai'}
+                  </MuiButton>
+                )}
+
                 <Divider />
 
                 {det.lesionReport ? (
@@ -442,7 +500,7 @@ function SessionReportModal({ detections, onClose, onRestart, onGoReport, isNavi
             variant="contained"
             disabled={isNavigating}
             startIcon={isNavigating ? <CircularProgress size={14} sx={{ color: 'inherit' }} /> : <ClipboardList size={16} />}
-            onClick={onGoReport}
+            onClick={() => onGoReport(keptDetections)}
             sx={{ borderRadius: '10px', fontWeight: 700, backgroundColor: '#006064', '&:hover': { backgroundColor: '#004D51' } }}
           >
             {isNavigating ? 'Đang tạo...' : 'Tạo báo cáo đầy đủ'}
@@ -515,6 +573,10 @@ const DetectionBar = memo(function DetectionBar({
             sx={actionBtnSx('rgba(34,197,94,0.85)', '#16A34A')}>Xác nhận</MuiButton>
           <MuiButton size="small" variant="outlined" onClick={onIgnore}
             sx={{ borderRadius: '7px', borderColor: 'rgba(255,255,255,0.2)', color: '#fff', fontWeight: 600, fontSize: '0.72rem', py: 0.4, px: 1, whiteSpace: 'nowrap', '&:hover': { borderColor: '#EF4444', color: '#FCA5A5' } }}>Bỏ qua</MuiButton>
+          {/* Still allow "Báo sai" after reading the AI report — drops the saved
+              report from the summary + persists the region as a false-positive. */}
+          <MuiButton size="small" variant="outlined" onClick={onReportFalsePositive} startIcon={<Flag size={12} />}
+            sx={{ borderRadius: '7px', borderColor: 'rgba(239,68,68,0.45)', color: '#FCA5A5', fontWeight: 600, fontSize: '0.72rem', py: 0.4, px: 1, whiteSpace: 'nowrap', '&:hover': { borderColor: '#EF4444', backgroundColor: 'rgba(239,68,68,0.12)' } }}>Báo sai</MuiButton>
         </>
       ) : (
         // Pre-LLM: 2 primary text-buttons (Giải thích / Xác nhận luôn) + 3
@@ -591,6 +653,14 @@ const DetectionActions = memo(function DetectionActions({
             sx={{ borderRadius: '8px', borderColor: 'rgba(146,64,14,0.3)', color: '#92400E', fontWeight: 700, fontSize: '0.78rem', py: 0.85, '&:hover': { backgroundColor: 'rgba(245,158,11,0.08)', borderColor: '#D97706' } }}
           >
             Bỏ qua
+          </MuiButton>
+          {/* "Báo sai" stays available after reading the AI report — excludes the
+              saved report from the summary + persists the region as a false-positive. */}
+          <MuiButton
+            variant="outlined" fullWidth size="small" onClick={onReportFalsePositive} startIcon={<Flag size={14} />}
+            sx={{ borderRadius: '8px', borderColor: 'rgba(220,38,38,0.35)', color: '#DC2626', fontWeight: 700, fontSize: '0.78rem', py: 0.85, '&:hover': { backgroundColor: 'rgba(220,38,38,0.08)', borderColor: '#DC2626' } }}
+          >
+            Báo sai
           </MuiButton>
         </Box>
       ) : pipelineState === 'PROCESSING_LLM' ? (
@@ -816,6 +886,9 @@ export default function Workspace() {
   // Source mode
   const [sourceMode, setSourceMode] = useState<'video' | 'live'>('video');
   const [isSourceModalOpen, setIsSourceModalOpen] = useState(false);
+  // Which tab the source modal opens on — set to 'recordings' by the live view's
+  // "Xem bản ghi" link so it lands directly on the saved recording.
+  const [sourceModalTab, setSourceModalTab] = useState<'library' | 'recordings'>('library');
 
   // Local video state (object URL for <video> preview)
   const [videoFile, setVideoFile] = useState<File | null>(null);
@@ -1022,6 +1095,25 @@ export default function Workspace() {
       resetAnalysis();
     }
   }, [stopListening, eosReportItems, finalizeSession, currentSessionId, removeSession, resetAnalysis]);
+
+  // "Báo sai" from the live session-report modal. det.bbox is percent of the
+  // 1920×1080 canvas (same as the upload path) — reconstruct absolute coords and
+  // persist so replays / future live scans of the same region auto-skip it.
+  const handleReportFalsePositiveLive = useCallback(async (det: Detection): Promise<boolean> => {
+    const FW = 1920, FH = 1080; // backend false-positive canvas (matches db.py)
+    const { x, y, width, height } = det.bbox;
+    const bbox = [x / 100 * FW, y / 100 * FH, (x + width) / 100 * FW, (y + height) / 100 * FH];
+    try {
+      const r = await fetch(`${API_BASE}/analytics/false-positives`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ label: det.label, bbox, frame_b64: det.frame_b64, session_id: currentSessionId ?? 'live' }),
+      });
+      return r.ok;
+    } catch {
+      return false;
+    }
+  }, [currentSessionId]);
 
   const handleLibrarySelectFromModal = useCallback(async (libraryId: string, localFile?: File, filename?: string) => {
     try {
@@ -1233,11 +1325,24 @@ export default function Workspace() {
                 if (voiceSupported) startListening();
               }, 60);
             }}
-            onGoReport={() => {
+            onGoReport={async (keptDetections) => {
               setIsNavigating(true);
+              // Live flow: kick off the AI summary now, over ONLY the kept
+              // detections (false-positives the doctor flagged are excluded).
+              // The video flow already generated its summary during the run.
+              if (sourceMode === 'live' && currentSessionId) {
+                await fetch(`${API_BASE}/live/sessions/${currentSessionId}/finalize`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ detections: keptDetections }),
+                }).catch(() => { /* non-fatal — report still shows detections */ });
+              }
               router.push('/report');
             }}
             isNavigating={isNavigating}
+            // Live flow only — the upload/video flow already reports false
+            // positives during playback pause, so it stays untouched here.
+            onReportFalse={sourceMode === 'live' ? handleReportFalsePositiveLive : undefined}
           />
         )}
 
@@ -1352,7 +1457,9 @@ export default function Workspace() {
                 {sourceMode === 'live' ? (
                   /* Trực tuyến — browser captures the HDMI device locally (mirror),
                      detection runs on-demand via /ws/live-detect. Fully self-contained. */
-                  <BrowserCaptureLive />
+                  <BrowserCaptureLive
+                    onViewRecordings={() => { setSourceModalTab('recordings'); setIsSourceModalOpen(true); }}
+                  />
                 ) : libraryReady && !videoUrl && pipelineState === 'IDLE' ? (
                   /* Library selected but videoUrl not ready yet (fetch in-flight) */
                   <LibraryReadyPanel onReselect={() => setIsSourceModalOpen(true)} />
@@ -1720,9 +1827,10 @@ export default function Workspace() {
 
       <VideoSourceModal
         open={isSourceModalOpen}
-        onClose={() => setIsSourceModalOpen(false)}
+        onClose={() => { setIsSourceModalOpen(false); setSourceModalTab('library'); }}
         onUploadAndConnect={handleUploadAndConnect}
         onLibrarySelect={handleLibrarySelectFromModal}
+        initialTab={sourceModalTab}
       />
 
       {/* Phase 05 — opens on RECHECK_RESULT after click "Kiểm tra lại". */}

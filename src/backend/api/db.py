@@ -321,6 +321,23 @@ def get_lesion_reports_for_session(session_id: str) -> list[dict]:
         return []
 
 
+def delete_lesion_report(session_id: str, frame_index: int) -> bool:
+    """Remove one persisted report so a detection the doctor flagged "Báo sai"
+    after explaining it is dropped from the session summary (which reads every
+    stored lesion_report). Returns True if a row was deleted."""
+    try:
+        with _connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM lesion_reports WHERE session_id = ? AND frame_index = ?",
+                (session_id, frame_index),
+            )
+            return cur.rowcount > 0
+    except sqlite3.Error as e:
+        logger.error("delete_lesion_report failed (session={}, frame={}): {}",
+                     session_id, frame_index, e)
+        return False
+
+
 def db_path() -> Path:
     """Exposed for tests / health checks that need the on-disk location."""
     return _DB_PATH

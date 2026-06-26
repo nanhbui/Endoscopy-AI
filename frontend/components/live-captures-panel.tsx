@@ -23,6 +23,9 @@ export interface LiveCapture {
   frameB64: string;          // jpeg base64 (no data: prefix) — thumbnail + report image
   label: string;
   confidence: number;
+  /** YOLO box normalized to 1920×1080 [x1,y1,x2,y2] — kept so "Báo sai" can
+   *  persist it as a false-positive that future runs match by IoU. */
+  bboxNorm: [number, number, number, number];
   ts: number;                // capture time, ms epoch
   report: LesionReport | null;
   explaining: boolean;       // VLM call in flight
