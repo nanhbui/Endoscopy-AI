@@ -15,7 +15,7 @@ import os
 import sys
 from pathlib import Path
 
-from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -26,6 +26,47 @@ from src.voice.intent_classifier import IntentClassifier
 
 router = APIRouter()
 _classifier = IntentClassifier()
+
+# ── Per-session voice transcript store ────────────────────────────────────────
+# In-memory log of what the doctor said during a live session, keyed by
+# session_id. Populated by /voice/command; read at finalize for the end-of-session
+# conversation summary (Phase 03). Owned here to keep a one-way dependency
+# (endoscopy_ws_server imports voice_api, never the reverse).
+_session_transcripts: dict[str, list[dict]] = {}
+
+
+def append_transcript(session_id: str, text: str, intent: str = "") -> None:
+    """Append one transcribed utterance to a session's voice log."""
+    if not session_id or not text:
+        return
+    _session_transcripts.setdefault(session_id, []).append(
+        {"text": text, "intent": intent}
+    )
+
+
+def get_transcript(session_id: str) -> list[dict]:
+    """Return a session's voice log (empty list if none)."""
+    return _session_transcripts.get(session_id, [])
+
+
+def pop_transcript(session_id: str) -> list[dict]:
+    """Return and clear a session's voice log (call at finalize)."""
+    return _session_transcripts.pop(session_id, [])
+
+
+def rekey_transcript(old_id: str, new_id: str) -> int:
+    """Move a session's voice log from old_id → new_id.
+
+    The live mic mints a client-side id before the report session exists; once the
+    real session id is known (at report creation) the transcript is re-keyed so the
+    end-of-session summary can find it. Returns the number of lines moved.
+    """
+    if not old_id or not new_id or old_id == new_id:
+        return 0
+    lines = _session_transcripts.pop(old_id, [])
+    if lines:
+        _session_transcripts.setdefault(new_id, []).extend(lines)
+    return len(lines)
 
 # ── LLM intent classification ─────────────────────────────────────────────────
 
@@ -104,16 +145,33 @@ async def voice_classify(body: ClassifyRequest):
 
 
 @router.post("/voice/command", response_class=JSONResponse)
-async def voice_command(audio: UploadFile = File(...)):
-    """Legacy: transcribe audio with Whisper then classify. Requires ffmpeg."""
+async def voice_command(
+    audio: UploadFile = File(...),
+    session_id: str = Form(""),
+):
+    """Transcribe one audio utterance with Whisper, then classify the intent.
+
+    Used by the live hands-free flow: the browser VAD-segments the mic into short
+    utterances and POSTs each here. When `session_id` is given, the transcript is
+    appended to that session's voice log for the end-of-session summary.
+
+    Requires ffmpeg on the server (faster-whisper decodes via ffmpeg).
+    Returns: { "transcript": str, "intent": str, "confidence": float }
+    """
     try:
         from src.voice.whisper_transcriber import WhisperTranscriber
-        transcriber = WhisperTranscriber(model_size="base")
+        transcriber = WhisperTranscriber()  # model governed by env (default 'small')
         audio_bytes = await audio.read()
         loop = asyncio.get_running_loop()
         transcript = await loop.run_in_executor(None, transcriber.transcribe, audio_bytes)
+
+        if not transcript:
+            return JSONResponse(content={"transcript": "", "intent": "UNKNOWN", "confidence": 0.0})
+
         intent, confidence = await _classify_with_llm(transcript)
-        logger.info("Voice command: '{}' → {} ({:.2f})", transcript, intent, confidence)
+        append_transcript(session_id, transcript, intent)
+        logger.info("Voice command [{}]: '{}' → {} ({:.2f})",
+                    session_id or "-", transcript[:60], intent, confidence)
         return JSONResponse(content={
             "transcript": transcript,
             "intent": intent,

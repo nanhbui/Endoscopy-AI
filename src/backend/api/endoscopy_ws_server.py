@@ -40,7 +40,7 @@ from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect, H
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from openai import AsyncOpenAI
-from voice_api import router as voice_router
+from voice_api import router as voice_router, get_transcript as get_voice_transcript, rekey_transcript as rekey_voice_transcript
 
 # ── Path setup ───────────────────────────────────────────────────────────────
 _HERE = Path(__file__).resolve()
@@ -1491,6 +1491,17 @@ async def finalize_live_session(session_id: str, request: Request):
     return {"ok": True, "persisted": persisted}
 
 
+@app.post("/live/sessions/{session_id}/voice-transcript")
+async def associate_voice_transcript(session_id: str, request: Request):
+    """Re-key the live mic transcript from the client-side voice id to the real
+    report session id, so the end-of-session summary can pick it up. Called by the
+    FE right after the live session is created. Body: {voice_session_id}."""
+    body = await request.json()
+    moved = rekey_voice_transcript((body.get("voice_session_id") or "").strip(), session_id)
+    logger.info("[LIVE] voice transcript re-keyed → {} ({} utterances)", session_id, moved)
+    return {"ok": True, "moved": moved}
+
+
 @app.post("/live/explain")
 async def live_explain(request: Request, label: str = "", conf: float = 0.0):
     """On-demand VLM lesion report for live (Trực tiếp) mode. Body = JPEG frame
@@ -2561,6 +2572,49 @@ def _mock_llm_response(label: str, location: str) -> str:
 
 # ── Phase B: Session summary + Q&A chatbot ───────────────────────────────────
 
+_CONVERSATION_SUMMARY_PROMPT = """\
+You are a medical assistant. Below is the transcribed speech of the doctor
+narrating DURING a live (Trực tuyến) endoscopy session.
+
+Task: Summarise the doctor's narration into a SHORT clinical note — the key
+observations/comments, any lesion or location mentioned, and any conclusion or
+instruction given. Ignore off-topic chatter; do NOT invent anything not said.
+
+## OUTPUT LANGUAGE (CRITICAL — NEVER VIOLATE)
+Write the ENTIRE response in Vietnamese, 2-4 sentences. Medical terms in Vietnamese
+followed by the English term in parentheses. Return ONLY the summary paragraph, no
+heading, no preamble."""
+
+
+async def _summarize_conversation(lines: list[dict]) -> str:
+    """Summarize the doctor's spoken narration (voice transcript) into a short
+    Vietnamese paragraph via the local Ollama QA model. Best-effort: returns "" on
+    empty input or any LLM failure so the main summary never breaks."""
+    text = "\n".join((l.get("text") or "").strip() for l in lines if l.get("text"))
+    if not text.strip():
+        return ""
+    client = _get_llm_client()
+    if client is None:
+        return ""
+    try:
+        completion = await asyncio.wait_for(
+            client.chat.completions.create(
+                model=_qa_model_name(),   # text task → Qwen on Ollama, not the VLM
+                messages=[
+                    {"role": "system", "content": _CONVERSATION_SUMMARY_PROMPT},
+                    {"role": "user", "content": text},
+                ],
+                max_tokens=400,
+                temperature=0.2,
+            ),
+            timeout=LLM_CALL_TIMEOUT_SEC,
+        )
+        return (completion.choices[0].message.content or "").strip()
+    except Exception as exc:
+        logger.warning("Conversation summary failed: {}", exc)
+        return ""
+
+
 async def _generate_session_summary(sess: dict, video_id: str) -> dict | None:
     """Build + persist the Phase B session summary from a session's lesion_reports.
 
@@ -2735,6 +2789,16 @@ async def _generate_session_summary(sess: dict, video_id: str) -> dict | None:
         logger.info("overall_risk raised to 'cao' (neoplastic/high-severity finding present); "
                     "model had: {}", summary.get("overall_risk"))
         summary["overall_risk"] = "cao"
+
+    # Voice narration (live hands-free): summarise what the doctor said during the
+    # session and attach it. Separate text-only LLM call (QA model) — kept out of the
+    # vision summary schema. Empty/failed → field omitted, main summary unaffected.
+    _voice_lines = get_voice_transcript(video_id)
+    if _voice_lines:
+        _conv = await _summarize_conversation(_voice_lines)
+        if _conv:
+            summary["conversation_summary"] = _conv
+            logger.info("Conversation summary attached ({} utterances)", len(_voice_lines))
 
     logger.info("Session summary generated: latency={:.2f}s findings={} risk={} citations={}",
                 latency, len(reports),

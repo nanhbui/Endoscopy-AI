@@ -116,6 +116,8 @@ export interface SessionSummary {
   overall_risk: "thấp" | "trung bình" | "cao";
   /** Phase 3 — optional guideline citations from Phase-2 grounding. */
   citations?: Citation[];
+  /** Live hands-free — short summary of the doctor's spoken narration. */
+  conversation_summary?: string;
 }
 
 export type ServerEvent =

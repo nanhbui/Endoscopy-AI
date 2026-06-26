@@ -20,12 +20,14 @@ import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
 import CircularProgress from '@mui/material/CircularProgress';
 import LinearProgress from '@mui/material/LinearProgress';
-import { Radio, Cpu, Square, Video as VideoIcon, X, Info, Maximize2, FileText, StopCircle, CheckCircle2 } from 'lucide-react';
-import { WS_BASE, API_BASE, uploadRecording } from '@/lib/ws-client';
+import { Radio, Cpu, Square, Video as VideoIcon, X, Info, Maximize2, FileText, StopCircle, CheckCircle2, Mic, MicOff } from 'lucide-react';
+import { WS_BASE, API_BASE, uploadRecording, type LesionReport } from '@/lib/ws-client';
+import { b64ToJpegBlob } from '@/lib/lesion-report-edits';
 import { startRecordingUpload, setRecordingUploadProgress, finishRecordingUpload, useRecordingUpload } from '@/lib/recording-upload-store';
 import { labelToColor as colorFor } from '@/lib/lesion-colors';
 import { useAnalysis, lesionReportToMarkdown, type Detection } from '@/context/AnalysisContext';
 import { LiveCapturesPanel, type LiveCapture } from '@/components/live-captures-panel';
+import { useLiveVoiceCapture, type VoiceResult } from '@/hooks/use-live-voice-capture';
 import {
   PatientContextForm,
   emptyPatientContext,
@@ -65,13 +67,6 @@ const FIT_OPTIONS: { value: FitMode; label: string }[] = [
   { value: 'fill', label: 'Lấp đầy' },
   { value: 'cover', label: 'Cắt vừa' },
 ];
-
-function b64ToJpegBlob(b64: string): Blob {
-  const bin = atob(b64);
-  const arr = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-  return new Blob([arr], { type: 'image/jpeg' });
-}
 
 interface BrowserCaptureLiveProps {
   /** Opens the source modal on the "Bản ghi trực tiếp" tab — wired to the
@@ -127,6 +122,14 @@ export function BrowserCaptureLive({ onViewRecordings }: BrowserCaptureLiveProps
   const [recNotice, setRecNotice] = useState(false);   // transient "recording started" banner
   const [savedNotice, setSavedNotice] = useState(false); // persistent "saved → view" CTA
   const upload = useRecordingUpload();
+  // Hands-free mic (audio input device) — independent of the video mirror.
+  const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([]);
+  const [audioDeviceId, setAudioDeviceId] = useState('');
+  const [micOn, setMicOn] = useState(false);
+  const [voiceLog, setVoiceLog] = useState<Array<{ text: string; ts: number }>>([]);
+  // Stable id for this live voice session so the server can key the transcript
+  // log (consumed by the end-of-session summary). Set on first mic-on.
+  const liveVoiceSessionIdRef = useRef('');
 
   // Raise the persistent "saved → Xem bản ghi" banner once the upload finishes.
   useEffect(() => { if (upload.status === 'done') setSavedNotice(true); }, [upload.status]);
@@ -135,6 +138,9 @@ export function BrowserCaptureLive({ onViewRecordings }: BrowserCaptureLiveProps
     try {
       const list = await navigator.mediaDevices.enumerateDevices();
       setDevices(list.filter((d) => d.kind === 'videoinput'));
+      // Mic devices too — wired / USB / Bluetooth all surface as 'audioinput'.
+      // Labels are only populated after mic permission is granted.
+      setAudioDevices(list.filter((d) => d.kind === 'audioinput'));
     } catch {
       setErr('Trình duyệt không liệt kê được thiết bị video.');
     }
@@ -379,6 +385,7 @@ export function BrowserCaptureLive({ onViewRecordings }: BrowserCaptureLiveProps
   // uploaded BEFORE the stream tracks are stopped so the final chunk is captured.
   const stopSession = useCallback(() => {
     stopAi();
+    setMicOn(false);   // hands-free mic off when the session ends
     void stopAndUploadRecording();
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
@@ -435,6 +442,16 @@ export function BrowserCaptureLive({ onViewRecordings }: BrowserCaptureLiveProps
     // modal's "Xem báo cáo đầy đủ" button routes to /report.
     const sessionId = saveLiveSession(name, dets);
 
+    // Re-key the live voice transcript to this report session so the end-of-session
+    // summary picks up the doctor's spoken narration. Non-fatal.
+    if (liveVoiceSessionIdRef.current) {
+      void fetch(`${API_BASE}/live/sessions/${sessionId}/voice-transcript`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ voice_session_id: liveVoiceSessionIdRef.current }),
+      }).catch(() => { /* non-fatal — summary just omits the narration */ });
+    }
+
     // Phase 1 — persist patient context (PHI) FIRST so the summary (which reads it)
     // sees it. Non-fatal: on failure the summary just degrades to no patient context.
     if (hasPatientContext(patientCtx)) {
@@ -459,6 +476,45 @@ export function BrowserCaptureLive({ onViewRecordings }: BrowserCaptureLiveProps
     wsRef.current?.close();
     streamRef.current?.getTracks().forEach((t) => t.stop());
   }, []);
+
+  // ── Hands-free voice (live = narration only) ─────────────────────────────────
+  // Each transcribed utterance is logged (shown below + persisted server-side for
+  // the end-of-session summary). The live flow has no real-time voice commands —
+  // false-positive review happens post-session in the report modal, and command
+  // intents (bỏ qua / giải thích / xác nhận) belong to the upload-video flow.
+  const handleVoiceResult = useCallback((r: VoiceResult) => {
+    if (!r.transcript) return;
+    setVoiceLog((prev) => [...prev, { text: r.transcript, ts: Date.now() }]);
+  }, []);
+
+  const { audioLevel: micLevel, error: micError } = useLiveVoiceCapture({
+    enabled: micOn,
+    deviceId: audioDeviceId,
+    sessionId: liveVoiceSessionIdRef.current,
+    onResult: handleVoiceResult,
+  });
+
+  const toggleMic = useCallback(() => {
+    setMicOn((on) => {
+      const next = !on;
+      // First activation: mint a session id + ask for mic permission so the
+      // device dropdown can show real labels (re-enumerated on devicechange).
+      if (next && !liveVoiceSessionIdRef.current) {
+        liveVoiceSessionIdRef.current =
+          (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `live-${Date.now()}`;
+      }
+      if (next) void refreshDevices();
+      return next;
+    });
+  }, [refreshDevices]);
+
+  // Bluetooth headsets drop/reconnect and change deviceId — re-enumerate so the
+  // mic dropdown stays accurate and the chosen device isn't lost.
+  useEffect(() => {
+    const h = () => { void refreshDevices(); };
+    navigator.mediaDevices?.addEventListener?.('devicechange', h);
+    return () => navigator.mediaDevices?.removeEventListener?.('devicechange', h);
+  }, [refreshDevices]);
 
   const videoStyle = useMemo(() => ({
     position: 'absolute' as const, inset: 0, width: '100%', height: '100%',
@@ -645,6 +701,57 @@ export function BrowserCaptureLive({ onViewRecordings }: BrowserCaptureLiveProps
               </>
             )}
           </Box>
+
+          {/* Hands-free mic — pick an audio input (wired / USB / Bluetooth) and
+              toggle it on/off for this session. While on, speech is transcribed
+              server-side (Vietnamese) and shown below. */}
+          {previewing && (
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, px: 1.5, py: 1, borderRadius: '10px', border: '1px solid #E2EAE8', backgroundColor: '#F8FAFB' }}>
+              <Box sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 1.5 }}>
+                <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.6 }}>
+                  <Mic size={14} color="#006064" />
+                  <Typography sx={{ fontSize: '0.72rem', fontWeight: 700, color: '#445', whiteSpace: 'nowrap' }}>Micro</Typography>
+                </Box>
+                <Box component="select"
+                  value={audioDeviceId}
+                  onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setAudioDeviceId(e.target.value)}
+                  sx={{ flex: '1 1 200px', minWidth: 180, px: 1.25, py: 0.7, borderRadius: '8px', border: '1px solid #CBD5D3', fontSize: '0.8rem', backgroundColor: '#fff', cursor: 'pointer' }}
+                >
+                  <option value="">Mic mặc định của hệ thống</option>
+                  {audioDevices.map((d, i) => (
+                    <option key={`${d.deviceId}-${i}`} value={d.deviceId}>
+                      {d.label || `Mic ${i + 1}`}
+                    </option>
+                  ))}
+                </Box>
+                <Box component="button" onClick={toggleMic}
+                  sx={{ ...btnSx(micOn ? '#DC2626' : '#00838F'), py: 0.7, px: 1.5, fontSize: '0.8rem' }}>
+                  {micOn ? <><MicOff size={15} /> Tắt mic</> : <><Mic size={15} /> Bật mic</>}
+                </Box>
+                {/* Live input-level bar (shows the mic is actually picking up sound) */}
+                {micOn && (
+                  <Box sx={{ flex: '1 1 80px', minWidth: 70, height: 6, borderRadius: 3, backgroundColor: 'rgba(0,131,143,0.12)', overflow: 'hidden' }}>
+                    <Box sx={{ width: `${Math.round(micLevel * 100)}%`, height: '100%', backgroundColor: '#00838F', transition: 'width 0.08s linear' }} />
+                  </Box>
+                )}
+              </Box>
+              {micError && (
+                <Typography sx={{ fontSize: '0.74rem', color: '#DC2626' }}>{micError}</Typography>
+              )}
+              {voiceLog.length > 0 && (
+                <Box sx={{ maxHeight: 120, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 0.4, mt: 0.25 }}>
+                  {voiceLog.map((v, i) => (
+                    <Typography key={i} sx={{ fontSize: '0.78rem', color: '#0D1B2A' }}>
+                      <span style={{ color: '#6E7C7B', fontVariantNumeric: 'tabular-nums' }}>
+                        {new Date(v.ts).toLocaleTimeString('vi-VN')}
+                      </span>{' '}
+                      {v.text}
+                    </Typography>
+                  ))}
+                </Box>
+              )}
+            </Box>
+          )}
 
           {/* Finalize panel — appears after "Dừng phiên". While the VLM is still
               explaining captured lesions it shows a calm loading state with

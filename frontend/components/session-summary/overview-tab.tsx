@@ -122,6 +122,21 @@ export function OverviewTab({ summary, sessionId }: OverviewTabProps) {
         </Box>
       </Box>
 
+      {/* Doctor's spoken narration summary (live hands-free) */}
+      {summary.conversation_summary && (
+        <Box sx={{ p: 1.5, borderRadius: '12px', backgroundColor: 'rgba(0,131,143,0.05)', border: '1px solid #A7D8DC' }}>
+          <Typography sx={{
+            fontSize: '0.7rem', fontWeight: 700, color: '#00838F',
+            textTransform: 'uppercase', letterSpacing: '0.08em', mb: 0.5,
+          }}>
+            Tóm tắt hội thoại
+          </Typography>
+          <Typography sx={{ fontSize: '0.82rem', color: 'text.primary', lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>
+            {summary.conversation_summary}
+          </Typography>
+        </Box>
+      )}
+
       {/* Top 3 priority findings with optional thumbnail */}
       {top3.length > 0 && (
         <Box>
