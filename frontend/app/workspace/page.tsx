@@ -31,12 +31,13 @@ import Chip from '@mui/material/Chip';
 import Divider from '@mui/material/Divider';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { API_BASE } from '@/lib/ws-client';
+import { API_BASE, type LesionReport } from '@/lib/ws-client';
 import { labelToColor as bboxColorFor, rgba } from '@/lib/lesion-colors';
 import { useAnalysis, useLlmStream, sessionFindings, type Detection, type DetectionStatus } from '@/context/AnalysisContext';
 import { useVoiceControl } from '@/hooks/use-voice-control';
 import { VideoSourceModal } from '@/components/video-source-modal';
 import { LesionReportCard } from '@/components/lesion-report-card';
+import { AnalysisFeedbackControl } from '@/components/analysis-feedback-control';
 import { DisclaimerBanner } from '@/components/disclaimer';
 import { ConfirmedCapturesPanel } from '@/components/confirmed-captures-panel';
 import { BrowserCaptureLive } from '@/components/browser-capture-live';
@@ -253,9 +254,12 @@ interface SessionReportModalProps {
   /** When set, each detection shows a "Báo sai" action that persists it as a
    *  false-positive. Returns true on success. Only wired for the live flow. */
   onReportFalse?: (det: Detection) => Promise<boolean>;
+  /** "Báo sai phân tích" — apply a re-analyzed / edited / cleared report to this
+   *  detection (both flows). Returns when persisted. */
+  onApplyAnalysis?: (det: Detection, next: LesionReport) => void | Promise<void>;
 }
 
-function SessionReportModal({ detections, onClose, onRestart, onGoReport, isNavigating, onReportFalse }: SessionReportModalProps) {
+function SessionReportModal({ detections, onClose, onRestart, onGoReport, isNavigating, onReportFalse, onApplyAnalysis }: SessionReportModalProps) {
   const [activeIdx, setActiveIdx] = useState(0);
   const det = detections[activeIdx] ?? null;
   // Local "Báo sai" bookkeeping (the detections array is a derived memo, so we
@@ -457,6 +461,17 @@ function SessionReportModal({ detections, onClose, onRestart, onGoReport, isNavi
                     <Typography sx={{ fontSize: '0.68rem', fontWeight: 700, color: 'text.secondary', textTransform: 'uppercase', letterSpacing: '0.07em', mb: 1.25 }}>Phân tích AI</Typography>
                     <DisclaimerBanner />
                     <LesionReportCard report={det.lesionReport} />
+                    {onApplyAnalysis && (
+                      <Box sx={{ mt: 1.25 }}>
+                        <AnalysisFeedbackControl
+                          report={det.lesionReport}
+                          label={det.label}
+                          confidence={det.confidence}
+                          frameB64={det.frame_b64}
+                          onApply={(next) => onApplyAnalysis(det, next)}
+                        />
+                      </Box>
+                    )}
                   </Box>
                 ) : det.llmInsight ? (
                   <Box>
@@ -721,7 +736,10 @@ const DetectionActions = memo(function DetectionActions({
 // Memoized leaf subscribing to the LLM stream — streamed tokens (ReactMarkdown)
 // re-render only this panel.
 
-const LlmSmartLog = memo(function LlmSmartLog({ currentDetection }: { currentDetection: Detection | null }) {
+const LlmSmartLog = memo(function LlmSmartLog({ currentDetection, onApplyAnalysis }: {
+  currentDetection: Detection | null;
+  onApplyAnalysis?: (det: Detection, next: LesionReport) => void | Promise<void>;
+}) {
   const { llmInsight, isListeningVoice } = useLlmStream();
   return (
     <Box
@@ -791,6 +809,17 @@ const LlmSmartLog = memo(function LlmSmartLog({ currentDetection }: { currentDet
           <MotionBox initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.4 }}>
             <DisclaimerBanner />
             <LesionReportCard report={currentDetection.lesionReport} />
+            {onApplyAnalysis && (
+              <Box sx={{ mt: 1.25 }}>
+                <AnalysisFeedbackControl
+                  report={currentDetection.lesionReport}
+                  label={currentDetection.label}
+                  confidence={currentDetection.confidence}
+                  frameB64={currentDetection.frame_b64}
+                  onApply={(next) => onApplyAnalysis(currentDetection, next)}
+                />
+              </Box>
+            )}
           </MotionBox>
         ) : llmInsight ? (
           <MotionBox initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.4 }}>
@@ -871,6 +900,7 @@ export default function Workspace() {
     resetAnalysis,
     finalizeSession,
     removeSession,
+    updateDetectionReport,
   } = useAnalysis();
 
   // Phase B — pull the active session's Phase B state (summary + chat).
@@ -1003,19 +1033,12 @@ export default function Workspace() {
     }
   }, [pipelineState, videoUrl]);
 
-  // SEEK video to detection timestamp on every new detection. This eliminates
-  // any backend↔frontend drift accumulated over multiple pause-resume cycles —
-  // user always sees the EXACT frame the AI flagged (matches the bbox & label),
-  // not the frame the browser happened to be playing when the WS event arrived.
-  useEffect(() => {
-    if (!videoRef.current || !videoUrl || !currentDetection) return;
-    if (pipelineState !== 'PAUSED_WAITING_INPUT') return;
-    const targetTime = currentDetection.timestamp;
-    // Only seek if drift > 100ms — avoids constant micro-seeks for in-sync events.
-    if (Math.abs(videoRef.current.currentTime - targetTime) > 0.1) {
-      videoRef.current.currentTime = targetTime;
-    }
-  }, [currentDetection, pipelineState, videoUrl]);
+  // NOTE: we deliberately do NOT seek the <video> to the detection timestamp.
+  // Seeking the STREAMED proxy re-buffers for ~30s (the browser must fetch +
+  // decode from a far keyframe — slow even on LAN, since it's a stream not a
+  // local file). Instead the paused view overlays the detection's frame_b64
+  // image (which already carries the backend box) INSTANTLY — see the
+  // freeze-frame <img> in the video render below.
 
   // Refs so onIntent callback always reads current state without stale closure
   const pipelineStateRef = useRef(pipelineState);
@@ -1114,6 +1137,26 @@ export default function Workspace() {
       return false;
     }
   }, [currentSessionId]);
+
+  // "Báo sai phân tích" from the session-report modal. Update the session
+  // detection locally (drives the modal + the live finalize). For the video flow
+  // the report is already persisted, so PUT the change and mark the summary stale
+  // — it's regenerated on "Tạo báo cáo đầy đủ".
+  const summaryDirtyRef = useRef(false);
+  const handleApplyAnalysisModal = useCallback(async (det: Detection, next: LesionReport) => {
+    updateDetectionReport(det, next);
+    if (sourceMode === 'video' && currentSessionId && det.frame_index != null) {
+      await fetch(`${API_BASE}/sessions/${currentSessionId}/reports/${det.frame_index}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ report: next, frame_b64: det.frame_b64 }),
+      }).catch(() => { /* non-fatal — local view still updated */ });
+      // Only edits made AFTER the summary was built (in the EOS modal) need a
+      // rebuild; pause-time edits land in the DB before end-of-video, so the
+      // auto-generated summary already includes them.
+      if (pipelineState === 'EOS_SUMMARY') summaryDirtyRef.current = true;
+    }
+  }, [updateDetectionReport, sourceMode, currentSessionId, pipelineState]);
 
   const handleLibrarySelectFromModal = useCallback(async (libraryId: string, localFile?: File, filename?: string) => {
     try {
@@ -1336,6 +1379,13 @@ export default function Workspace() {
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({ detections: keptDetections }),
                 }).catch(() => { /* non-fatal — report still shows detections */ });
+              } else if (sourceMode === 'video' && currentSessionId && summaryDirtyRef.current) {
+                // Video summary was made at end-of-video; rebuild it so the modal's
+                // "Báo sai phân tích" edits reach the synthesis.
+                summaryDirtyRef.current = false;
+                await fetch(`${API_BASE}/sessions/${currentSessionId}/regenerate-summary`, {
+                  method: 'POST',
+                }).catch(() => { /* non-fatal — report shows the prior summary */ });
               }
               router.push('/report');
             }}
@@ -1343,6 +1393,7 @@ export default function Workspace() {
             // Live flow only — the upload/video flow already reports false
             // positives during playback pause, so it stays untouched here.
             onReportFalse={sourceMode === 'live' ? handleReportFalsePositiveLive : undefined}
+            onApplyAnalysis={handleApplyAnalysisModal}
           />
         )}
 
@@ -1520,6 +1571,17 @@ export default function Workspace() {
                         pointerEvents: 'none',  // block click-to-pause + scrub
                       }}
                     />
+                    {/* Freeze-frame on pause: show the exact lesion frame
+                        (frame_b64 — already drawn with the backend box) instantly,
+                        covering the streamed <video> so the user never waits for a
+                        slow seek/re-buffer. Replaces the old video-seek approach. */}
+                    {pipelineState === 'PAUSED_WAITING_INPUT' && currentDetection?.frame_b64 && (
+                      <Box
+                        component="img"
+                        src={`data:image/jpeg;base64,${currentDetection.frame_b64}`}
+                        sx={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', zIndex: 2 }}
+                      />
+                    )}
                     {videoUnsupported && (
                       <Box sx={{
                         position: 'absolute', inset: 0, zIndex: 2,
@@ -1540,8 +1602,12 @@ export default function Workspace() {
                       <DetectionBar detection={currentDetection} voiceSupported={voiceSupported} isVoiceListening={isVoiceListening} onExplain={explainMore} onIgnore={handleIgnoreTracked} onConfirm={confirmDetection} onQuickConfirm={handleQuickConfirmTracked} onReportFalsePositive={reportFalsePositive} onRecheck={() => recheck(0.4)} />
                     )}
 
-                    {/* AI bbox overlay on top of video */}
-                    {currentDetection && (() => {
+                    {/* AI bbox overlay on the LIVE video. Suppressed while the
+                        freeze-frame (frame_b64) is shown — that image already has
+                        the backend box baked in; a second % overlay would be
+                        misaligned (frame_b64 is a viewport crop, not the full
+                        1920×1080 canvas the bbox % refers to). */}
+                    {currentDetection && !(pipelineState === 'PAUSED_WAITING_INPUT' && currentDetection.frame_b64) && (() => {
                       const _c = bboxColorFor(currentDetection.label);
                       const _flip = currentDetection.bbox.y < 6;
                       return (
@@ -1569,6 +1635,19 @@ export default function Workspace() {
                         </BboxOverlay>
                       );
                     })()}
+
+                    {/* Label badge while the freeze-frame is shown: frame_b64
+                        already has the box but no label chip, so add one here. */}
+                    {pipelineState === 'PAUSED_WAITING_INPUT' && currentDetection?.frame_b64 && (
+                      <Box sx={{ position: 'absolute', top: 12, left: 0, right: 0, zIndex: 3, display: 'flex', justifyContent: 'center', pointerEvents: 'none' }}>
+                        <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.75, px: 1.5, py: 0.5, borderRadius: '999px', backgroundColor: rgba(bboxColorFor(currentDetection.label), 0.95), color: '#fff', boxShadow: '0 2px 10px rgba(0,0,0,0.3)' }}>
+                          <Box sx={{ width: 7, height: 7, borderRadius: '50%', backgroundColor: '#fff' }} />
+                          <Typography sx={{ fontSize: '0.78rem', fontWeight: 700 }}>
+                            {currentDetection.label} · {(currentDetection.confidence * 100).toFixed(0)}%
+                          </Typography>
+                        </Box>
+                      </Box>
+                    )}
                   </VideoContainer>
                 ) : (
                   <VideoPickerTriggerZone onClick={() => setIsSourceModalOpen(true)} />
@@ -1819,7 +1898,7 @@ export default function Workspace() {
               )}
 
               {/* LLM Smart Log — memoized leaf (subscribes to LLM stream). */}
-              <LlmSmartLog currentDetection={currentDetection} />
+              <LlmSmartLog currentDetection={currentDetection} onApplyAnalysis={handleApplyAnalysisModal} />
             </Box>
           </Grid>
         </Grid>
