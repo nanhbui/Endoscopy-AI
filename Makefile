@@ -308,6 +308,9 @@ sync: _require-vpn
 		--exclude='Dockerfile*' \
 		--exclude='deploy/' \
 		--exclude='vendor/' \
+		--exclude='GRADUATION_THESIS_TEMPLATE__ENG_VER_/' \
+		--exclude='plans/' \
+		--exclude='docs/' \
 		$(ROOT)/ $(GPU_USER)@$(GPU_HOST):$(REMOTE_DIR)/
 	@echo "$(GREEN)✔ Sync complete$(RESET) $(YELLOW)(server .env left untouched — run 'make sync-env' to push local .env)$(RESET)"
 
