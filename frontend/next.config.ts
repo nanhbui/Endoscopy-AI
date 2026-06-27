@@ -4,6 +4,12 @@ const nextConfig: NextConfig = {
   // Produces a self-contained bundle for Docker: node server.js
   output: 'standalone',
 
+  experimental: {
+    // Upload videos through the same-origin /api proxy. Next defaults to 10MB,
+    // which cuts larger mp4 uploads before FastAPI can finish reading them.
+    proxyClientMaxBodySize: '2gb',
+  },
+
   // Allow dev requests from the public tunnel host (Next dev blocks cross-origin
   // /_next/* + HMR ws from unknown Origin → page renders but client JS is dead).
   // server4 is exposed via Tailscale Funnel (server4.tail145f3.ts.net).
@@ -15,16 +21,18 @@ const nextConfig: NextConfig = {
     '*.ngrok-free.app',
   ],
 
-  // Proxy /api/* to FastAPI backend (development only; Docker uses direct fetch).
-  // Skipped when NEXT_PUBLIC_API_BASE is empty (same-origin behind a reverse
-  // proxy) — there is no external backend URL to point at.
+  // Keep backend private in the Docker network. The browser talks only to the
+  // frontend origin; Next forwards API and WebSocket paths to FastAPI.
   async rewrites() {
-    const apiBase = process.env.NEXT_PUBLIC_API_BASE ?? 'http://localhost:8001';
-    if (!apiBase) return [];
+    const backendUrl = process.env.BACKEND_INTERNAL_URL ?? 'http://backend:8001';
     return [
       {
         source: '/api/:path*',
-        destination: `${apiBase}/:path*`,
+        destination: `${backendUrl}/:path*`,
+      },
+      {
+        source: '/ws/:path*',
+        destination: `${backendUrl}/ws/:path*`,
       },
     ];
   },

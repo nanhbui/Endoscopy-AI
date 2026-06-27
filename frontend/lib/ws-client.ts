@@ -1,39 +1,23 @@
 /**
  * ws-client.ts — Typed WebSocket wrapper for the endoscopy analysis server.
  *
- * Connects to: ws://localhost:8001/ws/analysis/{videoId}
- * Upload via:  POST http://localhost:8001/upload
+ * Browser traffic stays same-origin:
+ *   HTTP      /api/*  -> Next rewrite -> http://backend:8001/*
+ *   WebSocket /ws/*   -> Next rewrite -> http://backend:8001/ws/*
+ *
+ * This lets the backend stay private inside the Docker network while a gateway
+ * only exposes the frontend port.
  */
 
-// Backend base URL. If NEXT_PUBLIC_API_BASE is baked at build time, use it.
-// Otherwise (the portable default) derive it from the page's host with the
-// backend on NEXT_PUBLIC_API_PORT (default 8003) — so ONE published image works
-// on ANY single-host deploy (backend + frontend on the same server, different
-// ports). Override the port via the NEXT_PUBLIC_API_PORT build-arg.
-const API_PORT = process.env.NEXT_PUBLIC_API_PORT || "8003";
-function resolveApiBase(): string {
-  const explicit = process.env.NEXT_PUBLIC_API_BASE;
-  // "same-origin": call RELATIVE paths on whatever host served the page; a
-  // reverse proxy (Caddy) routes /upload, /ws/*, … to the backend. Lets ONE
-  // build work via funnel, tailnet, LAN — any address — without rebaking a host.
-  if (explicit === "same-origin") return "";
-  // Explicit absolute base (e.g. a baked funnel URL) → use as-is.
-  if (explicit) return explicit;
-  // Default single-host deploy: backend on a sibling port (docker FE:3000/BE:8003).
-  if (typeof window !== "undefined") {
-    return `${window.location.protocol}//${window.location.hostname}:${API_PORT}`;
-  }
-  return `http://localhost:${API_PORT}`; // SSR fallback — the client re-resolves in the browser
+export const API_BASE = "/api";
+
+function resolveWsBase(): string {
+  if (typeof window === "undefined") return "ws://localhost:3000";
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.host}`;
 }
 
-export const API_BASE = resolveApiBase();
-// ws/wss base. For same-origin (API_BASE==="") derive an ABSOLUTE ws(s):// URL
-// from the page so the scheme tracks http/https; otherwise swap http→ws.
-export const WS_BASE = API_BASE
-  ? API_BASE.replace(/^http/, "ws")
-  : (typeof window !== "undefined"
-      ? `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}`
-      : "");
+export const WS_BASE = resolveWsBase();
 
 // Skip ngrok's browser-warning interstitial for fetch + XHR when API goes via ngrok.
 if (typeof window !== "undefined" && API_BASE.includes("ngrok") && !(window as unknown as { __NGROK_PATCHED__?: boolean }).__NGROK_PATCHED__) {
