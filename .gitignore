@@ -14,6 +14,8 @@ libtorch/
 *.pt
 *.pth
 *.onnx
+# faster-whisper weights (CTranslate2) — shipped via the backend image build, not git
+models/faster-whisper-*/
 
 # Vendored UTR-Track boxmot fork (copied in at build time, not committed)
 vendor/boxmot/

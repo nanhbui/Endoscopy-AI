@@ -48,12 +48,13 @@ services:
     command:
       - >
         ollama pull bge-m3 &&
+        ollama pull qwen2.5:7b-instruct &&
         (ollama pull medgemma-4b ||
          echo 'WARN: medgemma-4b not pullable — provide it once: ollama create medgemma-4b -f Modelfile (persists in ollama_models).')
     restart: "no"
 
   backend:
-    image: docker.io/ngocanh031004/endoscopy-backend:v1
+    image: docker.io/ngocanh031004/endoscopy-backend:v3
     container_name: endoscopy-backend
     restart: unless-stopped
     ports:
@@ -93,7 +94,7 @@ services:
       start_period: 40s
 
   frontend:
-    image: docker.io/ngocanh031004/endoscopy-frontend:v1
+    image: docker.io/ngocanh031004/endoscopy-frontend:v3
     container_name: endoscopy-frontend
     restart: unless-stopped
     ports:

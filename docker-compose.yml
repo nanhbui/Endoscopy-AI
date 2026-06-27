@@ -60,6 +60,7 @@ services:
     command:
       - >
         ollama pull bge-m3 &&
+        ollama pull qwen2.5:7b-instruct &&
         (ollama pull medgemma-4b ||
          echo 'WARN: medgemma-4b not pullable from a public registry — provide it manually, e.g. ollama create medgemma-4b -f Modelfile; it then persists in the ollama_models volume.')
     restart: "no"
@@ -120,6 +121,8 @@ services:
         # Empty → the bundle derives the backend URL from its own host:8001 at
         # runtime, so the image is not pinned to any IP. CORS is "*" on the backend.
         NEXT_PUBLIC_API_BASE: ""
+        # Voice commands (mic) on by default; build with "false" to ship without it.
+        NEXT_PUBLIC_VOICE_ENABLED: "true"
     container_name: endoscopy-frontend
     restart: unless-stopped
     ports:

@@ -13,7 +13,13 @@
 const API_PORT = process.env.NEXT_PUBLIC_API_PORT || "8003";
 function resolveApiBase(): string {
   const explicit = process.env.NEXT_PUBLIC_API_BASE;
+  // "same-origin": call RELATIVE paths on whatever host served the page; a
+  // reverse proxy (Caddy) routes /upload, /ws/*, … to the backend. Lets ONE
+  // build work via funnel, tailnet, LAN — any address — without rebaking a host.
+  if (explicit === "same-origin") return "";
+  // Explicit absolute base (e.g. a baked funnel URL) → use as-is.
   if (explicit) return explicit;
+  // Default single-host deploy: backend on a sibling port (docker FE:3000/BE:8003).
   if (typeof window !== "undefined") {
     return `${window.location.protocol}//${window.location.hostname}:${API_PORT}`;
   }
@@ -21,8 +27,13 @@ function resolveApiBase(): string {
 }
 
 export const API_BASE = resolveApiBase();
-// ws:// or wss:// tracks the page's http/https automatically.
-export const WS_BASE = API_BASE.replace(/^http/, "ws");
+// ws/wss base. For same-origin (API_BASE==="") derive an ABSOLUTE ws(s):// URL
+// from the page so the scheme tracks http/https; otherwise swap http→ws.
+export const WS_BASE = API_BASE
+  ? API_BASE.replace(/^http/, "ws")
+  : (typeof window !== "undefined"
+      ? `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}`
+      : "");
 
 // Skip ngrok's browser-warning interstitial for fetch + XHR when API goes via ngrok.
 if (typeof window !== "undefined" && API_BASE.includes("ngrok") && !(window as unknown as { __NGROK_PATCHED__?: boolean }).__NGROK_PATCHED__) {

@@ -23,6 +23,11 @@ COPY frontend/ .
 ARG NEXT_PUBLIC_API_BASE=http://backend:8003
 ENV NEXT_PUBLIC_API_BASE=${NEXT_PUBLIC_API_BASE}
 
+# Voice commands (mic) — baked into the client bundle at build time. Default on;
+# override with --build-arg NEXT_PUBLIC_VOICE_ENABLED=false to ship without mic UI.
+ARG NEXT_PUBLIC_VOICE_ENABLED=true
+ENV NEXT_PUBLIC_VOICE_ENABLED=${NEXT_PUBLIC_VOICE_ENABLED}
+
 RUN npm run build
 
 # ── Stage 3: Runtime ──────────────────────────────────────────────────────────

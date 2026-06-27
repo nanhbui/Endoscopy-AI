@@ -21,10 +21,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     portaudio19-dev \
     curl \
-    && rm -rf /var/lib/apt/lists/*
+    cuda-cupti-11-8 \
+    && rm -rf /var/lib/apt/lists/* \
+    && ldconfig
 
 WORKDIR /app
 COPY requirements.txt .
+# Install torch/torchvision built for CUDA 11.8 FIRST — matching this cu11.8 base
+# image. The default PyPI wheels bundle CUDA 12 → mismatch (torch.cuda fails /
+# crashes). With these pinned cu118 wheels already present, requirements.txt's
+# torch>=2.0.0 is satisfied and pip won't pull the wrong (cu12) build.
+RUN pip3 install --no-cache-dir \
+      torch==2.3.1+cu118 torchvision==0.18.1+cu118 \
+      --index-url https://download.pytorch.org/whl/cu118
 RUN pip3 install --no-cache-dir -r requirements.txt
 
 # ── Stage 2: Runtime image ────────────────────────────────────────────────────
@@ -53,7 +62,9 @@ ENV HOST=0.0.0.0 \
     ENDOSCOPY_TRACKER=tlukf \
     ENDOSCOPY_REID=/app/models/osnet_dcn_x0_5_endocv.pt \
     ENDOSCOPY_UPLOAD_DIR=/data/uploads \
-    PIPELINE_DIR=/app/src/backend/pipeline
+    PIPELINE_DIR=/app/src/backend/pipeline \
+    VOICE_WHISPER_MODEL=/app/models/faster-whisper-small \
+    VOICE_WHISPER_DEVICE=auto
 
 # Data dirs (mount points for named volumes)
 RUN mkdir -p /data/uploads /data/library /data/db
