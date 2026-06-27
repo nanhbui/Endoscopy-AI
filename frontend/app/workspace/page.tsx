@@ -1063,16 +1063,22 @@ export default function Workspace() {
         if (intent === 'BO_QUA') ignoreDetection();
         else if (intent === 'GIAI_THICH') explainMore();
         else if (intent === 'XAC_NHAN') confirmDetection();
+        else if (intent === 'KIEM_TRA_LAI') recheck(0.4);
         else if (intent === 'UNKNOWN' && llmInsightRef.current) followUpChat(transcript);
-      }, [ignoreDetection, explainMore, confirmDetection, followUpChat]),
+      }, [ignoreDetection, explainMore, confirmDetection, recheck, followUpChat]),
     });
 
-  // Auto-activate mic when pipeline pauses on a detection (hands-free workflow)
+  // Mic is on ONLY while paused on a detection (hands-free): turn it on when the
+  // pipeline pauses, off as soon as it resumes — so server-side transcription only
+  // runs while a command is actually expected.
   useEffect(() => {
-    if (pipelineState === 'PAUSED_WAITING_INPUT' && voiceSupported && !isVoiceListening) {
-      startListening();
+    if (!voiceSupported) return;
+    if (pipelineState === 'PAUSED_WAITING_INPUT') {
+      if (!isVoiceListening) startListening();
+    } else if (isVoiceListening) {
+      stopListening();
     }
-  }, [pipelineState, voiceSupported, isVoiceListening, startListening]);
+  }, [pipelineState, voiceSupported, isVoiceListening, startListening, stopListening]);
 
   // Analysis is "active" (a session in progress) — used to guard against losing
   // it on navigation / tab close. EOS_SUMMARY is the report stage, not active.
