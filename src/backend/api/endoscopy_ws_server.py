@@ -1297,6 +1297,31 @@ async def stream_library_video(library_id: str):
     return FileResponse(str(serve_path), media_type=media_type)
 
 
+@app.get("/library/{library_id}/download")
+async def download_library_video(library_id: str):
+    """Download the ORIGINAL library file to the client's machine.
+
+    Serves the original recording (not the proxy) with a Content-Disposition
+    attachment header — set by FileResponse's ``filename`` — so the browser saves
+    it under its real name instead of playing it inline. Used by the recordings
+    list's "Tải về" button.
+    """
+    from fastapi.responses import FileResponse
+    entry = next((e for e in _library.load_index() if e.get("library_id") == library_id), None)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Library video not found")
+    original = _library.resolve_path(entry)
+    if not original.exists():
+        raise HTTPException(status_code=404, detail="Video file not found")
+    media_type = {
+        ".mp4": "video/mp4", ".mov": "video/quicktime",
+        ".avi": "video/x-msvideo", ".mkv": "video/x-matroska",
+        ".webm": "video/webm",
+    }.get(original.suffix.lower(), "application/octet-stream")
+    return FileResponse(str(original), media_type=media_type,
+                        filename=entry.get("filename") or original.name)
+
+
 @app.get("/sessions")
 async def list_sessions():
     """DB-backed session history for the Report page. Durable across browser

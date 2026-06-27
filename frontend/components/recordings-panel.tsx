@@ -10,7 +10,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Clock, HardDrive, Loader2, Play, Radio, Trash2 } from 'lucide-react';
+import { Clock, Download, HardDrive, Loader2, Play, Radio, Trash2 } from 'lucide-react';
 import Box, { type BoxProps } from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
 import MuiButton from '@mui/material/Button';
@@ -18,6 +18,7 @@ import CircularProgress from '@mui/material/CircularProgress';
 import LinearProgress from '@mui/material/LinearProgress';
 import {
   deleteLibraryVideo,
+  libraryDownloadUrl,
   libraryVideoUrl,
   listLibraryVideos,
   type LibraryVideo,
@@ -59,6 +60,17 @@ export function RecordingsPanel({ onSelect, sx }: RecordingsPanelProps) {
   useEffect(() => {
     if (upload.status === 'done') fetchRecordings();
   }, [upload.status, fetchRecordings]);
+
+  const handleDownload = useCallback((v: LibraryVideo) => {
+    // The backend sets Content-Disposition: attachment, so a plain anchor click
+    // saves the file (works cross-origin where the download attr alone wouldn't).
+    const a = document.createElement('a');
+    a.href = libraryDownloadUrl(v.library_id);
+    a.download = v.filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }, []);
 
   const handleDelete = useCallback(async (libraryId: string) => {
     setConfirmDeleteId(null);
@@ -179,6 +191,11 @@ export function RecordingsPanel({ onSelect, sx }: RecordingsPanelProps) {
                         onClick={() => setPlayingId(v.library_id)}
                         sx={{ borderRadius: '7px', borderColor: '#00838F', color: '#00838F', fontWeight: 700, fontSize: '0.72rem', py: 0.4, px: 1, whiteSpace: 'nowrap', '&:hover': { backgroundColor: 'rgba(0,131,143,0.06)' } }}>
                         Xem lại
+                      </MuiButton>
+                      <MuiButton size="small" variant="outlined" startIcon={<Download size={13} />}
+                        onClick={() => handleDownload(v)}
+                        sx={{ borderRadius: '7px', borderColor: '#0277BD', color: '#0277BD', fontWeight: 700, fontSize: '0.72rem', py: 0.4, px: 1, whiteSpace: 'nowrap', '&:hover': { backgroundColor: 'rgba(2,119,189,0.06)' } }}>
+                        Tải về
                       </MuiButton>
                       <MuiButton size="small" variant="contained" onClick={() => onSelect(v.library_id, v.filename)}
                         sx={{ borderRadius: '7px', backgroundColor: '#006064', fontWeight: 700, fontSize: '0.72rem', py: 0.4, px: 1, whiteSpace: 'nowrap', '&:hover': { backgroundColor: '#004D52' } }}>

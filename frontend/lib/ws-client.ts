@@ -271,6 +271,11 @@ export function libraryVideoUrl(libraryId: string): string {
   return `${API_BASE}/library/${libraryId}/video`;
 }
 
+/** Download URL for the original library file (Content-Disposition: attachment). */
+export function libraryDownloadUrl(libraryId: string): string {
+  return `${API_BASE}/library/${libraryId}/download`;
+}
+
 /**
  * Upload a finished live-session recording (webm Blob) to the library, tagged
  * with source=live_recording so it shows under "Bản ghi trực tiếp".
