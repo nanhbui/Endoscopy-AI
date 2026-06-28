@@ -1283,6 +1283,11 @@ def _pipeline_worker(video_path_str: str, model_path_str: str, conf: float,
                                 "track_id": int(track_id),    # StrongSORT id, stable per-lesion within session
                             },
                             "frame_b64": thumbnail_b64,
+                            # Whole-frame snapshot (no crop) so the FE freeze-frame
+                            # overlay fits the <video> exactly and the bbox % (which
+                            # refers to the full 1920×1080 canvas) aligns on top.
+                            # frame_b64 above stays the viewport crop (thumbnail/VLM).
+                            "frame_b64_full": _encode_full_frame_b64(frame),
                         }
                         _reported_history.append({"ts_ms": timestamp_ms, "bbox": xyxy_norm, "label": label})
                         # Record the id only when track-id dedup is actually active

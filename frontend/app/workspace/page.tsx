@@ -1033,12 +1033,27 @@ export default function Workspace() {
     }
   }, [pipelineState, videoUrl]);
 
-  // NOTE: we deliberately do NOT seek the <video> to the detection timestamp.
-  // Seeking the STREAMED proxy re-buffers for ~30s (the browser must fetch +
-  // decode from a far keyframe — slow even on LAN, since it's a stream not a
-  // local file). Instead the paused view overlays the detection's frame_b64
-  // image (which already carries the backend box) INSTANTLY — see the
-  // freeze-frame <img> in the video render below.
+  // Seek the <video> back to the EXACT detection frame whenever we pause on a
+  // detection. The streamed <video> plays its own timeline and — because the
+  // DETECTION_FOUND event reaches the FE a few seconds late over the funnel —
+  // has drifted PAST the detection frame by the time it pauses. Without this
+  // seek, "Xác nhận" resumes from the drifted-ahead position and skips the
+  // 0:09→now gap, so the video does NOT continue from the lesion frame.
+  //
+  // Seeking a streamed proxy re-buffers (slow — fetch+decode from a far
+  // keyframe), but the freeze-frame <img> covers the <video> the whole time it
+  // is paused, so the re-buffer happens HIDDEN behind the still image while the
+  // user reads the report. On resume the <video> is already positioned at the
+  // detection frame and plays forward from there.
+  useEffect(() => {
+    if (!videoRef.current || !videoUrl || !currentDetection) return;
+    if (pipelineState !== 'PAUSED_WAITING_INPUT' && pipelineState !== 'PROCESSING_LLM') return;
+    const targetTime = currentDetection.timestamp;
+    // Only seek when drift > 0.1s — avoids redundant micro-seeks for already-synced events.
+    if (Math.abs(videoRef.current.currentTime - targetTime) > 0.1) {
+      videoRef.current.currentTime = targetTime;
+    }
+  }, [currentDetection, pipelineState, videoUrl]);
 
   // Refs so onIntent callback always reads current state without stale closure
   const pipelineStateRef = useRef(pipelineState);
@@ -1523,10 +1538,10 @@ export default function Workspace() {
                 ) : libraryReady && !videoUrl ? (
                   /* Library video active but stream URL not yet set — show spinner fallback */
                   <VideoContainer>
-                    {currentDetection?.frame_b64 ? (
+                    {(currentDetection?.frame_b64_full || currentDetection?.frame_b64) ? (
                       <Box
                         component="img"
-                        src={`data:image/jpeg;base64,${currentDetection.frame_b64}`}
+                        src={`data:image/jpeg;base64,${currentDetection.frame_b64_full ?? currentDetection.frame_b64}`}
                         sx={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', zIndex: 1 }}
                       />
                     ) : (
@@ -1577,14 +1592,18 @@ export default function Workspace() {
                         pointerEvents: 'none',  // block click-to-pause + scrub
                       }}
                     />
-                    {/* Freeze-frame on pause: show the exact lesion frame
-                        (frame_b64 — already drawn with the backend box) instantly,
+                    {/* Freeze-frame on pause: show the exact lesion frame instantly,
                         covering the streamed <video> so the user never waits for a
-                        slow seek/re-buffer. Replaces the old video-seek approach. */}
-                    {pipelineState === 'PAUSED_WAITING_INPUT' && currentDetection?.frame_b64 && (
+                        slow seek/re-buffer. Uses frame_b64_full (whole frame, no crop)
+                        so it FITS the <video> exactly — the bbox % overlay below then
+                        aligns on top. Falls back to the viewport crop for older BE.
+                        Kept visible through PROCESSING_LLM too (clicking "Giải thích"
+                        changes the state but the detection frame must stay — otherwise
+                        the frozen lesion frame vanishes while the LLM streams). */}
+                    {(pipelineState === 'PAUSED_WAITING_INPUT' || pipelineState === 'PROCESSING_LLM') && (currentDetection?.frame_b64_full || currentDetection?.frame_b64) && (
                       <Box
                         component="img"
-                        src={`data:image/jpeg;base64,${currentDetection.frame_b64}`}
+                        src={`data:image/jpeg;base64,${currentDetection.frame_b64_full ?? currentDetection.frame_b64}`}
                         sx={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', zIndex: 2 }}
                       />
                     )}
@@ -1608,12 +1627,12 @@ export default function Workspace() {
                       <DetectionBar detection={currentDetection} voiceSupported={voiceSupported} isVoiceListening={isVoiceListening} onExplain={explainMore} onIgnore={handleIgnoreTracked} onConfirm={confirmDetection} onQuickConfirm={handleQuickConfirmTracked} onReportFalsePositive={reportFalsePositive} onRecheck={() => recheck(0.4)} />
                     )}
 
-                    {/* AI bbox overlay on the LIVE video. Suppressed while the
-                        freeze-frame (frame_b64) is shown — that image already has
-                        the backend box baked in; a second % overlay would be
-                        misaligned (frame_b64 is a viewport crop, not the full
-                        1920×1080 canvas the bbox % refers to). */}
-                    {currentDetection && !(pipelineState === 'PAUSED_WAITING_INPUT' && currentDetection.frame_b64) && (() => {
+                    {/* AI bbox overlay — drawn on the LIVE video AND on the paused
+                        freeze-frame. The freeze image is now the full 1920×1080
+                        frame (frame_b64_full), the same canvas the bbox % refers to,
+                        so the box aligns in both states. zIndex 3 keeps it above the
+                        freeze <img> (zIndex 2). */}
+                    {currentDetection && (() => {
                       const _c = bboxColorFor(currentDetection.label);
                       const _flip = currentDetection.bbox.y < 6;
                       return (
@@ -1622,7 +1641,7 @@ export default function Workspace() {
                           animate={{ opacity: 1, scale: 1 }}
                           transition={{ duration: 0.2 }}
                           sx={{
-                            zIndex: 2,
+                            zIndex: 3,
                             left: `${currentDetection.bbox.x}%`,
                             top: `${currentDetection.bbox.y}%`,
                             width: `${currentDetection.bbox.width}%`,
@@ -1642,18 +1661,6 @@ export default function Workspace() {
                       );
                     })()}
 
-                    {/* Label badge while the freeze-frame is shown: frame_b64
-                        already has the box but no label chip, so add one here. */}
-                    {pipelineState === 'PAUSED_WAITING_INPUT' && currentDetection?.frame_b64 && (
-                      <Box sx={{ position: 'absolute', top: 12, left: 0, right: 0, zIndex: 3, display: 'flex', justifyContent: 'center', pointerEvents: 'none' }}>
-                        <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.75, px: 1.5, py: 0.5, borderRadius: '999px', backgroundColor: rgba(bboxColorFor(currentDetection.label), 0.95), color: '#fff', boxShadow: '0 2px 10px rgba(0,0,0,0.3)' }}>
-                          <Box sx={{ width: 7, height: 7, borderRadius: '50%', backgroundColor: '#fff' }} />
-                          <Typography sx={{ fontSize: '0.78rem', fontWeight: 700 }}>
-                            {currentDetection.label} · {(currentDetection.confidence * 100).toFixed(0)}%
-                          </Typography>
-                        </Box>
-                      </Box>
-                    )}
                   </VideoContainer>
                 ) : (
                   <VideoPickerTriggerZone onClick={() => setIsSourceModalOpen(true)} />

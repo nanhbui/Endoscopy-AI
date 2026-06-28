@@ -90,6 +90,9 @@ export interface Detection {
    *  flow. Undefined for live captures (persisted by list index at finalize). */
   frame_index?: number;
   frame_b64?: string;
+  /** Whole-frame snapshot (no crop) for the paused freeze-frame overlay — fits
+   *  the <video> exactly so the bbox % aligns. frame_b64 stays the viewport crop. */
+  frame_b64_full?: string;
   /** Markdown rendering of the structured lesion report (legacy fallback +
    *  Phase A bridge). Kept for ReactMarkdown surfaces and history that
    *  predate <LesionReportCard>. */
@@ -317,6 +320,7 @@ function toDetection(d: DetectionData): Detection {
     trackId: d.lesion.track_id,
     frame_index: d.frame_index,
     frame_b64: d.frame_b64,
+    frame_b64_full: d.frame_b64_full,
   };
 }
 

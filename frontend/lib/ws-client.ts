@@ -53,6 +53,9 @@ export interface DetectionData {
     track_id?: number;
   };
   frame_b64?: string;
+  /** Whole-frame snapshot (no crop). Used for the paused freeze-frame overlay so
+   *  it fits the <video> exactly and the bbox % aligns on top. */
+  frame_b64_full?: string;
 }
 
 // Phase 3 — guideline citation shape (Phase 2 persists these into report/summary JSON).
